@@ -1,6 +1,8 @@
 import Foundation
 
 public enum ModelLoadError: Error, Sendable, Equatable {
+    case unsupportedFormat(String)
+    case unknownArchitecture(String)
     case loadFailed(description: String)
 }
 
