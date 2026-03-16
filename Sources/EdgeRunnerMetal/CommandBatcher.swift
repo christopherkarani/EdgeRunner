@@ -1,15 +1,13 @@
 import Metal
 
-public final class CommandBatcher: @unchecked Sendable {
-    // @unchecked: MTLCommandBuffer/Encoder are Obj-C protocols.
-    // Access serialized through MetalBackend actor.
+final class CommandBatcher {
     private let commandQueue: MTLCommandQueue
     private let maxOpsPerBuffer: Int
     private var currentCommandBuffer: MTLCommandBuffer?
     private var currentEncoder: MTLComputeCommandEncoder?
     private var currentOpCount: Int = 0
 
-    public init(commandQueue: MTLCommandQueue, device: MTLDevice) {
+    init(commandQueue: MTLCommandQueue, device: MTLDevice) {
         self.commandQueue = commandQueue
         if device.supportsFamily(.apple9) {
             self.maxOpsPerBuffer = 50
@@ -20,7 +18,7 @@ public final class CommandBatcher: @unchecked Sendable {
         }
     }
 
-    public func encoder() -> (MTLCommandBuffer, MTLComputeCommandEncoder) {
+    func encoder() -> (MTLCommandBuffer, MTLComputeCommandEncoder) {
         if currentOpCount >= maxOpsPerBuffer { flush() }
         if currentCommandBuffer == nil {
             currentCommandBuffer = commandQueue.makeCommandBuffer()!
@@ -30,7 +28,7 @@ public final class CommandBatcher: @unchecked Sendable {
         return (currentCommandBuffer!, currentEncoder!)
     }
 
-    public func flush() {
+    func flush() {
         currentEncoder?.endEncoding()
         currentCommandBuffer?.commit()
         currentCommandBuffer = nil
@@ -38,7 +36,7 @@ public final class CommandBatcher: @unchecked Sendable {
         currentOpCount = 0
     }
 
-    public func flushAndWait() {
+    func flushAndWait() {
         currentEncoder?.endEncoding()
         if let buffer = currentCommandBuffer {
             buffer.commit()

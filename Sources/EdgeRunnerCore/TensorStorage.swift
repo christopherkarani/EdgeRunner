@@ -1,13 +1,11 @@
 import Metal
 import EdgeRunnerMetal
 
-final class TensorStorage: @unchecked Sendable {
-    // @unchecked: MTLBuffer is Obj-C protocol, not marked Sendable,
-    // but thread-safe for concurrent reads. Mutations via actor-isolated MetalBackend.
-    let buffer: MTLBuffer
+final class TensorStorage: Sendable {
+    let buffer: MetalBufferHandle
     let byteCount: Int
 
-    init(buffer: MTLBuffer) {
+    init(buffer: MetalBufferHandle) {
         self.buffer = buffer
         self.byteCount = buffer.length
     }
@@ -24,7 +22,7 @@ final class TensorStorage: @unchecked Sendable {
         ) else {
             fatalError("Failed to allocate buffer of size \(byteCount)")
         }
-        return TensorStorage(buffer: buffer)
+        return TensorStorage(buffer: MetalBufferHandle(buffer))
     }
 
     static func zeros(byteCount: Int) -> TensorStorage {
@@ -37,7 +35,7 @@ final class TensorStorage: @unchecked Sendable {
         ) else {
             fatalError("Failed to allocate buffer of size \(byteCount)")
         }
-        return TensorStorage(buffer: buffer)
+        return TensorStorage(buffer: MetalBufferHandle(buffer))
     }
 
     func toArray<T: TensorScalar>(count: Int) -> [T] {
@@ -56,6 +54,6 @@ final class TensorStorage: @unchecked Sendable {
         ) else {
             fatalError("Failed to copy buffer")
         }
-        return TensorStorage(buffer: newBuffer)
+        return TensorStorage(buffer: MetalBufferHandle(newBuffer))
     }
 }

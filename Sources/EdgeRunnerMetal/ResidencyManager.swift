@@ -1,13 +1,9 @@
 import Metal
 
-public final class ResidencyManager: @unchecked Sendable {
-    // @unchecked: MTLResidencySet is Obj-C protocol, not Sendable.
-    // Access serialized through MetalBackend actor.
+final class ResidencyManager {
     private let residencySet: MTLResidencySet?
-    private let device: MTLDevice
 
-    public init(device: MTLDevice, commandQueue: MTLCommandQueue) {
-        self.device = device
+    init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         let descriptor = MTLResidencySetDescriptor()
         descriptor.initialCapacity = 256
         if let set = try? device.makeResidencySet(descriptor: descriptor) {
@@ -19,13 +15,13 @@ public final class ResidencyManager: @unchecked Sendable {
         }
     }
 
-    public func addBuffer(_ buffer: MTLBuffer) {
+    func addBuffer(_ buffer: MTLBuffer) {
         guard let set = residencySet else { return }
         set.addAllocation(buffer)
         set.commit()
     }
 
-    public func addHeap(_ heap: MTLHeap) {
+    func addHeap(_ heap: MTLHeap) {
         guard let set = residencySet else { return }
         set.addAllocation(heap)
         set.commit()

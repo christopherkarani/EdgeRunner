@@ -9,13 +9,13 @@ public enum MetalBackendError: Error, Sendable {
 public actor MetalBackend {
     public static let shared = MetalBackend()
 
-    public let device: MTLDevice
-    public let commandQueue: MTLCommandQueue
-    public let kernelRegistry: KernelRegistry
-    public let bufferCache: BufferCache
-    public let residencyManager: ResidencyManager
-    public let commandBatcher: CommandBatcher
-    public let barrierTracker: BarrierTracker
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let kernelRegistry: KernelRegistry
+    private let bufferCache: BufferCache
+    private let residencyManager: ResidencyManager
+    private let commandBatcher: CommandBatcher
+    private let barrierTracker: BarrierTracker
 
     public var deviceName: String { device.name }
 
@@ -46,23 +46,23 @@ public actor MetalBackend {
 
     // MARK: - Buffer Management
 
-    public func acquireBuffer(size: Int) -> MTLBuffer {
+    private func acquireBuffer(size: Int) -> MTLBuffer {
         let buffer = bufferCache.acquire(size: size)
         residencyManager.addBuffer(buffer)
         return buffer
     }
 
-    public func recycleBuffer(_ buffer: MTLBuffer) {
+    private func recycleBuffer(_ buffer: MTLBuffer) {
         bufferCache.recycle(buffer)
     }
 
     // MARK: - Kernel Dispatch
 
-    public func pipeline(for name: String) throws -> MTLComputePipelineState {
+    private func pipeline(for name: String) throws -> MTLComputePipelineState {
         try kernelRegistry.pipeline(for: name)
     }
 
-    public func dispatch(
+    private func dispatch(
         pipeline: MTLComputePipelineState,
         buffers: [(MTLBuffer, Int)],
         threadgroups: MTLSize,
