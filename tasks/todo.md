@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M2
-- Current task: Task 12 - Transformer Block Composition (`in_progress`)
+- Current task: Task 13 - GPT-2 Reference Implementation (`in_progress`)
 - Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
 
 ## Checklist
@@ -17,7 +17,7 @@
 - [x] Task 9: LayerNorm Kernel
 - [x] Task 10: Activation Kernels (SwiGLU, GELU, Sigmoid)
 - [x] Task 11: EdgeRunnerModule Protocol
-- [ ] Task 12: Transformer Block Composition
+- [x] Task 12: Transformer Block Composition
 - [ ] Task 13: GPT-2 Reference Implementation
 - [ ] Task 14: Integration Tests & Perplexity Verification
 - [ ] Final verification: `swift build`
