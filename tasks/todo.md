@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M3
-- Current task: Task 12 (`in_progress`)
+- Current task: M3 complete
 - Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
@@ -19,9 +19,12 @@
 - [x] Task 9: Llama 3 architecture
 - [x] Task 10: Convenience load API
 - [x] Task 11: Memory pressure handler
-- [ ] Task 12: End-to-end integration and verification
-- [ ] Final verification: `swift build`
-- [ ] Final verification: `swift test`
+- [x] Task 12: End-to-end integration and verification
+- [x] Final verification: `swift build`
+- [x] Final verification: `swift test`
 
 ## Review
-- Pending.
+- Added end-to-end IO verification suites under `Tests/EdgeRunnerIOTests/`.
+- `swift test --filter "EndToEndLoadTests|PerformanceBenchmarkTests|PerplexityVerificationTests"` passed with 12 tests in 3 suites.
+- `swift test` passed with 269 tests in 51 suites.
+- `swift build` succeeded after Task 12 verification.
