@@ -29,8 +29,10 @@ public struct TransformerBlock: EdgeRunnerModule, Sendable {
 
     private let config: TransformerConfig
     private let layerIndex: Int
-    private let attention: MultiHeadAttention
-    private let feedForward: FeedForward
+    private let attentionForward: @Sendable (AttentionInput) async throws -> [Float]
+    private let attentionParameterStore: [String: any TensorBox]
+    private let feedForwardForward: @Sendable ([Float]) async throws -> [Float]
+    private let feedForwardParameterStore: [String: any TensorBox]
     private let attentionNormWeight: [Float]
     private let ffnNormWeight: [Float]
 
@@ -41,10 +43,38 @@ public struct TransformerBlock: EdgeRunnerModule, Sendable {
     ) throws {
         self.config = config
         self.layerIndex = layerIndex
-        self.attention = try MultiHeadAttention(config: config, zeroWeights: zeroWeights)
-        self.feedForward = try FeedForward(config: config, zeroWeights: zeroWeights)
+        let attention = try MultiHeadAttention(config: config, zeroWeights: zeroWeights)
+        let feedForward = try FeedForward(config: config, zeroWeights: zeroWeights)
+        self.attentionForward = { input in
+            try await attention.forward(input)
+        }
+        self.attentionParameterStore = attention.parameters
+        self.feedForwardForward = { input in
+            try await feedForward.forward(input)
+        }
+        self.feedForwardParameterStore = feedForward.parameters
         self.attentionNormWeight = [Float](repeating: 1.0, count: config.hiddenDim)
         self.ffnNormWeight = [Float](repeating: 1.0, count: config.hiddenDim)
+    }
+
+    init(
+        config: TransformerConfig,
+        layerIndex: Int,
+        attentionForward: @escaping @Sendable (AttentionInput) async throws -> [Float],
+        attentionParameters: [String: any TensorBox] = [:],
+        feedForwardForward: @escaping @Sendable ([Float]) async throws -> [Float],
+        feedForwardParameters: [String: any TensorBox] = [:],
+        attentionNormWeight: [Float]? = nil,
+        ffnNormWeight: [Float]? = nil
+    ) {
+        self.config = config
+        self.layerIndex = layerIndex
+        self.attentionForward = attentionForward
+        self.attentionParameterStore = attentionParameters
+        self.feedForwardForward = feedForwardForward
+        self.feedForwardParameterStore = feedForwardParameters
+        self.attentionNormWeight = attentionNormWeight ?? [Float](repeating: 1.0, count: config.hiddenDim)
+        self.ffnNormWeight = ffnNormWeight ?? [Float](repeating: 1.0, count: config.hiddenDim)
     }
 
     public func forward(_ input: TransformerBlockInput) async throws -> TransformerBlockOutput {
@@ -59,7 +89,7 @@ public struct TransformerBlock: EdgeRunnerModule, Sendable {
             cols: hiddenDim,
             eps: epsilon
         )
-        let attentionOutput = try await attention.forward(
+        let attentionOutput = try await attentionForward(
             AttentionInput(
                 hidden: normalizedAttentionInput,
                 seqLen: sequenceLength,
@@ -75,7 +105,7 @@ public struct TransformerBlock: EdgeRunnerModule, Sendable {
             cols: hiddenDim,
             eps: epsilon
         )
-        let feedForwardOutput = try await feedForward.forward(normalizedFeedForwardInput)
+        let feedForwardOutput = try await feedForwardForward(normalizedFeedForwardInput)
         hidden = zip(hidden, feedForwardOutput).map { $0 + $1 }
 
         return TransformerBlockOutput(hidden: hidden)
@@ -91,10 +121,10 @@ public struct TransformerBlock: EdgeRunnerModule, Sendable {
             data: ffnNormWeight,
             shape: [config.hiddenDim]
         )
-        for (key, value) in attention.parameters {
+        for (key, value) in attentionParameterStore {
             parameters["attention.\(key)"] = value
         }
-        for (key, value) in feedForward.parameters {
+        for (key, value) in feedForwardParameterStore {
             parameters["ffn.\(key)"] = value
         }
         return parameters

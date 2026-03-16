@@ -197,6 +197,34 @@ struct TransformerBlockTests {
         }
     }
 
+    @Test func transformerBlockRespectsStartPosition() async throws {
+        let config = Self.tinyConfig
+        let block = TransformerBlock(
+            config: config,
+            layerIndex: 0,
+            attentionForward: { input in
+                [Float](repeating: Float(input.startPos), count: input.hidden.count)
+            },
+            feedForwardForward: { input in
+                [Float](repeating: 0, count: input.count)
+            }
+        )
+        let sequenceLength = 2
+        let input = (0..<(sequenceLength * config.hiddenDim)).map { Float($0) * 0.01 }
+
+        let outputAtZero = try await block.forward(
+            TransformerBlockInput(hidden: input, seqLen: sequenceLength, startPos: 0)
+        )
+        let outputAtOffset = try await block.forward(
+            TransformerBlockInput(hidden: input, seqLen: sequenceLength, startPos: 7)
+        )
+
+        for index in 0..<input.count {
+            #expect(abs(outputAtZero.hidden[index] - input[index]) < 1e-6)
+            #expect(abs(outputAtOffset.hidden[index] - (input[index] + 7)) < 1e-6)
+        }
+    }
+
     @Test func transformerBlockParameters() throws {
         let config = Self.tinyConfig
         let block = try TransformerBlock(config: config, layerIndex: 0)

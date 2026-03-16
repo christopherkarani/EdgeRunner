@@ -169,7 +169,7 @@ struct KVCacheTests {
             precision: .float32
         )
 
-        let (keyBuffer, valueBuffer) = cache.metalBuffers(layer: 0)
+        let (keyBuffer, valueBuffer) = try cache.metalBuffers(layer: 0)
         #expect(keyBuffer.length == maxSeqLen * numKVHeads * headDim * MemoryLayout<Float>.stride)
         #expect(valueBuffer.length == maxSeqLen * numKVHeads * headDim * MemoryLayout<Float>.stride)
     }
@@ -194,6 +194,27 @@ struct KVCacheTests {
                 return
             }
             Issue.record("Expected precisionMismatch, got \(error)")
+        }
+    }
+
+    @Test func metalBuffersRejectInvalidLayer() throws {
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: 4,
+            numLayers: 1,
+            numKVHeads: 1,
+            headDim: 2,
+            precision: .float32
+        )
+
+        do {
+            _ = try cache.metalBuffers(layer: 1)
+            Issue.record("Expected invalidLayer when requesting non-existent KV cache layer")
+        } catch let error as KVCacheError {
+            if case .invalidLayer(1) = error {
+                return
+            }
+            Issue.record("Expected invalidLayer(1), got \(error)")
         }
     }
 }

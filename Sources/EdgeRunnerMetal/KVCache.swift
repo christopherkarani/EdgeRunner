@@ -172,8 +172,9 @@ public final class KVCache: Sendable {
         return (keys, values)
     }
 
-    public func metalBuffers(layer: Int) -> (MTLBuffer, MTLBuffer) {
-        (keyBuffers[layer].rawValue, valueBuffers[layer].rawValue)
+    public func metalBuffers(layer: Int) throws -> (MTLBuffer, MTLBuffer) {
+        guard (0..<numLayers).contains(layer) else { throw KVCacheError.invalidLayer(layer) }
+        return (keyBuffers[layer].rawValue, valueBuffers[layer].rawValue)
     }
 
     public func cacheParams(layer: Int) throws -> ERKVCacheParams {

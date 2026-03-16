@@ -82,6 +82,28 @@ struct IntegrationTests {
         }
     }
 
+    @Test func chunkedPrefixesMatchFullForward() async throws {
+        let config = Self.tinyConfig
+        let model = try GPT2Model(config: config)
+        let tokenIDs = [1, 5, 10, 15]
+
+        let fullLogits = try await model.forward(tokenIDs)
+
+        for prefixLength in 1...tokenIDs.count {
+            let prefix = Array(tokenIDs.prefix(prefixLength))
+            let prefixLogits = try await model.forward(prefix)
+
+            let fullOffset = (prefixLength - 1) * config.vocabSize
+            let fullSlice = Array(fullLogits[fullOffset..<(fullOffset + config.vocabSize)])
+            let prefixOffset = (prefixLength - 1) * config.vocabSize
+            let prefixSlice = Array(prefixLogits[prefixOffset..<(prefixOffset + config.vocabSize)])
+
+            for index in 0..<config.vocabSize {
+                #expect(abs(fullSlice[index] - prefixSlice[index]) < 1e-5)
+            }
+        }
+    }
+
     @Test func performanceBaseline() async throws {
         let config = Self.tinyConfig
         let model = try GPT2Model(config: config)
