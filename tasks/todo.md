@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M3
-- Current task: Task 9 (`in_progress`)
+- Current task: Task 10 (`in_progress`)
 - Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
@@ -16,7 +16,7 @@
 - [x] Task 6: Q4_K_M dequantisation kernel
 - [x] Task 7: SafeTensor loader
 - [x] Task 8: NPZ loader
-- [ ] Task 9: Llama 3 architecture
+- [x] Task 9: Llama 3 architecture
 - [ ] Task 10: Convenience load API
 - [ ] Task 11: Memory pressure handler
 - [ ] Task 12: End-to-end integration and verification
