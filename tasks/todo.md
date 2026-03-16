@@ -2,14 +2,14 @@
 
 ## Status
 - Current milestone: M3
-- Current task: Task 2 (`in_progress`)
+- Current task: Task 3 (`in_progress`)
 - Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
 - [x] Reconcile repo state against M3 plan and prompt constraints
 - [x] Update task tracker for M3 execution
 - [x] Task 1: EdgeRunnerWeightLoader protocol, WeightMap, ModelConfig
-- [ ] Task 2: GGUF header parser
+- [x] Task 2: GGUF header parser
 - [ ] Task 3: GGUF tensor table and memory mapping
 - [ ] Task 4: Q4_0 dequantisation kernel
 - [ ] Task 5: Q8_0 dequantisation kernel
