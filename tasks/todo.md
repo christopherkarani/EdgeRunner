@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M3
-- Current task: Task 11 (`in_progress`)
+- Current task: Task 12 (`in_progress`)
 - Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
@@ -18,7 +18,7 @@
 - [x] Task 8: NPZ loader
 - [x] Task 9: Llama 3 architecture
 - [x] Task 10: Convenience load API
-- [ ] Task 11: Memory pressure handler
+- [x] Task 11: Memory pressure handler
 - [ ] Task 12: End-to-end integration and verification
 - [ ] Final verification: `swift build`
 - [ ] Final verification: `swift test`
