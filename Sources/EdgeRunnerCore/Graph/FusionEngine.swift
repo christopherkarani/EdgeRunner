@@ -9,7 +9,7 @@ public enum FusionTier: Sendable {
     }
 }
 
-public enum FusionEngine {
+public enum FusionEngine: Sendable {
     private static let hotPathPatterns: Set<String> = [
         "add", "add+relu", "add+sigmoid", "add+gelu", "add+silu",
         "mul", "mul+relu", "mul+sigmoid", "mul+gelu", "mul+silu",

@@ -24,7 +24,7 @@ public struct ThreadgroupConfig: Sendable {
 
 public enum KernelCategory: Sendable { case elementwise, reduction, transpose }
 
-public enum AutoTuner {
+public enum AutoTuner: Sendable {
     public static func config(for category: KernelCategory, elementCount: Int) -> ThreadgroupConfig {
         switch category {
         case .elementwise: return ThreadgroupConfig(width: min(256, elementCount), height: 1, depth: 1)

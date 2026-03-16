@@ -2,35 +2,46 @@ import Foundation
 import Metal
 import Synchronization
 
-public final class KernelRegistry: Sendable {
-    private let library: MTLLibrary
+package struct MetalLibraryHandle: @unchecked Sendable {
+    // @unchecked Sendable is limited to the Metal protocol wrapper.
+    // The wrapped MTLLibrary stays inside package-internal APIs.
+    package let rawValue: MTLLibrary
+}
+
+package struct MetalPipelineHandle: @unchecked Sendable {
+    // @unchecked Sendable is limited to the Metal protocol wrapper.
+    // The wrapped MTLComputePipelineState is cached under Mutex protection.
+    package let rawValue: MTLComputePipelineState
+}
+
+final class KernelRegistry {
+    private let library: MetalLibraryHandle
     private let cache: Mutex<PipelineCache>
     private let device: MTLDevice
 
     /// The compiled Metal library. Exposed for callers that need to create
     /// functions with `MTLFunctionConstantValues` (e.g. fused-pattern kernels).
-    public var metalLibrary: MTLLibrary { library }
+    var metalLibrary: MTLLibrary { library.rawValue }
 
-    // MTLComputePipelineState is not Sendable but Mutex ensures exclusive access.
-    struct PipelineCache: @unchecked Sendable {
-        var entries: [String: MTLComputePipelineState] = [:]
+    private struct PipelineCache: Sendable {
+        var entries: [String: MetalPipelineHandle] = [:]
     }
 
-    public init(device: MTLDevice) throws {
+    init(device: MTLDevice) throws {
         self.device = device
-        self.library = try Self.loadLibrary(device: device)
+        self.library = MetalLibraryHandle(rawValue: try Self.loadLibrary(device: device))
         self.cache = Mutex(PipelineCache())
     }
 
-    public func pipeline(for name: String) throws -> MTLComputePipelineState {
+    func pipeline(for name: String) throws -> MTLComputePipelineState {
         if let cached = cache.withLock({ $0.entries[name] }) {
-            return cached
+            return cached.rawValue
         }
-        guard let function = library.makeFunction(name: name) else {
+        guard let function = library.rawValue.makeFunction(name: name) else {
             throw KernelRegistryError.functionNotFound(name)
         }
         let pipeline = try device.makeComputePipelineState(function: function)
-        cache.withLock { $0.entries[name] = pipeline }
+        cache.withLock { $0.entries[name] = MetalPipelineHandle(rawValue: pipeline) }
         return pipeline
     }
 
@@ -61,7 +72,7 @@ public final class KernelRegistry: Sendable {
     }
 }
 
-public enum KernelRegistryError: Error, Sendable {
+enum KernelRegistryError: Error, Sendable {
     case functionNotFound(String)
     case shaderSourceNotFound
 }

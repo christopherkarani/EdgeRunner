@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ComputeGraph {
+public enum ComputeGraph: Sendable {
     public static let maxFusionDepth = 11
     public static let maxBufferArgs = 31
 

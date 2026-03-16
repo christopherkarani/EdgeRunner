@@ -45,7 +45,7 @@ public struct Tensor<T: TensorScalar>: Sendable {
         _storage.toArray(count: elementCount)
     }
 
-    var metalBuffer: MTLBuffer { _storage.buffer }
+    var metalBuffer: MTLBuffer { _storage.buffer.rawValue }
 
     public func reshape(_ newShape: Shape) throws -> Tensor {
         guard newShape.elementCount == shape.elementCount else {

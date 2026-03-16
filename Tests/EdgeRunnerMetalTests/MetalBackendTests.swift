@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import Metal
 @testable import EdgeRunnerMetal
 
@@ -21,4 +22,56 @@ struct MetalBackendTests {
         let maxThreads = try await backend.pipelineMaxThreads(for: "elementwise_add_float")
         #expect(maxThreads > 0)
     }
+    
+    @Test func publicActorBoundaryKeepsMetalTypesInternal() throws {
+        let source = try loadRepoSource("Sources/EdgeRunnerMetal/MetalBackend.swift")
+
+        #expect(source.contains("public actor MetalBackend"))
+        #expect(source.contains("public var deviceName: String"))
+
+        #expect(!source.contains("public let device: MTLDevice"))
+        #expect(!source.contains("public let commandQueue: MTLCommandQueue"))
+        #expect(!source.contains("public func acquireBuffer(size: Int) -> MTLBuffer"))
+        #expect(!source.contains("public func recycleBuffer(_ buffer: MTLBuffer)"))
+        #expect(!source.contains("public func pipeline(for name: String) throws -> MTLComputePipelineState"))
+        #expect(!source.contains("public func dispatch("))
+    }
+
+    @Test func uncheckedSendableIsRestrictedToMetalWrappers() throws {
+        let sources = try [
+            "Sources/EdgeRunnerMetal/BufferCache.swift",
+            "Sources/EdgeRunnerMetal/KernelRegistry.swift",
+            "Sources/EdgeRunnerMetal/CommandBatcher.swift",
+            "Sources/EdgeRunnerMetal/ResidencyManager.swift",
+            "Sources/EdgeRunnerMetal/BarrierTracker.swift",
+            "Sources/EdgeRunnerCore/TensorStorage.swift",
+        ].map(loadRepoSource)
+
+        for source in sources {
+            #expect(!source.contains("final class CommandBatcher: @unchecked Sendable"))
+            #expect(!source.contains("final class ResidencyManager: @unchecked Sendable"))
+            #expect(!source.contains("final class BarrierTracker: @unchecked Sendable"))
+            #expect(!source.contains("final class TensorStorage: @unchecked Sendable"))
+            #expect(!source.contains("struct CacheState: ~Copyable, @unchecked Sendable"))
+            #expect(!source.contains("struct PipelineCache: @unchecked Sendable"))
+        }
+
+        let bufferCacheSource = try loadRepoSource("Sources/EdgeRunnerMetal/BufferCache.swift")
+        let kernelRegistrySource = try loadRepoSource("Sources/EdgeRunnerMetal/KernelRegistry.swift")
+        let tensorStorageSource = try loadRepoSource("Sources/EdgeRunnerCore/TensorStorage.swift")
+
+        #expect(bufferCacheSource.contains("MetalBufferHandle: @unchecked Sendable"))
+        #expect(kernelRegistrySource.contains("MetalLibraryHandle: @unchecked Sendable"))
+        #expect(kernelRegistrySource.contains("MetalPipelineHandle: @unchecked Sendable"))
+        #expect(tensorStorageSource.contains("let buffer: MetalBufferHandle"))
+    }
+}
+
+private func loadRepoSource(_ relativePath: String) throws -> String {
+    let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let fileURL = repoRoot.appendingPathComponent(relativePath)
+    return try String(contentsOf: fileURL, encoding: .utf8)
 }
