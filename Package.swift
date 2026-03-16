@@ -41,5 +41,9 @@ let package = Package(
             name: "EdgeRunnerMetalTests",
             dependencies: ["EdgeRunnerMetal", "EdgeRunnerSharedTypes"]
         ),
+        .testTarget(
+            name: "EdgeRunnerTests",
+            dependencies: ["EdgeRunner"]
+        ),
     ]
 )

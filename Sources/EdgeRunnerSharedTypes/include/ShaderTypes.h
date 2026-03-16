@@ -25,4 +25,8 @@ typedef struct {
     uint32_t cols;
 } ERTransposeParams;
 
+#include "GEMMParams.h"
+#include "GEMVParams.h"
+#include "SoftmaxParams.h"
+
 #endif /* SHADER_TYPES_H */
