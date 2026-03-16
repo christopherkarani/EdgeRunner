@@ -32,5 +32,6 @@ typedef struct {
 #include "KVCacheParams.h"
 #include "RoPEParams.h"
 #include "RMSNormParams.h"
+#include "LayerNormParams.h"
 
 #endif /* SHADER_TYPES_H */
