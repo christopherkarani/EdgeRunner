@@ -34,7 +34,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EdgeRunnerCoreTests",
-            dependencies: ["EdgeRunnerCore", "EdgeRunnerSharedTypes"]
+            dependencies: ["EdgeRunnerCore", "EdgeRunnerMetal", "EdgeRunnerSharedTypes"]
         ),
         .testTarget(
             name: "EdgeRunnerMetalTests",
