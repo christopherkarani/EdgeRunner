@@ -32,20 +32,28 @@ public final class KernelRegistry: Sendable {
 
     /// Loads the Metal library from the bundle resource.
     /// SwiftPM copies .metal files as resources rather than compiling them,
-    /// so we compile the shader source at runtime.
+    /// so we compile the shader source at runtime by concatenating all .metal files.
     private static func loadLibrary(device: MTLDevice) throws -> MTLLibrary {
         // First try a pre-compiled metallib (e.g. when built with Xcode)
         if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
             return lib
         }
-        // Fall back to runtime compilation from .metal source files
+        // Fall back to runtime compilation — gather all .metal source files in the bundle
         let bundle = Bundle.module
-        guard let metalURL = bundle.url(forResource: "Elementwise", withExtension: "metal") else {
+        let metalURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: nil) ?? []
+        guard !metalURLs.isEmpty else {
             throw KernelRegistryError.shaderSourceNotFound
         }
-        let source = try String(contentsOf: metalURL, encoding: .utf8)
+        // Concatenate all shader sources; each file gets a separator comment for clarity
+        let combinedSource = try metalURLs
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { url -> String in
+                let src = try String(contentsOf: url, encoding: .utf8)
+                return "// --- \(url.lastPathComponent) ---\n" + src
+            }
+            .joined(separator: "\n\n")
         let options = MTLCompileOptions()
-        return try device.makeLibrary(source: source, options: options)
+        return try device.makeLibrary(source: combinedSource, options: options)
     }
 }
 
