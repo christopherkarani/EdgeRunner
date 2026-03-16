@@ -1,29 +1,27 @@
-# Remaining M2 Execution Tracker
+# EdgeRunner M3 Execution Tracker
 
 ## Status
-- Current milestone: M2
-- Current task: M2 remaining tasks complete (`completed`)
-- Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
+- Current milestone: M3
+- Current task: Task 2 (`in_progress`)
+- Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
-- [x] Reconcile repo state against M2 plan
-- [x] Add `EdgeRunnerTests` target scaffolding
-- [x] Task 3: Softmax Kernel
-- [x] Task 4: Flash Attention Forward Pass
-- [x] Task 5: Grouped Query Attention (GQA)
-- [x] Task 6: KV Cache (Ring Buffer)
-- [x] Task 7: RoPE (Rotary Position Embeddings)
-- [x] Task 8: RMSNorm Kernel
-- [x] Task 9: LayerNorm Kernel
-- [x] Task 10: Activation Kernels (SwiGLU, GELU, Sigmoid)
-- [x] Task 11: EdgeRunnerModule Protocol
-- [x] Task 12: Transformer Block Composition
-- [x] Task 13: GPT-2 Reference Implementation
-- [x] Task 14: Integration Tests & Perplexity Verification
-- [x] Final verification: `swift build`
-- [x] Final verification: `swift test`
+- [x] Reconcile repo state against M3 plan and prompt constraints
+- [x] Update task tracker for M3 execution
+- [x] Task 1: EdgeRunnerWeightLoader protocol, WeightMap, ModelConfig
+- [ ] Task 2: GGUF header parser
+- [ ] Task 3: GGUF tensor table and memory mapping
+- [ ] Task 4: Q4_0 dequantisation kernel
+- [ ] Task 5: Q8_0 dequantisation kernel
+- [ ] Task 6: Q4_K_M dequantisation kernel
+- [ ] Task 7: SafeTensor loader
+- [ ] Task 8: NPZ loader
+- [ ] Task 9: Llama 3 architecture
+- [ ] Task 10: Convenience load API
+- [ ] Task 11: Memory pressure handler
+- [ ] Task 12: End-to-end integration and verification
+- [ ] Final verification: `swift build`
+- [ ] Final verification: `swift test`
 
 ## Review
-- `swift build` passes.
-- `swift test` passes with 177 tests across 29 suites.
-- Remaining M2 tasks 3-14 are implemented and committed in sequence.
+- Pending.
