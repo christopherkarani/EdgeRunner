@@ -30,7 +30,7 @@ let package = Package(
         ),
         .target(
             name: "EdgeRunner",
-            dependencies: ["EdgeRunnerCore"],
+            dependencies: ["EdgeRunnerCore", "EdgeRunnerSharedTypes"],
             path: "Sources/EdgeRunner"
         ),
         .testTarget(
