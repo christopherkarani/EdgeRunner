@@ -13,7 +13,7 @@ struct MetalBackendTests {
 
     @Test func acquireAndRecycleBuffer() async throws {
         let backend = MetalBackend.shared
-        let length = await backend.acquireAndRecycleRoundTrip(size: 1024)
+        let length = try await backend.acquireAndRecycleRoundTrip(size: 1024)
         #expect(length >= 1024)
     }
 

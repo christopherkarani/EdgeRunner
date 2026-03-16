@@ -46,8 +46,8 @@ public actor MetalBackend {
 
     // MARK: - Buffer Management
 
-    private func acquireBuffer(size: Int) -> MTLBuffer {
-        let buffer = bufferCache.acquire(size: size)
+    private func acquireBuffer(size: Int) throws -> MTLBuffer {
+        let buffer = try bufferCache.acquire(size: size)
         residencyManager.addBuffer(buffer)
         return buffer
     }
@@ -132,8 +132,8 @@ public actor MetalBackend {
 
     /// Acquires a buffer, checks its length, recycles it, and returns the length.
     /// Keeps the non-Sendable MTLBuffer within the actor boundary.
-    internal func acquireAndRecycleRoundTrip(size: Int) -> Int {
-        let buffer = acquireBuffer(size: size)
+    internal func acquireAndRecycleRoundTrip(size: Int) throws -> Int {
+        let buffer = try acquireBuffer(size: size)
         let length = buffer.length
         recycleBuffer(buffer)
         return length
@@ -141,8 +141,8 @@ public actor MetalBackend {
 
     /// Public API for integration tests: acquires a buffer of at least `size` bytes,
     /// records it with the residency manager, recycles it, and returns the actual length.
-    public func acquireBufferSize(size: Int) -> Int {
-        let buffer = bufferCache.acquire(size: size)
+    public func acquireBufferSize(size: Int) throws -> Int {
+        let buffer = try bufferCache.acquire(size: size)
         residencyManager.addBuffer(buffer)
         let length = buffer.length
         bufferCache.recycle(buffer)

@@ -1,6 +1,12 @@
 import Metal
 import EdgeRunnerMetal
 
+public enum TensorStorageError: Error, Sendable {
+    case metalNotAvailable
+    case allocationFailed(byteCount: Int)
+    case copyFailed
+}
+
 final class TensorStorage: Sendable {
     let buffer: MetalBufferHandle
     let byteCount: Int
@@ -10,30 +16,30 @@ final class TensorStorage: Sendable {
         self.byteCount = buffer.length
     }
 
-    static func from<T: TensorScalar>(_ data: [T]) -> TensorStorage {
+    static func from<T: TensorScalar>(_ data: [T]) throws -> TensorStorage {
         let byteCount = data.count * T.byteSize
         guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
+            throw TensorStorageError.metalNotAvailable
         }
         guard let buffer = device.makeBuffer(
             bytes: data,
             length: byteCount,
             options: [.storageModeShared, .hazardTrackingModeUntracked]
         ) else {
-            fatalError("Failed to allocate buffer of size \(byteCount)")
+            throw TensorStorageError.allocationFailed(byteCount: byteCount)
         }
         return TensorStorage(buffer: MetalBufferHandle(buffer))
     }
 
-    static func zeros(byteCount: Int) -> TensorStorage {
+    static func zeros(byteCount: Int) throws -> TensorStorage {
         guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
+            throw TensorStorageError.metalNotAvailable
         }
         guard let buffer = device.makeBuffer(
             length: byteCount,
             options: [.storageModeShared, .hazardTrackingModeUntracked]
         ) else {
-            fatalError("Failed to allocate buffer of size \(byteCount)")
+            throw TensorStorageError.allocationFailed(byteCount: byteCount)
         }
         return TensorStorage(buffer: MetalBufferHandle(buffer))
     }
@@ -43,16 +49,16 @@ final class TensorStorage: Sendable {
         return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 
-    func copy() -> TensorStorage {
+    func copy() throws -> TensorStorage {
         guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
+            throw TensorStorageError.metalNotAvailable
         }
         guard let newBuffer = device.makeBuffer(
             bytes: buffer.contents(),
             length: byteCount,
             options: [.storageModeShared, .hazardTrackingModeUntracked]
         ) else {
-            fatalError("Failed to copy buffer")
+            throw TensorStorageError.copyFailed
         }
         return TensorStorage(buffer: MetalBufferHandle(newBuffer))
     }

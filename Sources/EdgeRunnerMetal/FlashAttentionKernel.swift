@@ -5,6 +5,7 @@ public final class FlashAttentionKernel: Sendable {
     private let pipelineF32: MTLComputePipelineState
     private let device: MTLDevice
 
+    /// Must match the stack array sizes in FlashAttention.metal (scores[16], probs[16]).
     public static let qBlockSize = 16
     public static let kvBlockSize = 16
 

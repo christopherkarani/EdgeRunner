@@ -107,6 +107,30 @@ public struct MultiHeadAttention: EdgeRunnerModule, Sendable {
         let numKVHeads = config.numKVHeads
         let kvGroupSize = config.kvGroupSize
 
+        let (allQ, allK, allV) = try await projectQKV(input)
+
+        var attentionOutput = [Float](repeating: 0, count: sequenceLength * hiddenDim)
+        let scale = 1.0 / sqrt(Float(headDim))
+
+        for head in 0..<numHeads {
+            let kvHead = head / kvGroupSize
+            computeHeadAttention(
+                head: head, kvHead: kvHead, seqLen: sequenceLength,
+                hiddenDim: hiddenDim, headDim: headDim, numKVHeads: numKVHeads,
+                scale: scale, allQ: allQ, allK: allK, allV: allV,
+                output: &attentionOutput
+            )
+        }
+
+        return try await projectOutput(attentionOutput, seqLen: sequenceLength, hiddenDim: hiddenDim)
+    }
+
+    private func projectQKV(_ input: AttentionInput) async throws -> ([Float], [Float], [Float]) {
+        let sequenceLength = input.seqLen
+        let hiddenDim = config.hiddenDim
+        let headDim = config.headDim
+        let numKVHeads = config.numKVHeads
+
         var allQ: [Float] = []
         var allK: [Float] = []
         var allV: [Float] = []
@@ -118,69 +142,74 @@ public struct MultiHeadAttention: EdgeRunnerModule, Sendable {
             let token = Array(input.hidden[(tokenIndex * hiddenDim)..<((tokenIndex + 1) * hiddenDim)])
             let absolutePosition = input.startPos + tokenIndex
             let q = Self.applyRoPE(
-                try await wq.forward(token),
-                headDim: headDim,
-                position: absolutePosition,
-                theta: config.ropeTheta
+                try await wq.forward(token), headDim: headDim,
+                position: absolutePosition, theta: config.ropeTheta
             )
             let k = Self.applyRoPE(
-                try await wk.forward(token),
-                headDim: headDim,
-                position: absolutePosition,
-                theta: config.ropeTheta
+                try await wk.forward(token), headDim: headDim,
+                position: absolutePosition, theta: config.ropeTheta
             )
-            let v = try await wv.forward(token)
             allQ.append(contentsOf: q)
             allK.append(contentsOf: k)
-            allV.append(contentsOf: v)
+            allV.append(contentsOf: try await wv.forward(token))
         }
+        return (allQ, allK, allV)
+    }
 
-        var attentionOutput = [Float](repeating: 0, count: sequenceLength * hiddenDim)
-        let scale = 1.0 / sqrt(Float(headDim))
+    private func computeHeadAttention(
+        head: Int, kvHead: Int, seqLen: Int,
+        hiddenDim: Int, headDim: Int, numKVHeads: Int,
+        scale: Float, allQ: [Float], allK: [Float], allV: [Float],
+        output: inout [Float]
+    ) {
+        for queryIndex in 0..<seqLen {
+            let qOffset = queryIndex * hiddenDim + head * headDim
+            let qVector = Array(allQ[qOffset..<(qOffset + headDim)])
 
-        for head in 0..<numHeads {
-            let kvHead = head / kvGroupSize
+            let scores = computeAttentionScores(
+                qVector: qVector, queryIndex: queryIndex, seqLen: seqLen,
+                numKVHeads: numKVHeads, kvHead: kvHead, headDim: headDim, scale: scale,
+                allK: allK
+            )
 
-            for queryIndex in 0..<sequenceLength {
-                let qOffset = queryIndex * hiddenDim + head * headDim
-                let qVector = Array(allQ[qOffset..<(qOffset + headDim)])
-
-                var scores = [Float](repeating: 0, count: sequenceLength)
-                for keyIndex in 0..<sequenceLength {
-                    let kOffset = keyIndex * (numKVHeads * headDim) + kvHead * headDim
-                    var dot: Float = 0
-                    for dimension in 0..<headDim {
-                        dot += qVector[dimension] * allK[kOffset + dimension]
-                    }
-                    scores[keyIndex] = dot * scale
-                }
-
-                for keyIndex in 0..<sequenceLength where keyIndex > queryIndex {
-                    scores[keyIndex] = -.infinity
-                }
-
-                let maxScore = scores.max() ?? 0
-                let expScores = scores.map { exp($0 - maxScore) }
-                let sumExp = expScores.reduce(0, +)
-                let probabilities = expScores.map { $0 / sumExp }
-
-                let outputOffset = queryIndex * hiddenDim + head * headDim
-                for valueIndex in 0..<sequenceLength {
-                    let vOffset = valueIndex * (numKVHeads * headDim) + kvHead * headDim
-                    for dimension in 0..<headDim {
-                        attentionOutput[outputOffset + dimension] +=
-                            probabilities[valueIndex] * allV[vOffset + dimension]
-                    }
+            let outputOffset = queryIndex * hiddenDim + head * headDim
+            for valueIndex in 0..<seqLen {
+                let vOffset = valueIndex * (numKVHeads * headDim) + kvHead * headDim
+                for dimension in 0..<headDim {
+                    output[outputOffset + dimension] += scores[valueIndex] * allV[vOffset + dimension]
                 }
             }
         }
+    }
 
+    private func computeAttentionScores(
+        qVector: [Float], queryIndex: Int, seqLen: Int,
+        numKVHeads: Int, kvHead: Int, headDim: Int, scale: Float,
+        allK: [Float]
+    ) -> [Float] {
+        let scores = (0..<seqLen).map { keyIndex -> Float in
+            let kOffset = keyIndex * (numKVHeads * headDim) + kvHead * headDim
+            var dot: Float = 0
+            for dimension in 0..<headDim {
+                dot += qVector[dimension] * allK[kOffset + dimension]
+            }
+            return keyIndex > queryIndex ? -.infinity : dot * scale
+        }
+
+        let maxScore = scores.max() ?? 0
+        let expScores = scores.map { exp($0 - maxScore) }
+        let sumExp = expScores.reduce(0, +)
+        return expScores.map { $0 / sumExp }
+    }
+
+    private func projectOutput(
+        _ attentionOutput: [Float], seqLen: Int, hiddenDim: Int
+    ) async throws -> [Float] {
         var result: [Float] = []
-        result.reserveCapacity(sequenceLength * hiddenDim)
-        for tokenIndex in 0..<sequenceLength {
+        result.reserveCapacity(seqLen * hiddenDim)
+        for tokenIndex in 0..<seqLen {
             let token = Array(attentionOutput[(tokenIndex * hiddenDim)..<((tokenIndex + 1) * hiddenDim)])
-            let projected = try await wo.forward(token)
-            result.append(contentsOf: projected)
+            result.append(contentsOf: try await wo.forward(token))
         }
         return result
     }

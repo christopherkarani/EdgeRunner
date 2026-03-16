@@ -100,6 +100,9 @@ public struct NPZLoader: EdgeRunnerWeightLoader, Sendable {
 
             let nameStart = offset + 30
             let nameEnd = nameStart + fileNameLength
+            guard nameEnd <= archiveData.count else {
+                throw NPYError.fileTooSmall
+            }
             let dataStart = nameEnd + extraLength
             let dataEnd = dataStart + compressedSize
 

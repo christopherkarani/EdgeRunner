@@ -139,10 +139,17 @@ public struct NPYHeader: Sendable, Equatable {
             .filter { !$0.isEmpty }
             .compactMap(Int.init)
 
+        let isFortranOrder = fortran == "True"
+        guard !isFortranOrder else {
+            throw NPYError.invalidHeader(
+                "Fortran-order (column-major) arrays are not supported; data would be silently transposed"
+            )
+        }
+
         return NPYHeader(
             dtype: dtype,
             shape: shape,
-            isFortranOrder: fortran == "True"
+            isFortranOrder: false
         )
     }
 

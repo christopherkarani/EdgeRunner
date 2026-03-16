@@ -3,7 +3,8 @@ import Foundation
 import Metal
 
 public final class MemoryMappedFile: @unchecked Sendable {
-    // The mapped region is immutable after creation and is released only in deinit.
+    // @unchecked Sendable: the mmap region is read-only (PROT_READ) and all fields are
+    // let-bound after init. The region lifetime is tied to this object via deinit.
     public let basePointer: UnsafeRawPointer
     public let size: Int
 

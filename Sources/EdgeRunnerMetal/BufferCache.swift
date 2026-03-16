@@ -1,6 +1,10 @@
 import Metal
 import Synchronization
 
+public enum BufferCacheError: Error, Sendable {
+    case allocationFailed(byteCount: Int)
+}
+
 package struct MetalBufferHandle: @unchecked Sendable {
     // @unchecked Sendable is limited to the Metal protocol wrapper.
     // The wrapped MTLBuffer never leaves package-internal APIs without actor or mutex protection.
@@ -90,7 +94,7 @@ final class BufferCache {
     }
 
     /// Returns a cached buffer if one fits, otherwise allocates a new one from the device.
-    func acquire(size: Int) -> MTLBuffer {
+    func acquire(size: Int) throws -> MTLBuffer {
         if let cached = reuse(size: size) {
             return cached
         }
@@ -98,7 +102,7 @@ final class BufferCache {
             length: size,
             options: [.storageModeShared, .hazardTrackingModeUntracked]
         ) else {
-            fatalError("Failed to allocate Metal buffer of size \(size)")
+            throw BufferCacheError.allocationFailed(byteCount: size)
         }
         return buffer
     }

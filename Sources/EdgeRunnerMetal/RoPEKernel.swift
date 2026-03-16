@@ -17,7 +17,7 @@ public final class RoPEKernel: Sendable {
         numHeads: Int,
         headDim: Int,
         startPos: Int,
-        theta: Float = 10_000,
+        theta: Float,
         scalingFactor: Float = 1,
         commandQueue: MTLCommandQueue
     ) async throws -> [Float] {
@@ -82,7 +82,7 @@ public final class RoPEKernel: Sendable {
         numKVHeads: Int,
         headDim: Int,
         startPos: Int,
-        theta: Float = 10_000,
+        theta: Float,
         scalingFactor: Float = 1,
         commandQueue: MTLCommandQueue
     ) async throws -> ([Float], [Float]) {

@@ -84,15 +84,15 @@ public enum TensorDataType: UInt32, Sendable, Equatable {
 }
 
 public struct TensorStorage: @unchecked Sendable {
-    // This wrapper carries an immutable MTLBuffer reference plus metadata.
-    // The buffer is created outside the type and is not mutated through this API.
+    // @unchecked Sendable: wraps an immutable MTLBuffer (non-Sendable protocol) plus
+    // a Sendable owner reference. All fields are let-bound and never mutated after init.
     public let buffer: MTLBuffer
     public let byteOffset: Int
     public let dataType: TensorDataType
     public let shape: [Int]
     public let name: String
 
-    private let owner: AnyObject?
+    private let owner: (any Sendable)?
 
     public var elementCount: Int {
         shape.reduce(1, *)
@@ -108,7 +108,7 @@ public struct TensorStorage: @unchecked Sendable {
         dataType: TensorDataType,
         shape: [Int],
         name: String,
-        owner: AnyObject? = nil
+        owner: (any Sendable & AnyObject)? = nil
     ) {
         self.buffer = buffer
         self.byteOffset = byteOffset

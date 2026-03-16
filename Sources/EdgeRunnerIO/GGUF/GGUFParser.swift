@@ -49,6 +49,11 @@ public final class GGUFReader {
         for _ in 0..<count {
             let name = try readString()
             let dimensionCount = Int(try readUInt32())
+            guard dimensionCount <= 8 else {
+                throw WeightLoaderError.invalidFormat(
+                    "Unreasonable dimension count \(dimensionCount) for tensor '\(name)'"
+                )
+            }
             var dimensions: [UInt64] = []
             dimensions.reserveCapacity(dimensionCount)
             for _ in 0..<dimensionCount {
@@ -123,6 +128,11 @@ public final class GGUFReader {
 
     public func readString() throws -> String {
         let length = Int(try readUInt64())
+        guard length <= 1_000_000 else {
+            throw WeightLoaderError.invalidFormat(
+                "Unreasonable string length \(length) at offset \(currentOffset)"
+            )
+        }
         let bytes = try readBytes(count: length)
         guard let value = String(data: bytes, encoding: .utf8) else {
             throw WeightLoaderError.invalidFormat("Invalid UTF-8 string at offset \(currentOffset - length)")

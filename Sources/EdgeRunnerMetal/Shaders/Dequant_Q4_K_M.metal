@@ -32,9 +32,9 @@ kernel void dequant_q4_k_m(
         uchar highBits = block[12 + subBlock];
 
         scales[subBlock] = d * float(scaleByte & 0x3F);
-        scales[subBlock + 4] = d * float(((scaleByte >> 6) & 0x03) | ((highBits & 0x0F) << 2));
+        scales[subBlock + 4] = d * float((highBits & 0x0F) | (((scaleByte >> 6) & 0x03) << 4));
         mins[subBlock] = dmin * float(minByte & 0x3F);
-        mins[subBlock + 4] = dmin * float(((minByte >> 6) & 0x03) | (((highBits >> 4) & 0x0F) << 2));
+        mins[subBlock + 4] = dmin * float(((highBits >> 4) & 0x0F) | (((minByte >> 6) & 0x03) << 4));
     }
 
     uint outBase = params.outputOffset + tid * Q4_K_M_WEIGHTS_PER_BLOCK;

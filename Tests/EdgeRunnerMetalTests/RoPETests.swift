@@ -69,6 +69,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
@@ -92,6 +93,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: startPos,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
@@ -113,6 +115,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
@@ -134,6 +137,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
@@ -172,6 +176,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             scalingFactor: scalingFactor,
             commandQueue: commandQueue
         )
@@ -194,6 +199,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
@@ -217,6 +223,7 @@ struct RoPETests {
             numHeads: numHeads,
             headDim: headDim,
             startPos: 0,
+            theta: 10_000,
             commandQueue: commandQueue
         )
 
