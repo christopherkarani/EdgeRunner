@@ -59,7 +59,7 @@ struct BufferCacheTests {
 
     @Test func allocateNew() throws {
         let cache = BufferCache(device: device, maxBytes: 1024 * 1024)
-        let buf = cache.acquire(size: 256)
+        let buf = try cache.acquire(size: 256)
         #expect(buf.length >= 256)
     }
 
@@ -67,7 +67,7 @@ struct BufferCacheTests {
         let cache = BufferCache(device: device, maxBytes: 1024 * 1024)
         let original = device.makeBuffer(length: 256, options: .storageModeShared)!
         cache.recycle(original)
-        let acquired = cache.acquire(size: 256)
+        let acquired = try cache.acquire(size: 256)
         #expect(acquired.length >= 256)
     }
 }

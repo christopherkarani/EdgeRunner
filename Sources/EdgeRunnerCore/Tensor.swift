@@ -14,7 +14,7 @@ public struct Tensor<T: TensorScalar>: Sendable {
             data.count == shape.elementCount,
             "Data count \(data.count) doesn't match shape \(shape) (expected \(shape.elementCount))"
         )
-        self._storage = TensorStorage.from(data)
+        self._storage = try! TensorStorage.from(data)
         self.shape = shape
         self.strides = Strides.contiguous(for: shape)
     }
@@ -30,7 +30,7 @@ public struct Tensor<T: TensorScalar>: Sendable {
     }
 
     public static func zeros(shape: Shape) -> Tensor {
-        let storage = TensorStorage.zeros(byteCount: shape.elementCount * T.byteSize)
+        let storage = try! TensorStorage.zeros(byteCount: shape.elementCount * T.byteSize)
         return Tensor(storage: storage, shape: shape, strides: .contiguous(for: shape))
     }
 
@@ -56,7 +56,7 @@ public struct Tensor<T: TensorScalar>: Sendable {
 
     mutating func ensureUniqueStorage() {
         if !isKnownUniquelyReferenced(&_storage) {
-            _storage = _storage.copy()
+            _storage = try! _storage.copy()
         }
     }
 

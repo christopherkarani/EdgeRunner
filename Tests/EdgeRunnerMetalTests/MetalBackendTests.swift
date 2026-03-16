@@ -13,7 +13,7 @@ struct MetalBackendTests {
 
     @Test func acquireAndRecycleBuffer() async throws {
         let backend = MetalBackend.shared
-        let length = await backend.acquireAndRecycleRoundTrip(size: 1024)
+        let length = try await backend.acquireAndRecycleRoundTrip(size: 1024)
         #expect(length >= 1024)
     }
 
@@ -22,7 +22,22 @@ struct MetalBackendTests {
         let maxThreads = try await backend.pipelineMaxThreads(for: "elementwise_add_float")
         #expect(maxThreads > 0)
     }
-    
+
+    @Test func elementwiseAddLargeArray() async throws {
+        let backend = MetalBackend.shared
+        let maxThreads = try await backend.pipelineMaxThreads(for: "elementwise_add_float")
+        let count = maxThreads + 17
+        let a = (0..<count).map { Float($0) }
+        let b = (0..<count).map { Float($0) * 0.5 }
+
+        let result = try await backend.elementwiseAddFloat(a, b)
+
+        #expect(result.count == count)
+        for index in 0..<count {
+            #expect(abs(result[index] - (a[index] + b[index])) < 1e-5)
+        }
+    }
+
     @Test func publicActorBoundaryKeepsMetalTypesInternal() throws {
         let source = try loadRepoSource("Sources/EdgeRunnerMetal/MetalBackend.swift")
 

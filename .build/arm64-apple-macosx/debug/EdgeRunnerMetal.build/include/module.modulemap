@@ -1,0 +1,3 @@
+module EdgeRunnerMetal {
+    header "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetal.build/include/EdgeRunnerMetal-Swift.h"
+}

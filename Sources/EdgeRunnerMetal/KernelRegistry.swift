@@ -14,26 +14,26 @@ package struct MetalPipelineHandle: @unchecked Sendable {
     package let rawValue: MTLComputePipelineState
 }
 
-final class KernelRegistry {
+package final class KernelRegistry {
     private let library: MetalLibraryHandle
     private let cache: Mutex<PipelineCache>
     private let device: MTLDevice
 
     /// The compiled Metal library. Exposed for callers that need to create
     /// functions with `MTLFunctionConstantValues` (e.g. fused-pattern kernels).
-    var metalLibrary: MTLLibrary { library.rawValue }
+    package var metalLibrary: MTLLibrary { library.rawValue }
 
     private struct PipelineCache: Sendable {
         var entries: [String: MetalPipelineHandle] = [:]
     }
 
-    init(device: MTLDevice) throws {
+    package init(device: MTLDevice) throws {
         self.device = device
         self.library = MetalLibraryHandle(rawValue: try Self.loadLibrary(device: device))
         self.cache = Mutex(PipelineCache())
     }
 
-    func pipeline(for name: String) throws -> MTLComputePipelineState {
+    package func pipeline(for name: String) throws -> MTLComputePipelineState {
         if let cached = cache.withLock({ $0.entries[name] }) {
             return cached.rawValue
         }
@@ -72,7 +72,7 @@ final class KernelRegistry {
     }
 }
 
-enum KernelRegistryError: Error, Sendable {
+package enum KernelRegistryError: Error, Sendable {
     case functionNotFound(String)
     case shaderSourceNotFound
 }

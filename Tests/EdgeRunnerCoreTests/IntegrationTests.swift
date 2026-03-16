@@ -36,7 +36,7 @@ struct IntegrationTests {
     @Test func bufferCacheRoundTrip() async throws {
         let backend = MetalBackend.shared
         let size = 512
-        let actualSize = await backend.acquireBufferSize(size: size)
+        let actualSize = try await backend.acquireBufferSize(size: size)
         #expect(actualSize >= size)
     }
 

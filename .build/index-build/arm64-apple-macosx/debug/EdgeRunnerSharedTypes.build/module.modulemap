@@ -1,0 +1,4 @@
+module EdgeRunnerSharedTypes {
+    umbrella "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include"
+    export *
+}
