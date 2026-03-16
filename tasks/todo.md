@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M2
-- Current task: Task 10 - Activation Kernels (SwiGLU, GELU, Sigmoid) (`in_progress`)
+- Current task: Task 11 - EdgeRunnerModule Protocol (`in_progress`)
 - Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
 
 ## Checklist
@@ -15,7 +15,7 @@
 - [x] Task 7: RoPE (Rotary Position Embeddings)
 - [x] Task 8: RMSNorm Kernel
 - [x] Task 9: LayerNorm Kernel
-- [ ] Task 10: Activation Kernels (SwiGLU, GELU, Sigmoid)
+- [x] Task 10: Activation Kernels (SwiGLU, GELU, Sigmoid)
 - [ ] Task 11: EdgeRunnerModule Protocol
 - [ ] Task 12: Transformer Block Composition
 - [ ] Task 13: GPT-2 Reference Implementation

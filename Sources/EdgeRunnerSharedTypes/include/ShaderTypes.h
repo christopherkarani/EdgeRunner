@@ -33,5 +33,6 @@ typedef struct {
 #include "RoPEParams.h"
 #include "RMSNormParams.h"
 #include "LayerNormParams.h"
+#include "ActivationParams.h"
 
 #endif /* SHADER_TYPES_H */
