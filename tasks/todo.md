@@ -2,14 +2,14 @@
 
 ## Status
 - Current milestone: M2
-- Current task: Task 4 - Flash Attention Forward Pass (`in_progress`)
+- Current task: Task 5 - Grouped Query Attention (GQA) (`in_progress`)
 - Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
 
 ## Checklist
 - [x] Reconcile repo state against M2 plan
 - [x] Add `EdgeRunnerTests` target scaffolding
 - [x] Task 3: Softmax Kernel
-- [ ] Task 4: Flash Attention Forward Pass
+- [x] Task 4: Flash Attention Forward Pass
 - [ ] Task 5: Grouped Query Attention (GQA)
 - [ ] Task 6: KV Cache (Ring Buffer)
 - [ ] Task 7: RoPE (Rotary Position Embeddings)

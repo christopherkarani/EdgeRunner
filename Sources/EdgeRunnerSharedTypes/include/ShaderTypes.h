@@ -28,5 +28,6 @@ typedef struct {
 #include "GEMMParams.h"
 #include "GEMVParams.h"
 #include "SoftmaxParams.h"
+#include "AttentionParams.h"
 
 #endif /* SHADER_TYPES_H */
