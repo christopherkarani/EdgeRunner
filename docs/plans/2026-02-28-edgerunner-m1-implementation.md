@@ -6,7 +6,7 @@
 
 **Architecture:** Hybrid MTLBuffer storage + MTLTensor views. Actor-based MetalBackend with LRU buffer cache, manual hazard tracking, and command batching. 3-tier fusion: function constants (hot) → function stitching (warm) → JIT (cold).
 
-**Tech Stack:** Swift 6.2, Metal 4, Metal Shading Language 4.0, SwiftPM BuildToolPlugin, XCTest
+**Tech Stack:** Swift 6.2, Metal 4, Metal Shading Language 4.0, SwiftPM BuildToolPlugin, Swift Testing
 
 **Design Doc:** `docs/plans/2026-02-28-edgerunner-m1-design.md`
 
@@ -861,32 +861,20 @@ final class TensorStorage: @unchecked Sendable {
     }
 
     /// Create storage from a Swift array.
-    static func from<T: TensorScalar>(_ data: [T], backend: MetalBackend? = nil) -> TensorStorage {
+    /// Uses MetalBackend.shared for device access and buffer cache integration.
+    static func from<T: TensorScalar>(_ data: [T]) async -> TensorStorage {
+        let backend = await MetalBackend.shared
         let byteCount = data.count * T.byteSize
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
-        }
-        guard let buffer = device.makeBuffer(
-            bytes: data,
-            length: byteCount,
-            options: [.storageModeShared, .hazardTrackingModeUntracked]
-        ) else {
-            fatalError("Failed to allocate buffer of size \(byteCount)")
-        }
+        let buffer = await backend.acquireBuffer(size: byteCount)
+        buffer.contents().copyMemory(from: data, byteCount: byteCount)
         return TensorStorage(buffer: buffer)
     }
 
     /// Create zero-initialized storage.
-    static func zeros(byteCount: Int) -> TensorStorage {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
-        }
-        guard let buffer = device.makeBuffer(
-            length: byteCount,
-            options: [.storageModeShared, .hazardTrackingModeUntracked]
-        ) else {
-            fatalError("Failed to allocate buffer of size \(byteCount)")
-        }
+    /// Uses MetalBackend.shared for device access and buffer cache integration.
+    static func zeros(byteCount: Int) async -> TensorStorage {
+        let backend = await MetalBackend.shared
+        let buffer = await backend.acquireBuffer(size: byteCount)
         // storageModeShared buffers are zero-initialized by the system
         return TensorStorage(buffer: buffer)
     }
@@ -897,18 +885,11 @@ final class TensorStorage: @unchecked Sendable {
         return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 
-    /// Create a deep copy of the storage.
-    func copy() -> TensorStorage {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal not available")
-        }
-        guard let newBuffer = device.makeBuffer(
-            bytes: buffer.contents(),
-            length: byteCount,
-            options: [.storageModeShared, .hazardTrackingModeUntracked]
-        ) else {
-            fatalError("Failed to copy buffer")
-        }
+    /// Create a deep copy of the storage via MetalBackend buffer cache.
+    func copy() async -> TensorStorage {
+        let backend = await MetalBackend.shared
+        let newBuffer = await backend.acquireBuffer(size: byteCount)
+        newBuffer.contents().copyMemory(from: buffer.contents(), byteCount: byteCount)
         return TensorStorage(buffer: newBuffer)
     }
 }

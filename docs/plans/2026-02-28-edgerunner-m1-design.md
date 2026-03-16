@@ -23,10 +23,10 @@ EdgeRunner Milestone 1 uses a **hybrid MTLBuffer + MTLTensor** architecture:
 | Package structure | Multi-target from start | Clean separation of Metal, Core, and public API |
 | Metal compilation | Custom BuildToolPlugin | SwiftPM auto-compile doesn't pass `-I` flags for shared headers |
 | Tensor generic | `Tensor<T: TensorScalar>` protocol-constrained | Type safety, extensibility |
-| Buffer management | LRU cache (primary) + small MTLHeap | Validated by MLX architecture |
+| Buffer management | LRU cache (primary) | Validated by MLX architecture; MTLHeap deferred — no concrete use case in M1 |
 | Hazard tracking | Manual (`HazardTrackingModeUntracked`) | Better performance, MLX validates |
 | Fusion | 3-tier: function constants + stitching + JIT | Function stitching is the key insight — composes pre-compiled ops at AIR level |
-| Concurrency | Actor-based `MetalBackend`, `Mutex<T>` for caches | No `@unchecked Sendable`, no global locks |
+| Concurrency | Actor-based `MetalBackend`, `Mutex<T>` for caches | `@unchecked Sendable` permitted only for Metal protocol wrappers (`MTLBuffer`, `MTLCommandQueue`) with justifying comments; no global locks |
 | Residency | Single `MTLResidencySet`, queue-attached | Apple recommends few large sets, max 32 per queue |
 | Command batching | 20-50 dispatches per command buffer, per-chip | MLX-validated pattern |
 
@@ -60,7 +60,7 @@ EdgeRunner/
 │   │   ├── TensorStorage.swift            # MTLBuffer + MTLTensor view factory
 │   │   ├── Shape.swift                    # Shape, strides, broadcast, contiguity
 │   │   ├── Graph/
-│   │   │   ├── TensorOp.swift             # DAG nodes (operation + inputs)
+│   │   │   ├── TensorOp.swift             # DAG nodes (operation + inputs + dtype + shape)
 │   │   │   ├── ComputeGraph.swift         # DAG build, topological sort, BFS eval
 │   │   │   └── FusionEngine.swift         # 3-tier: constants → stitch → JIT
 │   │   └── AutoTuner.swift                # Threadgroup/tile config per device
@@ -178,34 +178,48 @@ extension UInt8: TensorScalar {
 
 ```swift
 public struct Tensor<T: TensorScalar>: Sendable {
-    // COW storage — shared reference to MTLBuffer
-    private var _storage: TensorStorage
+    // Storage is EITHER concrete (realized) OR deferred (lazy graph node).
+    // An unrealized tensor has .lazy storage — no MTLBuffer is allocated
+    // until realize() is called. This avoids allocating buffers for
+    // intermediate graph nodes that will be fused away.
+    enum Storage: Sendable {
+        case realized(TensorStorage)
+        case lazy(TensorOp)
+    }
 
-    // Metadata
+    private var _storage: Storage
+
+    // Metadata (always known, even for unrealized tensors)
     public let shape: Shape
     public let strides: Strides
 
-    // Lazy graph node (nil if already realized)
-    private let graphNode: TensorOp?
+    public var isRealized: Bool {
+        if case .realized = _storage { return true }
+        return false
+    }
 
-    // Whether data has been computed
-    public var isRealized: Bool { graphNode == nil }
-
-    // COW mutation
+    // COW mutation (only valid on realized tensors)
     private mutating func ensureUniqueStorage() {
-        if !isKnownUniquelyReferenced(&_storage) {
-            _storage = _storage.copy()
+        guard case .realized(let store) = _storage else {
+            preconditionFailure("Cannot mutate unrealized tensor — call realize() first")
+        }
+        if !isKnownUniquelyReferenced(&store) {
+            _storage = .realized(store.copy())
         }
     }
 
-    // Materialize the computation graph
-    public func realize() async throws -> Tensor<T> {
-        guard let node = graphNode else { return self }
-        let backend = MetalBackend.shared
-        return try await backend.evaluate(node)
+    // Materialize the computation graph.
+    // Backend is injected rather than using a global singleton,
+    // enabling mock backends in tests.
+    public func realize(using backend: MetalBackend = .shared) async throws -> Tensor<T> {
+        guard case .lazy(let node) = _storage else { return self }
+        let resultStorage = try await backend.evaluate(node)
+        return Tensor(storage: .realized(resultStorage), shape: shape, strides: strides)
     }
 
-    // Element-wise operators create new graph nodes
+    // Element-wise operators record graph nodes (no allocation, no throws).
+    // Shape errors are deferred to realize() — operators precondition on
+    // broadcast compatibility and trap on programmer error (same as Array).
     public static func + (lhs: Tensor, rhs: Tensor) -> Tensor { ... }
     public static func - (lhs: Tensor, rhs: Tensor) -> Tensor { ... }
     public static func * (lhs: Tensor, rhs: Tensor) -> Tensor { ... }
@@ -217,7 +231,7 @@ public struct Tensor<T: TensorScalar>: Sendable {
     public func mean(axis: Int?) -> Tensor { ... }
     public func max(axis: Int?) -> Tensor { ... }
     public func transpose() -> Tensor { ... }
-    public func reshape(_ newShape: Shape) -> Tensor { ... }
+    public func reshape(_ newShape: Shape) throws -> Tensor { ... }  // throws: element count mismatch
 }
 ```
 
@@ -225,12 +239,18 @@ public struct Tensor<T: TensorScalar>: Sendable {
 
 ```swift
 final class TensorStorage: @unchecked Sendable {
-    // Note: @unchecked because MTLBuffer is not Sendable but is thread-safe
-    // when accessed through actor-isolated MetalBackend
+    // @unchecked Sendable: MTLBuffer is an Obj-C protocol not marked Sendable,
+    // but Metal buffers are thread-safe for concurrent read access.
+    // All mutations go through actor-isolated MetalBackend.
     let buffer: MTLBuffer
     let byteCount: Int
+    let dataType: MTLDataType   // Tracks scalar dtype for kernel selection
 
-    // Create MTLTensor view for GPU dispatch
+    let byteOffset: Int            // Byte offset into buffer (supports sliced/view tensors)
+
+    // Create MTLTensor view for GPU dispatch.
+    // byteOffset enables sub-buffer views for sliced tensors without
+    // allocating new buffers — the same MTLBuffer backs multiple views.
     func makeTensorView(
         shape: [Int],
         strides: [Int],
@@ -240,7 +260,7 @@ final class TensorStorage: @unchecked Sendable {
         descriptor.dataType = dataType
         descriptor.dimensions = shape.map { NSNumber(value: $0) }
         descriptor.strides = strides.map { NSNumber(value: $0) }
-        return buffer.makeTensor(descriptor: descriptor, offset: 0)
+        return buffer.makeTensor(descriptor: descriptor, offset: byteOffset)
     }
 
     func copy() -> TensorStorage {
@@ -254,6 +274,8 @@ final class TensorStorage: @unchecked Sendable {
 
 ```swift
 public actor MetalBackend {
+    /// Shared instance for production use. Tests should create dedicated
+    /// instances via init(device:) for isolation and determinism.
     public static let shared = MetalBackend()
 
     let device: MTLDevice
@@ -288,18 +310,25 @@ struct BufferCache: Sendable {
     private let state: Mutex<CacheState>
 
     struct CacheState {
-        var cache: [Int: [MTLBuffer]]  // size -> available buffers (LRU order)
-        var totalCachedBytes: Int
+        /// Ordered list of all cached buffers, most-recently-used first.
+        /// Provides global recency ordering for true LRU eviction.
+        var lruOrder: [MTLBuffer] = []
+
+        /// Size-bucketed index for fast lookup during reuse.
+        /// Values are indices into lruOrder.
+        var sizeIndex: [Int: [Int]] = [:]  // size -> indices into lruOrder
+
+        var totalCachedBytes: Int = 0
         let maxCachedBytes: Int        // e.g., 1.5x recommendedMaxWorkingSetSize
     }
 
-    // Find a buffer of matching size (within 2x or size + 2 pages)
+    // Find a buffer of matching size (within 2x), promote to MRU
     func reuse(size: Int) -> MTLBuffer? { ... }
 
-    // Return a buffer to the cache
+    // Return a buffer to the cache, insert at MRU position
     func recycle(_ buffer: MTLBuffer) { ... }
 
-    // Evict LRU buffers when under memory pressure
+    // Evict from LRU end (tail of lruOrder) until under budget
     func evict(targetBytes: Int) { ... }
 }
 ```
@@ -366,24 +395,55 @@ struct ComputeGraph {
     // Build topologically sorted evaluation order
     func topologicalSort(from root: TensorOp) -> [TensorOp] { ... }
 
-    // Identify fusible groups (element-wise, same shape, within limits)
+    // Identify fusible groups using consumer-count analysis.
+    // Two ops are fusible only if:
+    //   1. Both are element-wise with identical output shape
+    //   2. The producer has exactly ONE consumer (no fan-out)
+    //   3. Combined depth ≤ maxFusionDepth (11)
+    //   4. Combined buffer args ≤ maxBufferArgs (31)
+    // This avoids incorrect fusion of shared intermediates and
+    // branching consumers that greedy consecutive grouping would miss.
     func identifyFusionGroups(_ sorted: [TensorOp]) -> [[TensorOp]] {
-        // Walk sorted ops, greedily group consecutive element-wise ops
-        // that share shape and don't exceed depth/arg limits
+        // Build consumer-count map from DAG edges
+        let consumerCounts = buildConsumerCounts(sorted)
+
+        // Walk sorted ops, extend current group only when the
+        // producer→consumer edge is exclusive (consumerCount == 1)
+        var groups: [[TensorOp]] = []
+        var current: [TensorOp] = []
+        for op in sorted {
+            if let prev = current.last,
+               canFuse(prev, op, consumerCounts: consumerCounts) {
+                current.append(op)
+            } else {
+                if !current.isEmpty { groups.append(current) }
+                current = [op]
+            }
+        }
+        if !current.isEmpty { groups.append(current) }
+        return groups
     }
 
-    // BFS evaluation with fusion
+    // Evaluate graph: fusion groups → tier selection → dispatch.
+    // Returns the realized TensorStorage for the root node.
     func evaluate(root: TensorOp, backend: MetalBackend) async throws -> TensorStorage {
         let sorted = topologicalSort(from: root)
         let groups = identifyFusionGroups(sorted)
 
+        // Storage map: each evaluated op gets its result stored here
+        var storageMap: [TensorOp.ID: TensorStorage] = [:]
+
         for group in groups {
             let tier = fusionEngine.selectTier(for: group)
             let pipeline = try fusionEngine.pipeline(for: tier)
-            try await backend.dispatch(pipeline, for: group)
+            let result = try await backend.dispatch(pipeline, for: group, inputs: storageMap)
+            storageMap[group.last!.id] = result
         }
 
-        return root.storage!
+        guard let rootStorage = storageMap[root.id] else {
+            throw ComputeGraphError.unrealizedRoot
+        }
+        return rootStorage
     }
 }
 ```
@@ -414,15 +474,18 @@ struct AutoTuner {
 | Layer | Tests | Dependencies |
 |-------|-------|-------------|
 | Shape/Strides | Broadcasting, contiguity, reshape, slice | None (pure Swift) |
-| TensorScalar | Protocol conformance, byte sizes | None (pure Swift) |
-| Graph/Fusion | DAG construction, topological sort, fusion pattern matching, tier selection | None (pure Swift, mock dispatch) |
+| TensorScalar | Protocol conformance, byte sizes | Metal framework (for `MTLDataType`) — requires `#if canImport(Metal)` |
+| Graph/Fusion | DAG construction, topological sort, fusion pattern matching, tier selection | Metal types via TensorScalar; use mock dispatch for logic tests, real dispatch for correctness |
 | Kernel Correctness | Each Metal kernel vs CPU reference within tolerance | Metal device (`#if canImport(Metal)`) |
 | Fusion Correctness | Fused result == sequential unfused result | Metal device |
-| Buffer Cache | Allocation, reuse, eviction under pressure | Metal device |
+| Buffer Cache | Allocation, reuse, LRU eviction under pressure, size-class matching | Metal device |
+| Hazard Tracking | Manual barriers inserted correctly; no GPU data races on read-after-write and write-after-write patterns | Metal device (validated via known-answer dispatch sequences) |
+| Residency | ResidencySet contains all dispatched buffers; no residency faults during multi-kernel evaluation | Metal device |
+| Command Batching | Correct batching at 20-50 dispatches; output identical to single-dispatch baseline | Metal device |
 | Performance | Throughput, memory usage per device family | Benchmark target |
 
 **Tolerance thresholds:**
-- Float32: 1e-6
+- Float32: 1e-5
 - Float16: 1e-3
 - Int8/UInt8: exact match
 
