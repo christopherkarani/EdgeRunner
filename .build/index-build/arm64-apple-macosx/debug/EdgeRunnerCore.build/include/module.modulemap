@@ -1,0 +1,3 @@
+module EdgeRunnerCore {
+    header "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerCore.build/include/EdgeRunnerCore-Swift.h"
+}

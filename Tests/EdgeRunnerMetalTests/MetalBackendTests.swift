@@ -37,7 +37,7 @@ struct MetalBackendTests {
             #expect(abs(result[index] - (a[index] + b[index])) < 1e-5)
         }
     }
-    
+
     @Test func publicActorBoundaryKeepsMetalTypesInternal() throws {
         let source = try loadRepoSource("Sources/EdgeRunnerMetal/MetalBackend.swift")
 

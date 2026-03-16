@@ -1,0 +1,3 @@
+module EdgeRunnerIO {
+    header "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/include/EdgeRunnerIO-Swift.h"
+}
