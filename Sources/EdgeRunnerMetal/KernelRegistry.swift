@@ -7,6 +7,10 @@ public final class KernelRegistry: Sendable {
     private let cache: Mutex<PipelineCache>
     private let device: MTLDevice
 
+    /// The compiled Metal library. Exposed for callers that need to create
+    /// functions with `MTLFunctionConstantValues` (e.g. fused-pattern kernels).
+    public var metalLibrary: MTLLibrary { library }
+
     // MTLComputePipelineState is not Sendable but Mutex ensures exclusive access.
     struct PipelineCache: @unchecked Sendable {
         var entries: [String: MTLComputePipelineState] = [:]
