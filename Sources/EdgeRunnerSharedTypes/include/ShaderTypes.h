@@ -29,5 +29,6 @@ typedef struct {
 #include "GEMVParams.h"
 #include "SoftmaxParams.h"
 #include "AttentionParams.h"
+#include "KVCacheParams.h"
 
 #endif /* SHADER_TYPES_H */

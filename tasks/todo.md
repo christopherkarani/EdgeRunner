@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M2
-- Current task: Task 6 - KV Cache (Ring Buffer) (`in_progress`)
+- Current task: Task 7 - RoPE (Rotary Position Embeddings) (`in_progress`)
 - Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
 
 ## Checklist
@@ -11,7 +11,7 @@
 - [x] Task 3: Softmax Kernel
 - [x] Task 4: Flash Attention Forward Pass
 - [x] Task 5: Grouped Query Attention (GQA)
-- [ ] Task 6: KV Cache (Ring Buffer)
+- [x] Task 6: KV Cache (Ring Buffer)
 - [ ] Task 7: RoPE (Rotary Position Embeddings)
 - [ ] Task 8: RMSNorm Kernel
 - [ ] Task 9: LayerNorm Kernel
