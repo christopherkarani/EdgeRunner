@@ -20,7 +20,8 @@ let package = Package(
         .target(
             name: "EdgeRunnerMetal",
             dependencies: ["EdgeRunnerSharedTypes"],
-            path: "Sources/EdgeRunnerMetal"
+            path: "Sources/EdgeRunnerMetal",
+            resources: [.process("Shaders")]
         ),
         .target(
             name: "EdgeRunnerCore",
@@ -38,7 +39,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EdgeRunnerMetalTests",
-            dependencies: ["EdgeRunnerMetal"]
+            dependencies: ["EdgeRunnerMetal", "EdgeRunnerSharedTypes"]
         ),
     ]
 )
