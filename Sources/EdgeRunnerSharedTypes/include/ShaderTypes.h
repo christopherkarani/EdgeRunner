@@ -34,5 +34,6 @@ typedef struct {
 #include "RMSNormParams.h"
 #include "LayerNormParams.h"
 #include "ActivationParams.h"
+#include "DequantParams.h"
 
 #endif /* SHADER_TYPES_H */
