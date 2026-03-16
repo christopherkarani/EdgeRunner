@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import Metal
 @testable import EdgeRunnerMetal
 
@@ -21,4 +22,5 @@ struct MetalBackendTests {
         let maxThreads = try await backend.pipelineMaxThreads(for: "elementwise_add_float")
         #expect(maxThreads > 0)
     }
+
 }
