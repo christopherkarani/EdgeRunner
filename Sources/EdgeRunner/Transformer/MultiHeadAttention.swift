@@ -24,6 +24,20 @@ public struct MultiHeadAttention: EdgeRunnerModule, Sendable {
     private let wv: LinearModule
     private let wo: LinearModule
 
+    init(
+        config: TransformerConfig,
+        wq: LinearModule,
+        wk: LinearModule,
+        wv: LinearModule,
+        wo: LinearModule
+    ) {
+        self.config = config
+        self.wq = wq
+        self.wk = wk
+        self.wv = wv
+        self.wo = wo
+    }
+
     public init(config: TransformerConfig, zeroWeights: Bool = false) throws {
         self.config = config
 
@@ -102,8 +116,19 @@ public struct MultiHeadAttention: EdgeRunnerModule, Sendable {
 
         for tokenIndex in 0..<sequenceLength {
             let token = Array(input.hidden[(tokenIndex * hiddenDim)..<((tokenIndex + 1) * hiddenDim)])
-            let q = try await wq.forward(token)
-            let k = try await wk.forward(token)
+            let absolutePosition = input.startPos + tokenIndex
+            let q = Self.applyRoPE(
+                try await wq.forward(token),
+                headDim: headDim,
+                position: absolutePosition,
+                theta: config.ropeTheta
+            )
+            let k = Self.applyRoPE(
+                try await wk.forward(token),
+                headDim: headDim,
+                position: absolutePosition,
+                theta: config.ropeTheta
+            )
             let v = try await wv.forward(token)
             allQ.append(contentsOf: q)
             allK.append(contentsOf: k)
@@ -175,5 +200,43 @@ public struct MultiHeadAttention: EdgeRunnerModule, Sendable {
             parameters["wo.\(key)"] = value
         }
         return parameters
+    }
+
+    static func applyRoPE(
+        _ vector: [Float],
+        headDim: Int,
+        position: Int,
+        theta: Float
+    ) -> [Float] {
+        precondition(vector.count % headDim == 0, "Vector count must be divisible by headDim")
+
+        var rotated = vector
+        for headStart in stride(from: 0, to: vector.count, by: headDim) {
+            let head = Array(vector[headStart..<(headStart + headDim)])
+            let rotatedHead = applyRoPE(head, position: position, theta: theta)
+            rotated.replaceSubrange(headStart..<(headStart + headDim), with: rotatedHead)
+        }
+        return rotated
+    }
+
+    static func applyRoPE(_ head: [Float], position: Int, theta: Float) -> [Float] {
+        var rotated = head
+        let pairCount = head.count / 2
+
+        for pairIndex in 0..<pairCount {
+            let evenIndex = pairIndex * 2
+            let oddIndex = evenIndex + 1
+            let exponent = Float(evenIndex) / Float(head.count)
+            let inverseFrequency = pow(theta, -exponent)
+            let angle = Float(position) * inverseFrequency
+            let cosAngle = cos(angle)
+            let sinAngle = sin(angle)
+            let evenValue = head[evenIndex]
+            let oddValue = head[oddIndex]
+            rotated[evenIndex] = evenValue * cosAngle - oddValue * sinAngle
+            rotated[oddIndex] = evenValue * sinAngle + oddValue * cosAngle
+        }
+
+        return rotated
     }
 }

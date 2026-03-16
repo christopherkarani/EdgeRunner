@@ -151,4 +151,44 @@ struct GEMVTests {
 
         #expect(abs(result[0] - expected[0]) < 1e-4)
     }
+
+    @Test func matrixShapeMismatchThrows() async throws {
+        let kernel = try GEMVKernel(device: device)
+
+        do {
+            _ = try await kernel.execute(
+                a: [1, 2, 3],
+                x: [1, 2],
+                M: 2,
+                K: 2,
+                commandQueue: commandQueue
+            )
+            Issue.record("Expected invalidMatrixShape for undersized matrix input")
+        } catch let error as GEMVError {
+            if case .invalidMatrixShape = error {
+                return
+            }
+            Issue.record("Expected invalidMatrixShape, got \(error)")
+        }
+    }
+
+    @Test func vectorShapeMismatchThrowsFloat16() async throws {
+        let kernel = try GEMVKernel(device: device)
+
+        do {
+            _ = try await kernel.executeF16(
+                a: [1, 0, 0, 1],
+                x: [1],
+                M: 2,
+                K: 2,
+                commandQueue: commandQueue
+            )
+            Issue.record("Expected invalidVectorShape for undersized Float16 vector input")
+        } catch let error as GEMVError {
+            if case .invalidVectorShape = error {
+                return
+            }
+            Issue.record("Expected invalidVectorShape, got \(error)")
+        }
+    }
 }

@@ -25,5 +25,5 @@
 
 ## Review
 - `swift build` passes.
-- `swift test` passes with 168 tests across 29 suites.
+- `swift test` passes with 174 tests across 29 suites.
 - Remaining M2 tasks 3-14 are implemented and committed in sequence.

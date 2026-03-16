@@ -23,6 +23,8 @@ public final class GEMVKernel: Sendable {
         M: Int, K: Int,
         commandQueue: MTLCommandQueue
     ) async throws -> [Float] {
+        try validateInputShape(matrixCount: a.count, vectorCount: x.count, M: M, K: K)
+
         let bufA = device.makeBuffer(
             bytes: a, length: a.count * MemoryLayout<Float>.stride,
             options: .storageModeShared
@@ -73,6 +75,8 @@ public final class GEMVKernel: Sendable {
         M: Int, K: Int,
         commandQueue: MTLCommandQueue
     ) async throws -> [Float16] {
+        try validateInputShape(matrixCount: a.count, vectorCount: x.count, M: M, K: K)
+
         let bufA = device.makeBuffer(
             bytes: a, length: a.count * MemoryLayout<Float16>.stride,
             options: .storageModeShared
@@ -115,10 +119,21 @@ public final class GEMVKernel: Sendable {
         let ptr = bufY.contents().bindMemory(to: Float16.self, capacity: M)
         return Array(UnsafeBufferPointer(start: ptr, count: M))
     }
+
+    private func validateInputShape(matrixCount: Int, vectorCount: Int, M: Int, K: Int) throws {
+        guard matrixCount == M * K else {
+            throw GEMVError.invalidMatrixShape
+        }
+        guard vectorCount == K else {
+            throw GEMVError.invalidVectorShape
+        }
+    }
 }
 
 public enum GEMVError: Error, Sendable {
     case libraryNotFound
     case functionNotFound(String)
     case encodingFailed
+    case invalidMatrixShape
+    case invalidVectorShape
 }

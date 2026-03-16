@@ -133,6 +133,7 @@ public final class KVCache: Sendable {
 
     public func retrieve<T>(layer: Int, asType: T.Type) throws -> ([T], [T]) {
         guard (0..<numLayers).contains(layer) else { throw KVCacheError.invalidLayer(layer) }
+        try validateRequestedType(asType)
 
         let state = layerStates.withLock { $0[layer] }
         let currentLen = min(state.totalWritten, maxSeqLen)
@@ -202,6 +203,17 @@ public final class KVCache: Sendable {
             states[layer].writePos = (states[layer].writePos + 1) % maxSeqLen
             states[layer].totalWritten += 1
             return writePos
+        }
+    }
+
+    private func validateRequestedType<T>(_ requestedType: T.Type) throws {
+        switch precision {
+        case .float32:
+            guard requestedType == Float.self else { throw KVCacheError.precisionMismatch }
+        case .float16:
+            guard requestedType == Float16.self else { throw KVCacheError.precisionMismatch }
+        case .float8:
+            guard requestedType == UInt8.self else { throw KVCacheError.precisionMismatch }
         }
     }
 }

@@ -173,4 +173,27 @@ struct KVCacheTests {
         #expect(keyBuffer.length == maxSeqLen * numKVHeads * headDim * MemoryLayout<Float>.stride)
         #expect(valueBuffer.length == maxSeqLen * numKVHeads * headDim * MemoryLayout<Float>.stride)
     }
+
+    @Test func retrieveRejectsMismatchedElementType() throws {
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: 8,
+            numLayers: 1,
+            numKVHeads: 1,
+            headDim: 4,
+            precision: .float16
+        )
+
+        try cache.appendF16(layer: 0, keys: [1, 2, 3, 4], values: [5, 6, 7, 8])
+
+        do {
+            _ = try cache.retrieve(layer: 0, asType: Float.self)
+            Issue.record("Expected precisionMismatch when retrieving Float16 cache as Float")
+        } catch let error as KVCacheError {
+            if case .precisionMismatch = error {
+                return
+            }
+            Issue.record("Expected precisionMismatch, got \(error)")
+        }
+    }
 }
