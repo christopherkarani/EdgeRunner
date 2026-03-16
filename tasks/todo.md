@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M3
-- Current task: Task 5 (`in_progress`)
+- Current task: Task 8 (`in_progress`)
 - Baseline before execution: `swift test` passes with 177 tests in 29 suites
 
 ## Checklist
@@ -12,9 +12,9 @@
 - [x] Task 2: GGUF header parser
 - [x] Task 3: GGUF tensor table and memory mapping
 - [x] Task 4: Q4_0 dequantisation kernel
-- [ ] Task 5: Q8_0 dequantisation kernel
-- [ ] Task 6: Q4_K_M dequantisation kernel
-- [ ] Task 7: SafeTensor loader
+- [x] Task 5: Q8_0 dequantisation kernel
+- [x] Task 6: Q4_K_M dequantisation kernel
+- [x] Task 7: SafeTensor loader
 - [ ] Task 8: NPZ loader
 - [ ] Task 9: Llama 3 architecture
 - [ ] Task 10: Convenience load API
