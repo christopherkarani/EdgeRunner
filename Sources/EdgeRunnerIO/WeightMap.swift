@@ -87,6 +87,7 @@ public struct TensorStorage: @unchecked Sendable {
     // This wrapper carries an immutable MTLBuffer reference plus metadata.
     // The buffer is created outside the type and is not mutated through this API.
     public let buffer: MTLBuffer
+    public let byteOffset: Int
     public let dataType: TensorDataType
     public let shape: [Int]
     public let name: String
@@ -103,12 +104,14 @@ public struct TensorStorage: @unchecked Sendable {
 
     public init(
         buffer: MTLBuffer,
+        byteOffset: Int = 0,
         dataType: TensorDataType,
         shape: [Int],
         name: String,
         owner: AnyObject? = nil
     ) {
         self.buffer = buffer
+        self.byteOffset = byteOffset
         self.dataType = dataType
         self.shape = shape
         self.name = name
