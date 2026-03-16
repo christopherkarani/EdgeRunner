@@ -2,7 +2,7 @@
 
 ## Status
 - Current milestone: M2
-- Current task: Task 14 - Integration Tests & Perplexity Verification (`in_progress`)
+- Current task: M2 remaining tasks complete (`completed`)
 - Baseline before execution: `swift build` passes, `swift test` passes with 80 tests
 
 ## Checklist
@@ -19,9 +19,11 @@
 - [x] Task 11: EdgeRunnerModule Protocol
 - [x] Task 12: Transformer Block Composition
 - [x] Task 13: GPT-2 Reference Implementation
-- [ ] Task 14: Integration Tests & Perplexity Verification
-- [ ] Final verification: `swift build`
-- [ ] Final verification: `swift test`
+- [x] Task 14: Integration Tests & Perplexity Verification
+- [x] Final verification: `swift build`
+- [x] Final verification: `swift test`
 
 ## Review
-- Pending. Populate after task 14 with final verification notes, total test count, and git log summary.
+- `swift build` passes.
+- `swift test` passes with 168 tests across 29 suites.
+- Remaining M2 tasks 3-14 are implemented and committed in sequence.
