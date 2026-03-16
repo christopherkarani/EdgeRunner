@@ -2,25 +2,6 @@ import Foundation
 import Metal
 import EdgeRunnerMetal
 
-private struct DequantParams {
-    var blockCount: UInt32
-    var outputOffset: UInt32
-}
-
-private struct DequantGEMVParams {
-    var rows: UInt32
-    var cols: UInt32
-    var blocksPerRow: UInt32
-}
-
-public enum DequantKernelError: Error, Sendable {
-    case encodingFailed
-    case invalidBlockDataCount(expected: Int, actual: Int)
-    case invalidMatrixShape
-    case invalidVectorShape
-    case allocationFailed(byteCount: Int)
-}
-
 public final class DequantQ4_0Kernel: Sendable {
     private let device: MTLDevice
     private let dequantPipeline: MTLComputePipelineState
