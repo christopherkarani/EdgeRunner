@@ -1,0 +1,47 @@
+{
+  "": {
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/master.swiftdeps"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/BlobfileWriterTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/DequantDispatcherTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoModelConfigTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoTensorNameMapperTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/RoPEBridgeTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/WeightConverterTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.dia"
+  }
+}

@@ -1,7 +1,7 @@
 #include "ane_interop_io.h"
 #include <string.h>
 
-void ane_interop_io_read_fp16(
+void er_ane_interop_io_read_fp16(
     IOSurfaceRef surface,
     int32_t channelOffset,
     int32_t width,
@@ -42,7 +42,7 @@ void ane_interop_io_read_fp16(
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 }
 
-void ane_interop_io_write_fp16(
+void er_ane_interop_io_write_fp16(
     IOSurfaceRef surface,
     int32_t channelOffset,
     int32_t width,

@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .library(name: "EdgeRunner", targets: ["EdgeRunner"]),
+        .library(name: "EspressoEdgeRunner", targets: ["EspressoEdgeRunner"]),
     ],
     targets: [
         .target(

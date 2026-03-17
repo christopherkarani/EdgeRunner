@@ -9,6 +9,20 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/AutoTuner.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/AutoTuner.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Generation/SpeculativeDecoder.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/GenerationError.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/ComputeGraph.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ComputeGraph.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ComputeGraph.swift.o",
@@ -30,12 +44,103 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorOp.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorOp.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/GreedySampler.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/MinPSampler.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/RepetitionPenalty.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingPipeline.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingStrategy.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SeededRandomSource.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TemperatureSampler.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopKSampler.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopPSampler.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Shape.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.swift.o",
     "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape~partial.swiftmodule",
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/ConstrainedDecoder.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/GrammarState.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/JSONSchemaExtractor.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/StructuredGenerator.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.dia"
   },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tensor.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Tensor.d",
@@ -57,5 +162,33 @@
     "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorStorage~partial.swiftmodule",
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorStorage.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorStorage.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/BPETokenizer.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/SpecialTokens.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerProtocol.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerVocabulary.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.dia"
   }
 }

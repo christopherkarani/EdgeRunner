@@ -9,6 +9,13 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/ActivationTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/ActivationTests.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BufferCacheTests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BufferCacheTests.swift.o",
@@ -51,6 +58,13 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/GQATests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/GQATests.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.swift.o",
@@ -58,12 +72,26 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.swift.o",
     "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests~partial.swiftmodule",
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.dia"
   },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MetalBackendTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MetalBackendTests.d",

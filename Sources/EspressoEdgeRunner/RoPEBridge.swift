@@ -16,7 +16,7 @@ public struct DefaultANEIOSurfaceIO: ANEIOSurfaceIO, Sendable {
     public func readFP16(surface: IOSurfaceRef, channelOffset: Int32, width: Int32, height: Int32) -> [UInt16] {
         guard width > 0, height > 0 else { return [] }
         var buffer = [UInt16](repeating: 0, count: Int(width) * Int(height))
-        ane_interop_io_read_fp16(surface, channelOffset, width, height, &buffer)
+        er_ane_interop_io_read_fp16(surface, channelOffset, width, height, &buffer)
         return buffer
     }
 
@@ -24,7 +24,7 @@ public struct DefaultANEIOSurfaceIO: ANEIOSurfaceIO, Sendable {
         guard !data.isEmpty else { return }
         data.withUnsafeBufferPointer { ptr in
             guard let base = ptr.baseAddress else { return }
-            ane_interop_io_write_fp16(surface, channelOffset, width, height, base)
+            er_ane_interop_io_write_fp16(surface, channelOffset, width, height, base)
         }
     }
 }

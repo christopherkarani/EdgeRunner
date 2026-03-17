@@ -65,6 +65,13 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LlamaModelTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LlamaModelTests.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPolicyTests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPolicyTests.swift.o",

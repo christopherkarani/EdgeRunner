@@ -2,6 +2,11 @@
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ComputeGraphTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/FusionEngineTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/IntegrationTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingBenchmarks.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ShapeTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SpeculativeDecodingTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/StructuredGenerationTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorScalarTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TokenizerTests.swift

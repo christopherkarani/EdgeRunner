@@ -2,6 +2,34 @@
   "": {
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/master.swiftdeps"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.swift.o",
@@ -9,12 +37,26 @@
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.dia"
   },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.dia"
+  },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.d",
     "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.swift.o",
     "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests~partial.swiftmodule",
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.dia"
   },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ModuleTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ModuleTests.d",
@@ -36,6 +78,27 @@
     "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/PlaceholderTests~partial.swiftmodule",
     "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/PlaceholderTests.swiftdeps",
     "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/PlaceholderTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.dia"
+  },
+  "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift": {
+    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.d",
+    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.swift.o",
+    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.swiftdeps",
+    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.dia"
   },
   "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/TransformerBlockTests.swift": {
     "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/TransformerBlockTests.d",

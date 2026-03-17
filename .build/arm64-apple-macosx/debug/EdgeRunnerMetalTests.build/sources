@@ -1,12 +1,16 @@
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ActivationTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ElementwiseKernelTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/FlashAttentionTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMMTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMVTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GQATests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MetalBackendTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/RMSNormTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ReductionKernelTests.swift

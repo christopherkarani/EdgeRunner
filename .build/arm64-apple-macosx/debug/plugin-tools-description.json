@@ -265,11 +265,43 @@
       "inputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/BackendFactory.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/EdgeRunnerLocalBackend.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/FoundationModelsBackend.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatMessage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatViewModelState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ModelInfo.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunner.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunnerLanguageModel.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Metrics/Perplexity.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ModelConfiguration.swift"
         },
         {
           "kind" : "file",
@@ -297,6 +329,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/EdgeRunnerModule.swift"
         },
         {
@@ -310,6 +346,34 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/TensorBox.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/SamplingConfiguration.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/GenerationSession.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/TokenStream.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/EdgeRunnerTool.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolCallParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolChoice.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolExecutor.swift"
         },
         {
           "kind" : "file",
@@ -352,18 +416,34 @@
       "moduleName" : "EdgeRunner",
       "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunner.swiftmodule",
       "objects" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/BackendFactory.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLocalBackend.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/FoundationModelsBackend.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatMessage.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatViewModelState.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelInfo.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunner.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLanguageModel.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Perplexity.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelConfiguration.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Embedding.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GPT2Attention.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GPT2Block.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GPT2Config.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GPT2FeedForward.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GPT2Model.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/LlamaLanguageModel.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerModule.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Linear.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Sequential.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TensorBox.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/SamplingConfiguration.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GenerationSession.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TokenStream.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerTool.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolCallParser.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolChoice.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolExecutor.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/FeedForward.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/MultiHeadAttention.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TransformerBlock.swift.o",
@@ -434,11 +514,43 @@
       "outputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/BackendFactory.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLocalBackend.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/FoundationModelsBackend.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatMessage.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatViewModelState.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelInfo.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunner.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLanguageModel.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Perplexity.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelConfiguration.swift.o"
         },
         {
           "kind" : "file",
@@ -466,6 +578,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/LlamaLanguageModel.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerModule.swift.o"
         },
         {
@@ -479,6 +595,34 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TensorBox.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/SamplingConfiguration.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GenerationSession.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TokenStream.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerTool.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolCallParser.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolChoice.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolExecutor.swift.o"
         },
         {
           "kind" : "file",
@@ -503,18 +647,34 @@
       ],
       "prepareForIndexing" : false,
       "sources" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/BackendFactory.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/EdgeRunnerLocalBackend.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/FoundationModelsBackend.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatMessage.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatViewModelState.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ModelInfo.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunner.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunnerLanguageModel.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Metrics/Perplexity.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ModelConfiguration.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/Embedding.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Attention.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Block.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Config.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2FeedForward.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Model.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/EdgeRunnerModule.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/Linear.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/Sequential.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/TensorBox.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/SamplingConfiguration.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/GenerationSession.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/TokenStream.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/EdgeRunnerTool.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolCallParser.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolChoice.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolExecutor.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/FeedForward.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/MultiHeadAttention.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/TransformerBlock.swift",
@@ -534,6 +694,14 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Generation/SpeculativeDecoder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/GenerationError.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/ComputeGraph.swift"
         },
         {
@@ -546,7 +714,59 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/GreedySampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/MinPSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/RepetitionPenalty.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingPipeline.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingStrategy.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SeededRandomSource.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TemperatureSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopKSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopPSampler.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Shape.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/ConstrainedDecoder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/GrammarState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/JSONSchemaExtractor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/StructuredGenerator.swift"
         },
         {
           "kind" : "file",
@@ -559,6 +779,22 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorStorage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/BPETokenizer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/SpecialTokens.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerProtocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerVocabulary.swift"
         },
         {
           "kind" : "file",
@@ -586,13 +822,32 @@
       "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerCore.swiftmodule",
       "objects" : [
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/AutoTuner.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ComputeGraph.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/FusionEngine.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorOp.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Tensor.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorScalar.swift.o",
-        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorStorage.swift.o"
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TensorStorage.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -663,6 +918,14 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ComputeGraph.swift.o"
         },
         {
@@ -675,7 +938,59 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.swift.o"
         },
         {
           "kind" : "file",
@@ -691,19 +1006,54 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerCore.swiftmodule"
         }
       ],
       "prepareForIndexing" : false,
       "sources" : [
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/AutoTuner.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Generation/SpeculativeDecoder.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/GenerationError.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/ComputeGraph.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/FusionEngine.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/TensorOp.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/GreedySampler.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/MinPSampler.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/RepetitionPenalty.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingPipeline.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingStrategy.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SeededRandomSource.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TemperatureSampler.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopKSampler.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopPSampler.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Shape.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/ConstrainedDecoder.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/GrammarState.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/JSONSchemaExtractor.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/StructuredGenerator.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tensor.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorScalar.swift",
-        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorStorage.swift"
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorStorage.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/BPETokenizer.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/SpecialTokens.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerProtocol.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerVocabulary.swift"
       ],
       "tempsPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build",
       "wholeModuleOptimization" : false
@@ -731,7 +1081,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingTests.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ShapeTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SpeculativeDecodingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/StructuredGenerationTests.swift"
         },
         {
           "kind" : "file",
@@ -740,6 +1106,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TokenizerTests.swift"
         },
         {
           "kind" : "file",
@@ -770,9 +1140,14 @@
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/ComputeGraphTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/FusionEngineTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/IntegrationTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingBenchmarks.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/ShapeTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SpeculativeDecodingTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/StructuredGenerationTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TensorScalarTests.swift.o",
-        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TensorTests.swift.o"
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TensorTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TokenizerTests.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -854,7 +1229,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/ShapeTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SpeculativeDecodingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/StructuredGenerationTests.swift.o"
         },
         {
           "kind" : "file",
@@ -863,6 +1254,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TensorTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TokenizerTests.swift.o"
         },
         {
           "kind" : "file",
@@ -875,9 +1270,14 @@
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ComputeGraphTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/FusionEngineTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/IntegrationTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingBenchmarks.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ShapeTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SpeculativeDecodingTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/StructuredGenerationTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorScalarTests.swift",
-        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift"
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TokenizerTests.swift"
       ],
       "tempsPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build",
       "wholeModuleOptimization" : false
@@ -1272,6 +1672,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift"
         },
         {
@@ -1336,6 +1740,7 @@
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LlamaBlockTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LlamaConfigTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LlamaModelTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPolicyTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPressureHandlerTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/ModelLoaderTests.swift.o",
@@ -1446,6 +1851,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPolicyTests.swift.o"
         },
         {
@@ -1496,6 +1905,7 @@
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaBlockTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaConfigTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaModelTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPressureHandlerTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/ModelLoaderTests.swift",
@@ -1791,6 +2201,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift"
         },
         {
@@ -1815,11 +2229,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift"
         },
         {
           "kind" : "file",
@@ -1871,14 +2297,18 @@
       "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerMetalTests.swiftmodule",
       "objects" : [
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/ActivationTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BufferCacheTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/ElementwiseKernelTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/FlashAttentionTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/GEMMTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/GEMVTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/GQATests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MetalBackendTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/RMSNormTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/ReductionKernelTests.swift.o",
@@ -1955,6 +2385,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BufferCacheTests.swift.o"
         },
         {
@@ -1979,11 +2413,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.swift.o"
         },
         {
           "kind" : "file",
@@ -2021,14 +2467,18 @@
       "prepareForIndexing" : false,
       "sources" : [
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ActivationTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ElementwiseKernelTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/FlashAttentionTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMMTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMVTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GQATests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MetalBackendTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/RMSNormTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ReductionKernelTests.swift",
@@ -2052,6 +2502,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunnerTests.swiftmodule"
         },
         {
           "kind" : "file",
@@ -2102,6 +2556,12 @@
         "-I",
         "-Xcc",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+        "-Xcc",
+        "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
         "-module-cache-path",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
         "-parseable-output",
@@ -2166,11 +2626,35 @@
       "inputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift"
         },
         {
           "kind" : "file",
@@ -2183,6 +2667,18 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PlaceholderTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift"
         },
         {
           "kind" : "file",
@@ -2205,11 +2701,20 @@
       "moduleName" : "EdgeRunnerTests",
       "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerTests.swiftmodule",
       "objects" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ModuleTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/PerplexityTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/PlaceholderTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.swift.o",
         "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/TransformerBlockTests.swift.o"
       ],
       "otherArguments" : [
@@ -2276,11 +2781,35 @@
       "outputs" : [
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.swift.o"
         },
         {
           "kind" : "file",
@@ -2296,6 +2825,18 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/TransformerBlockTests.swift.o"
         },
         {
@@ -2305,14 +2846,374 @@
       ],
       "prepareForIndexing" : false,
       "sources" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ModuleTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PerplexityTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PlaceholderTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift",
         "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/TransformerBlockTests.swift"
       ],
       "tempsPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.EspressoEdgeRunner-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/sources",
+      "importPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/BlobfileWriter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/DequantDispatcher.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoModelConfig.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoTensorNameMapper.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/RoPEBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/WeightConverter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerIO.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerMetal.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/ANEInteropIO.c.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "EspressoEdgeRunner",
+      "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunner.swiftmodule",
+      "objects" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/BlobfileWriter.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/DequantDispatcher.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoError.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoModelConfig.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoTensorNameMapper.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/RoPEBridge.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/WeightConverter.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx26.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j14",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-Xcc",
+        "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerSharedTypes.build/module.modulemap",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+        "-Xcc",
+        "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
+        "-module-cache-path",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/include/EspressoEdgeRunner-Swift.h",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "edgerunner"
+      ],
+      "outputFileMapPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/BlobfileWriter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/DequantDispatcher.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoError.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoModelConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoTensorNameMapper.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/RoPEBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/WeightConverter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunner.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/BlobfileWriter.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/DequantDispatcher.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoError.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoModelConfig.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoTensorNameMapper.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/RoPEBridge.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/WeightConverter.swift"
+      ],
+      "tempsPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.EspressoEdgeRunnerTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/sources",
+      "importPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/BlobfileWriterTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/DequantDispatcherTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoModelConfigTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoTensorNameMapperTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/RoPEBridgeTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/WeightConverterTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunner.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerIO.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerMetal.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "EspressoEdgeRunnerTests",
+      "moduleOutputPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunnerTests.swiftmodule",
+      "objects" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.swift.o",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx26.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j14",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-Xcc",
+        "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
+        "-Xcc",
+        "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerSharedTypes.build/module.modulemap",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+        "-module-cache-path",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "edgerunner"
+      ],
+      "outputFileMapPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules/EspressoEdgeRunnerTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/BlobfileWriterTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/DequantDispatcherTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoModelConfigTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoTensorNameMapperTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/RoPEBridgeTests.swift",
+        "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/WeightConverterTests.swift"
+      ],
+      "tempsPath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build",
       "wholeModuleOptimization" : false
     }
   },
@@ -2327,18 +3228,34 @@
       "-package-name",
       "edgerunner",
       "-c",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/BackendFactory.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/EdgeRunnerLocalBackend.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/FoundationModelsBackend.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatMessage.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatViewModelState.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ModelInfo.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunner.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunnerLanguageModel.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Metrics/Perplexity.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ModelConfiguration.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/Embedding.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Attention.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Block.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Config.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2FeedForward.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/GPT2Model.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/EdgeRunnerModule.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/Linear.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/Sequential.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/TensorBox.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/SamplingConfiguration.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/GenerationSession.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/TokenStream.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/EdgeRunnerTool.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolCallParser.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolChoice.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolExecutor.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/FeedForward.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/MultiHeadAttention.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Transformer/TransformerBlock.swift",
@@ -2415,13 +3332,32 @@
       "edgerunner",
       "-c",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/AutoTuner.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Generation/SpeculativeDecoder.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/GenerationError.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/ComputeGraph.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/FusionEngine.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/TensorOp.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/GreedySampler.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/MinPSampler.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/RepetitionPenalty.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingPipeline.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingStrategy.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SeededRandomSource.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TemperatureSampler.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopKSampler.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopPSampler.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Shape.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/ConstrainedDecoder.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/GrammarState.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/JSONSchemaExtractor.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/StructuredGenerator.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tensor.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorScalar.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorStorage.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/BPETokenizer.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/SpecialTokens.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerProtocol.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerVocabulary.swift",
       "-I",
       "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
       "-target",
@@ -2497,9 +3433,14 @@
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ComputeGraphTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/FusionEngineTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/IntegrationTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingBenchmarks.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ShapeTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SpeculativeDecodingTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/StructuredGenerationTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorScalarTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TokenizerTests.swift",
       "-I",
       "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
       "-target",
@@ -2675,6 +3616,7 @@
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaBlockTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaConfigTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaModelTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPressureHandlerTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/ModelLoaderTests.swift",
@@ -2843,14 +3785,18 @@
       "edgerunner",
       "-c",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ActivationTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ElementwiseKernelTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/FlashAttentionTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMMTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GEMVTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/GQATests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MetalBackendTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/RMSNormTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/ReductionKernelTests.swift",
@@ -2952,6 +3898,12 @@
       "-I",
       "-Xcc",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+      "-Xcc",
+      "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
       "-module-cache-path",
       "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
       "-parseable-output",
@@ -3000,11 +3952,20 @@
       "-package-name",
       "edgerunner",
       "-c",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ModuleTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PerplexityTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PlaceholderTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift",
       "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/TransformerBlockTests.swift",
       "-I",
       "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
@@ -3068,9 +4029,178 @@
       "edgerunner",
       "-driver-use-frontend-path",
       "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "EspressoEdgeRunner" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "EspressoEdgeRunner",
+      "-package-name",
+      "edgerunner",
+      "-c",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/BlobfileWriter.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/DequantDispatcher.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoError.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoModelConfig.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoTensorNameMapper.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/RoPEBridge.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/WeightConverter.swift",
+      "-I",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx26.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j14",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-Xcc",
+      "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerSharedTypes.build/module.modulemap",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+      "-Xcc",
+      "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
+      "-module-cache-path",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/include/EspressoEdgeRunner-Swift.h",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "edgerunner",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "EspressoEdgeRunnerTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "EspressoEdgeRunnerTests",
+      "-package-name",
+      "edgerunner",
+      "-c",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/BlobfileWriterTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/DequantDispatcherTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoModelConfigTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoTensorNameMapperTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/RoPEBridgeTests.swift",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/WeightConverterTests.swift",
+      "-I",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx26.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j14",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-Xcc",
+      "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/module.modulemap",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include",
+      "-Xcc",
+      "-fmodule-map-file=/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerSharedTypes.build/module.modulemap",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include",
+      "-module-cache-path",
+      "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "edgerunner",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
     ]
   },
   "targetDependencyMap" : {
+    "ANEInteropIO" : [
+
+    ],
     "EdgeRunner" : [
       "EdgeRunnerCore",
       "EdgeRunnerIO",
@@ -3111,6 +4241,9 @@
       "EdgeRunnerTests",
       "EdgeRunner",
       "EdgeRunnerCore",
+      "EspressoEdgeRunnerTests",
+      "EspressoEdgeRunner",
+      "ANEInteropIO",
       "EdgeRunnerIO",
       "EdgeRunnerMetal",
       "EdgeRunnerSharedTypes"
@@ -3121,6 +4254,19 @@
     "EdgeRunnerTests" : [
       "EdgeRunner",
       "EdgeRunnerCore",
+      "EdgeRunnerIO",
+      "EdgeRunnerMetal",
+      "EdgeRunnerSharedTypes"
+    ],
+    "EspressoEdgeRunner" : [
+      "ANEInteropIO",
+      "EdgeRunnerIO",
+      "EdgeRunnerMetal",
+      "EdgeRunnerSharedTypes"
+    ],
+    "EspressoEdgeRunnerTests" : [
+      "EspressoEdgeRunner",
+      "ANEInteropIO",
       "EdgeRunnerIO",
       "EdgeRunnerMetal",
       "EdgeRunnerSharedTypes"
@@ -3157,11 +4303,43 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/BackendFactory.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/EdgeRunnerLocalBackend.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Backends/FoundationModelsBackend.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatMessage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ChatViewModelState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Chat/ModelInfo.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunner.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/EdgeRunnerLanguageModel.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Metrics/Perplexity.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ModelConfiguration.swift"
         },
         {
           "kind" : "file",
@@ -3189,6 +4367,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/EdgeRunnerModule.swift"
         },
         {
@@ -3202,6 +4384,34 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Module/TensorBox.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/SamplingConfiguration.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/GenerationSession.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Streaming/TokenStream.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/EdgeRunnerTool.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolCallParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolChoice.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ToolCalling/ToolExecutor.swift"
         },
         {
           "kind" : "file",
@@ -3235,6 +4445,14 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Generation/SpeculativeDecoder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/GenerationError.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Graph/ComputeGraph.swift"
         },
         {
@@ -3247,7 +4465,59 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/GreedySampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/MinPSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/RepetitionPenalty.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingPipeline.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SamplingStrategy.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/SeededRandomSource.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TemperatureSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopKSampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Sampling/TopPSampler.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Shape.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/ConstrainedDecoder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/GrammarState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/JSONSchemaExtractor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/StructuredGeneration/StructuredGenerator.swift"
         },
         {
           "kind" : "file",
@@ -3260,6 +4530,22 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/TensorStorage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/BPETokenizer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/SpecialTokens.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerProtocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerCore/Tokenizer/TokenizerVocabulary.swift"
         }
       ],
       "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/sources"
@@ -3289,7 +4575,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SamplingTests.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/ShapeTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/SpeculativeDecodingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/StructuredGenerationTests.swift"
         },
         {
           "kind" : "file",
@@ -3298,6 +4600,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TensorTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerCoreTests/TokenizerTests.swift"
         }
       ],
       "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/sources"
@@ -3457,6 +4763,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift"
         },
         {
@@ -3585,6 +4895,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BenchmarkHelpers.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/BufferCacheTests.swift"
         },
         {
@@ -3609,11 +4923,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KVCacheTests.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/KernelBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/LayerNormTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerMetalTests/MemoryBenchmarks.swift"
         },
         {
           "kind" : "file",
@@ -3669,11 +4995,39 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/ANEInteropIO.build/ANEInteropIO.c.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/BackendFactory.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatMessage.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ChatViewModelState.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunner.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLanguageModel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerLocalBackend.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerModule.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/EdgeRunnerTool.swift.o"
         },
         {
           "kind" : "file",
@@ -3682,6 +5036,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/FeedForward.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/FoundationModelsBackend.swift.o"
         },
         {
           "kind" : "file",
@@ -3705,7 +5063,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/GenerationSession.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Linear.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/LlamaLanguageModel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelConfiguration.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ModelInfo.swift.o"
         },
         {
           "kind" : "file",
@@ -3717,11 +5091,31 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/SamplingConfiguration.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/Sequential.swift.o"
         },
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TensorBox.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/TokenStream.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolCallParser.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolChoice.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner.build/ToolExecutor.swift.o"
         },
         {
           "kind" : "file",
@@ -3737,7 +5131,15 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/BPETokenizer.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ComputeGraph.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/ConstrainedDecoder.swift.o"
         },
         {
           "kind" : "file",
@@ -3745,7 +5147,59 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GenerationError.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GrammarState.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/GreedySampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/JSONSchemaExtractor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/MinPSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/RepetitionPenalty.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingPipeline.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SamplingStrategy.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SeededRandomSource.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/Shape.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpecialTokens.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/SpeculativeDecoder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/StructuredGenerator.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TemperatureSampler.swift.o"
         },
         {
           "kind" : "file",
@@ -3765,6 +5219,22 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerProtocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TokenizerVocabulary.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopKSampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCore.build/TopPSampler.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/AutoTunerTests.swift.o"
         },
         {
@@ -3781,7 +5251,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SamplingTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/ShapeTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/SpeculativeDecodingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/StructuredGenerationTests.swift.o"
         },
         {
           "kind" : "file",
@@ -3790,6 +5276,10 @@
         {
           "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TensorTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerCoreTests.build/TokenizerTests.swift.o"
         },
         {
           "kind" : "file",
@@ -3929,6 +5419,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/LoadingBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/MemoryPolicyTests.swift.o"
         },
         {
@@ -4037,6 +5531,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BenchmarkHelpers.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/BufferCacheTests.swift.o"
         },
         {
@@ -4061,11 +5559,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KVCacheTests.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/KernelBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/LayerNormTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerMetalTests.build/MemoryBenchmarks.swift.o"
         },
         {
           "kind" : "file",
@@ -4105,11 +5615,35 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BackendTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/BenchmarkReportGenerator.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ChatViewModelTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GPT2Tests.swift.o"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/GenerationBenchmarks.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/IntegrationTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/MemoryBenchmarks.swift.o"
         },
         {
           "kind" : "file",
@@ -4125,7 +5659,71 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/QwenBenchmark.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/StreamingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/ToolCallingTests.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/TransformerBlockTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/BlobfileWriter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/DequantDispatcher.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoError.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoModelConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/EspressoTensorNameMapper.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/RoPEBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/WeightConverter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/BlobfileWriterTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/DequantDispatcherTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoModelConfigTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/EspressoTensorNameMapperTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/RoPEBridgeTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/WeightConverterTests.swift.o"
         }
       ],
       "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.product/Objects.LinkFileList"
@@ -4139,11 +5737,35 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift"
         },
         {
           "kind" : "file",
@@ -4159,10 +5781,94 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/TransformerBlockTests.swift"
         }
       ],
       "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunnerTests.build/sources"
+    },
+    "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/BlobfileWriter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/DequantDispatcher.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoModelConfig.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/EspressoTensorNameMapper.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/RoPEBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EspressoEdgeRunner/WeightConverter.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/sources"
+    },
+    "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/BlobfileWriterTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/DequantDispatcherTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoModelConfigTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/EspressoTensorNameMapperTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/RoPEBridgeTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EspressoEdgeRunnerTests/WeightConverterTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EspressoEdgeRunnerTests.build/sources"
     },
     "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,

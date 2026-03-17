@@ -43,7 +43,7 @@ struct WeightConverterTests {
         )
         #expect(count == 1)
 
-        let blobURL = outputDir.appendingPathComponent("weights/token_embedding.bin")
+        let blobURL = outputDir.appendingPathComponent("embeddings/token.bin")
         let data = try Data(contentsOf: blobURL)
         #expect(data.count == 128 + 4 * 2) // header + 4 fp16 values
         #expect(data[64] == 0xEF) // magic check
@@ -70,7 +70,7 @@ struct WeightConverterTests {
         )
 
         // Read back and verify transposed: [[1,4],[2,5],[3,6]]
-        let blobURL = outputDir.appendingPathComponent("weights/layers/0/wq.bin")
+        let blobURL = outputDir.appendingPathComponent("layers/0/wq.bin")
         let data = try Data(contentsOf: blobURL)
         let payload = data.subdata(in: 128..<data.count)
         let expected: [Float] = [1, 4, 2, 5, 3, 6]
@@ -102,7 +102,7 @@ struct WeightConverterTests {
             architecture: "llama", outputDirectory: outputDir
         )
 
-        let blobURL = outputDir.appendingPathComponent("weights/layers/0/wq.bin")
+        let blobURL = outputDir.appendingPathComponent("layers/0/wq.bin")
         let data = try Data(contentsOf: blobURL)
         let payload = data.subdata(in: 128..<data.count)
         let expected: [Float] = [1, 2, 3, 4, 5, 6]
@@ -134,7 +134,7 @@ struct WeightConverterTests {
             architecture: "llama", outputDirectory: outputDir
         )
 
-        let layerDir = outputDir.appendingPathComponent("weights/layers/5")
+        let layerDir = outputDir.appendingPathComponent("layers/5")
         var isDir: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: layerDir.path, isDirectory: &isDir))
         #expect(isDir.boolValue)

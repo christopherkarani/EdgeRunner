@@ -1,6 +1,15 @@
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BackendTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ChatViewModelTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GPT2Tests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/GenerationBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/IntegrationTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/MemoryBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ModuleTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PerplexityTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PlaceholderTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/StreamingTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/ToolCallingTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/TransformerBlockTests.swift

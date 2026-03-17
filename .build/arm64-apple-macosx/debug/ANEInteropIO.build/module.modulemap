@@ -1,0 +1,4 @@
+module ANEInteropIO {
+    umbrella "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/ANEInteropIO/include"
+    export *
+}

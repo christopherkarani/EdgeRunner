@@ -7,6 +7,7 @@
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaBlockTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaConfigTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LlamaModelTests.swift
+/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/LoadingBenchmarks.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPolicyTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/MemoryPressureHandlerTests.swift
 /Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/ModelLoaderTests.swift
