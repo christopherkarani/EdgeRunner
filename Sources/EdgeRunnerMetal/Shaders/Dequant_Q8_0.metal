@@ -124,3 +124,67 @@ kernel void dequant_q8_0_gemv(
         }
     }
 }
+
+// === Float16 output variant — writes half directly to KV cache ===
+// Eliminates separate f32→f16 conversion dispatch.
+kernel void dequant_q8_0_gemv_f16out(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device half* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumf[NR] = { 0.f };
+
+    device const uchar* ax[NR];
+    for (short row = 0; row < NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) sumq += float(qs[i]) * yl[i];
+            sumf[row] += sumq * scale;
+        }
+
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short row = 0; row < NR; row++) sumf[row] = simd_sum(sumf[row]);
+
+    threadgroup float tg_sum[NR][NSG];
+    if (tiisg == 0) {
+        for (short row = 0; row < NR; row++) tg_sum[row][sgitg] = sumf[row];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) total += tg_sum[row][sg];
+            y[row0 + row] = half(total);
+        }
+    }
+}
