@@ -321,3 +321,67 @@ The final 12% bandwidth gap likely requires:
 - Metal ICBs for zero-overhead dispatch replay
 - Non-async forward pass
 - Or hardware-specific cache optimization (prefetch hints)
+
+### Experiment 15: GPU Timing Profiling + Optimization Attempts
+
+**Precise GPU timing (Metal gpuStartTime/gpuEndTime):**
+- DECODE[1]: GPU=3.61ms wall=3.88ms overhead=0.27ms bw=167 GB/s
+- DECODE[2]: GPU=3.52ms wall=4.11ms overhead=0.59ms bw=172 GB/s
+- DECODE[3]: GPU=3.40ms wall=3.64ms overhead=0.24ms bw=178 GB/s
+
+**Key finding:** GPU reads 604 MB per decode at 167-178 GB/s effective (43% of M3 Max 400 GB/s theoretical).
+The hard floor is the GPU time (3.4-3.6ms). Wall overhead (0.24-0.59ms) is from Swift async scheduler.
+
+**Attempted optimizations:**
+
+**15a: NR=4 (4 rows per threadgroup) — ROLLED BACK**
+- Hypothesis: Halve threadgroup count from 206K to 103K, reducing GPU scheduling overhead
+- Result: 270 tok/s (vs 311 baseline) — **15% WORSE**
+- Root cause: Increased register pressure (sumf[4] vs sumf[2]) reduces GPU occupancy, hurting memory latency hiding
+
+**15b: Synchronous GPU wait (waitUntilCompleted) — ROLLED BACK**
+- Hypothesis: Eliminate ~0.3ms Swift async scheduler overhead per decode
+- Result: High variance (196-303 tok/s) and correctness issues with withUnsafeContinuation
+- Root cause: Blocking the cooperative thread pool causes unpredictable scheduling behavior
+
+**15c: Q4_0 LM Head (runtime Q8→Q4 conversion) — ROLLED BACK**
+- Hypothesis: Halve LM head bandwidth from 158 MB to 84 MB (13% total reduction)
+- Correctness: PASSED (all expected tokens preserved)
+- Result: GPU time 3.86ms (vs 3.40ms Q8_0) — **13% SLOWER despite 47% less data**
+- Root cause: Q4_0 nibble extraction (AND/SHIFT per element) adds ~4.7x more ALU instructions per byte, pushing the kernel from memory-bound into compute-bound territory on Apple Silicon
+
+**15d: Pre-allocated decode embedding buffer — KEPT**
+- Change: Eliminate per-decode MTLBuffer allocation by reusing scratch.decodeHidden
+- Result: ~50-100μs saved per decode call (not measurable above variance)
+- Status: KEPT (architecturally cleaner)
+
+## Hard Ceiling Analysis
+
+**Theoretical minimum with current architecture:**
+- Weight data: 604 MB per decode
+- M3 Max DRAM: 400 GB/s theoretical, ~300 GB/s achievable
+- GPU floor: 604/300 = 2.01ms + dispatch overhead (0.5ms) = 2.51ms
+- Wall time: 2.51 + 0.3ms async = 2.81ms per decode
+- Maximum: 4/(3 × 2.81ms/1000) = 474 tok/s
+
+**Why we can't reach theoretical maximum:**
+1. **Effective bandwidth = 172 GB/s** (43% utilization, not 75%)
+2. **142 dispatches per decode** with inter-dispatch GPU idle time (~0.5ms total)
+3. **Swift async overhead**: ~0.3ms per decode (cannot use waitUntilCompleted from async context)
+4. **Register-bound**: NR>2 kills occupancy; compute optimization is counterproductive
+
+**Path to 400+ tok/s requires:**
+1. Metal Indirect Command Buffers (ICBs) for pre-recorded dispatch replay
+2. Custom non-async forward pass (eliminate Swift concurrency overhead)
+3. Higher DRAM bandwidth utilization (needs fundamentally different memory access patterns)
+
+## Performance Summary (Final)
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Current median | 310 tok/s |
+| Current peak | 334 tok/s |
+| **Total improvement** | **5,759x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+83%** |

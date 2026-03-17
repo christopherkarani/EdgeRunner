@@ -179,7 +179,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             activ: allocBuffer(maxSeq * interDim * fs),
             downOut: allocBuffer(maxSeq * dim * fs),
             finalOut: allocBuffer(maxSeq * dim * fs),
-            logits: allocBuffer(config.vocabSize * fs)
+            logits: allocBuffer(config.vocabSize * fs),
+            decodeHidden: allocBuffer(dim * fs)
         )
     }
 
@@ -234,25 +235,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let newTokenID = tokenIDs.last!
             let currentPos = previousTokenIDs.count  // 0-indexed position of new token
 
-            // Embedding lookup for single token
-            let hiddenBuf: MTLBuffer
+            // Embedding lookup for single token — use pre-allocated buffer (zero allocation)
+            let hiddenBuf = scratch.decodeHidden
             if preloadedWeights.isLoaded {
                 let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
                 let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
-                guard let hBuf = device.makeBuffer(length: dim * floatStride, options: .storageModeShared) else {
-                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for decode embedding")
-                }
-                hiddenBuf = hBuf
                 let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
                 let clampedID = min(max(newTokenID, 0), config.vocabSize - 1)
                 memcpy(dstPtr, embPtr + clampedID * dim, dim * floatStride)
             } else {
                 let embeddingFloats = try await embeddingLookup(tokenIDs: [newTokenID])
-                hiddenBuf = device.makeBuffer(
-                    bytes: embeddingFloats,
-                    length: embeddingFloats.count * floatStride,
-                    options: .storageModeShared
-                )!
+                let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
+                _ = embeddingFloats.withUnsafeBufferPointer { src in
+                    memcpy(dstPtr, src.baseAddress!, min(embeddingFloats.count, dim) * floatStride)
+                }
             }
 
             let logitsBuf = try await fusedDecodePass(
@@ -1535,6 +1531,7 @@ private struct ScratchBuffers: @unchecked Sendable {
     let downOut: MTLBuffer
     let finalOut: MTLBuffer
     let logits: MTLBuffer
+    let decodeHidden: MTLBuffer  // Pre-allocated embedding buffer for decode (dim × float)
 }
 
 // MARK: - Fused QKV Params (matches Metal ERFusedQKVParams layout)
@@ -1595,7 +1592,6 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
     private(set) var isLoaded = false
     private(set) var lmHeadRaw: MTLBuffer?
     private(set) var lmHeadCols: Int = 0
-
     func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer,
               lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
         lock.lock()
