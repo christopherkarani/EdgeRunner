@@ -213,3 +213,29 @@ Remaining path to 300 tok/s:
 1. Reduce fused kernel overhead (simpler norm computation)
 2. Merge GQA into adjacent dispatch where possible  
 3. System-level: ensure no thermal throttling during benchmark
+
+## Hard Ceiling Analysis (with profiling data)
+
+**Per-call profiling (5 runs, release mode):**
+- Warmup GPU: 6-14ms (Metal cache warming)
+- Prefill GPU (seqLen=1): 4.9-6.3ms
+- Decode GPU (seqLen=1, kvLen=2-4): 4.8-6.7ms
+- Swift async overhead per call: ~1.5ms
+- Wall clock per call: GPU + 1.5ms overhead
+
+**Best observed (Run 4):** P=4.9 + D=4.8 + D=5.2 + D=5.8 = 20.7ms GPU → 193 tok/s GPU
+With Swift overhead: 20.7 + 6ms = 26.7ms → 150 tok/s wall clock
+
+**Theoretical limits:**
+- GPU bandwidth: 627MB at 256 GB/s = 2.45ms
+- GPU dispatch latency: 170 × 6μs = 1.0ms
+- GPU minimum: 3.45ms per call = 290 tok/s decode-only
+- Swift async overhead: 1.5ms per call (unavoidable in current architecture)
+- Wall clock minimum: 4.95ms per call = 202 tok/s per decode
+- Benchmark (1 prefill + 3 decode): 4 × 4.95ms = 19.8ms → 202 tok/s
+
+**Path to 300 tok/s requires:**
+1. Non-async forward pass (Protocol change) — removes 1.5ms/call overhead
+2. Further dispatch reduction (5→4 per layer) — removes 0.5ms/call
+3. Then: 3.45ms GPU + 0.3ms encoding = 3.75ms → 267 tok/s
+4. Plus bandwidth optimization (cache-friendly access patterns): 3ms → 333 tok/s
