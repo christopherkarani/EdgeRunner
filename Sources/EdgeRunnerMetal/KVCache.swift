@@ -198,6 +198,26 @@ public final class KVCache: Sendable {
         }
     }
 
+    /// Advance write position for a layer by `count` tokens (used when GPU writes directly to cache buffers).
+    public func advanceWritePosition(layer: Int, count: Int) {
+        layerStates.withLock { states in
+            for _ in 0..<count {
+                states[layer].writePos = (states[layer].writePos + 1) % maxSeqLen
+                states[layer].totalWritten += 1
+            }
+        }
+    }
+
+    /// Set the write position for all layers to a specific count (used for prefill/reset).
+    public func setPosition(_ position: Int) {
+        layerStates.withLock { states in
+            for index in states.indices {
+                states[index].writePos = position % maxSeqLen
+                states[index].totalWritten = position
+            }
+        }
+    }
+
     private func nextWritePosition(for layer: Int) -> Int {
         layerStates.withLock { states in
             let writePos = states[layer].writePos

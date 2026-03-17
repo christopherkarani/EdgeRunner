@@ -23,12 +23,15 @@ public final class GQAKernel: Sendable {
         numHeads: Int,
         numKVHeads: Int,
         causal: Bool,
+        kvSeqLen: Int = 0,
+        qOffset: Int = 0,
         commandQueue: MTLCommandQueue
     ) async throws -> [Float] {
+        let effectiveKVSeqLen = kvSeqLen > 0 ? kvSeqLen : seqLen
         precondition(numHeads % numKVHeads == 0, "numHeads must be divisible by numKVHeads")
         precondition(q.count == seqLen * numHeads * headDim)
-        precondition(k.count == seqLen * numKVHeads * headDim)
-        precondition(v.count == seqLen * numKVHeads * headDim)
+        precondition(k.count == effectiveKVSeqLen * numKVHeads * headDim)
+        precondition(v.count == effectiveKVSeqLen * numKVHeads * headDim)
         precondition(headDim <= 128, "headDim must be <= 128")
 
         let groupSize = numHeads / numKVHeads
@@ -63,7 +66,9 @@ public final class GQAKernel: Sendable {
             scale: 1.0 / sqrt(Float(headDim)),
             causal: causal ? 1 : 0,
             kvBlockSize: UInt32(Self.blockSize),
-            qBlockSize: UInt32(Self.blockSize)
+            qBlockSize: UInt32(Self.blockSize),
+            kvSeqLen: UInt32(kvSeqLen),
+            qOffset: UInt32(qOffset)
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -102,7 +107,9 @@ public final class GQAKernel: Sendable {
         outputBuffer: MTLBuffer,
         seqLen: Int, headDim: Int,
         numHeads: Int, numKVHeads: Int,
-        causal: Bool
+        causal: Bool,
+        kvSeqLen: Int = 0,
+        qOffset: Int = 0
     ) throws {
         let groupSize = numHeads / numKVHeads
 
@@ -115,7 +122,9 @@ public final class GQAKernel: Sendable {
             scale: 1.0 / sqrt(Float(headDim)),
             causal: causal ? 1 : 0,
             kvBlockSize: UInt32(Self.blockSize),
-            qBlockSize: UInt32(Self.blockSize)
+            qBlockSize: UInt32(Self.blockSize),
+            kvSeqLen: UInt32(kvSeqLen),
+            qOffset: UInt32(qOffset)
         )
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
