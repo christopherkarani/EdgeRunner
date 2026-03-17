@@ -465,20 +465,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(normedBuf, offset: tokOff, index: 1)
                     enc.setBuffer(allQBuf, offset: qOff, index: 2)
                     enc.setBytes(&qP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (qDim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                     var kvP = ERDequantGEMVParams(rows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                     enc.setBuffer(lw.wkRaw!, offset: 0, index: 0)
                     enc.setBuffer(allKBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     // V → f32 scratch (allVBuf), then convert to f16 cache
                     enc.setBuffer(lw.wvRaw!, offset: 0, index: 0)
                     enc.setBuffer(allVBuf, offset: kvOff, index: 2)
-                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                 } else {
                     enc.setComputePipelineState(gemvPSO)
                     var qP = ERGEMVParams(M: UInt32(qDim), K: UInt32(dim), lda: UInt32(dim))
@@ -486,20 +486,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(normedBuf, offset: tokOff, index: 1)
                     enc.setBuffer(allQBuf, offset: qOff, index: 2)
                     enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (qDim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                     // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                     var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
                     enc.setBuffer(lw.wk, offset: 0, index: 0)
                     enc.setBuffer(allKBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                     // V → f32 scratch (allVBuf), then convert to f16 cache
                     enc.setBuffer(lw.wv, offset: 0, index: 0)
                     enc.setBuffer(allVBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 }
 
@@ -623,8 +623,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
                     enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                 } else {
                     enc.setComputePipelineState(gemvPSO)
                     var p = ERGEMVParams(M: UInt32(dim), K: UInt32(qDim), lda: UInt32(qDim))
@@ -632,7 +632,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
                     enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 }
             }
@@ -672,12 +672,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
                     enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     enc.setBuffer(upRaw, offset: 0, index: 0)
                     enc.setBuffer(upOutBuf, offset: intOff, index: 2)
-                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                 } else {
                     enc.setComputePipelineState(gemvPSO)
                     var p = ERGEMVParams(M: UInt32(interDim), K: UInt32(dim), lda: UInt32(dim))
@@ -685,11 +685,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
                     enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                     enc.setBuffer(lw.up, offset: 0, index: 0)
                     enc.setBuffer(upOutBuf, offset: intOff, index: 2)
-                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 }
             }
@@ -716,8 +716,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
                     enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                 } else {
                     enc.setComputePipelineState(gemvPSO)
                     var p = ERGEMVParams(M: UInt32(dim), K: UInt32(interDim), lda: UInt32(interDim))
@@ -725,7 +725,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
                     enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
                     enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                    enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 }
             }
@@ -770,8 +770,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 3) / 4, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
             let lmHeadBuf = preloadedWeights.lmHead!
             enc.setComputePipelineState(gemvPSO)
@@ -780,7 +780,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 3) / 4, height: 1, depth: 1),
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
 
@@ -896,8 +896,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                 enc.setBytes(&qkvP, length: MemoryLayout<FusedQKVParams>.stride, index: 7)
                 let totalQKVRows = qDim + kvDim + kvDim
-                enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 3) / 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 enc.setComputePipelineState(gemvPSO)
                 var qP = ERGEMVParams(M: UInt32(qDim), K: UInt32(dim), lda: UInt32(dim))
@@ -905,20 +905,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(normedBuf, offset: 0, index: 1)
                 enc.setBuffer(allQBuf, offset: 0, index: 2)
                 enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (qDim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                 var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
                 enc.setBuffer(lw.wk, offset: 0, index: 0)
                 enc.setBuffer(allKBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 // V → f32 scratch (allVBuf), then convert to f16 cache
                 enc.setBuffer(lw.wv, offset: 0, index: 0)
                 enc.setBuffer(allVBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             }
 
@@ -1025,8 +1025,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(currentHidden, offset: 0, index: 2)  // residual
                 enc.setBuffer(afterAttnBuf, offset: 0, index: 3)   // output
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
-                enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate projection + add
                 enc.setComputePipelineState(gemvPSO)
@@ -1035,7 +1035,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(attnOutBuf, offset: 0, index: 1)
                 enc.setBuffer(projBuf, offset: 0, index: 2)
                 enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 var addP = ERElementwiseParams(elementCount: UInt32(dim))
                 enc.setComputePipelineState(addPSO)
@@ -1069,8 +1069,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(activBuf, offset: 0, index: 3)
                 var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
-                enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate gate + up + SwiGLU
                 enc.setComputePipelineState(gemvPSO)
@@ -1079,11 +1079,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(ffnNormedBuf, offset: 0, index: 1)
                 enc.setBuffer(gateOutBuf, offset: 0, index: 2)
                 enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 enc.setBuffer(lw.up, offset: 0, index: 0)
                 enc.setBuffer(upOutBuf, offset: 0, index: 2)
-                enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 // SwiGLU
                 var sp = ERActivationParams(count: UInt32(interDim))
@@ -1108,8 +1108,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(afterAttnBuf, offset: 0, index: 2)   // residual
                 enc.setBuffer(layerOutputBuf, offset: 0, index: 3)  // output
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
-                enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate down + add
                 enc.setComputePipelineState(gemvPSO)
@@ -1118,7 +1118,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(activBuf, offset: 0, index: 1)
                 enc.setBuffer(downOutBuf, offset: 0, index: 2)
                 enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (dim + 3) / 4, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 var addP = ERElementwiseParams(elementCount: UInt32(dim))
                 enc.setComputePipelineState(addPSO)
@@ -1157,8 +1157,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(currentHidden, offset: 0, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 3) / 4, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
             let lmHeadBuf = preloadedWeights.lmHead!
             enc.setComputePipelineState(gemvPSO)
@@ -1167,7 +1167,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(currentHidden, offset: 0, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 3) / 4, height: 1, depth: 1),
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
 
