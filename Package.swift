@@ -38,6 +38,17 @@ let package = Package(
             dependencies: ["EdgeRunnerCore", "EdgeRunnerIO", "EdgeRunnerSharedTypes"],
             path: "Sources/EdgeRunner"
         ),
+        .target(
+            name: "ANEInteropIO",
+            path: "Sources/ANEInteropIO",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedFramework("IOSurface")]
+        ),
+        .target(
+            name: "EspressoEdgeRunner",
+            dependencies: ["EdgeRunnerIO", "EdgeRunnerMetal", "ANEInteropIO"],
+            path: "Sources/EspressoEdgeRunner"
+        ),
         .testTarget(
             name: "EdgeRunnerIOTests",
             dependencies: ["EdgeRunnerIO", "EdgeRunnerMetal"]
@@ -53,6 +64,10 @@ let package = Package(
         .testTarget(
             name: "EdgeRunnerTests",
             dependencies: ["EdgeRunner"]
+        ),
+        .testTarget(
+            name: "EspressoEdgeRunnerTests",
+            dependencies: ["EspressoEdgeRunner", "EdgeRunnerIO", "EdgeRunnerMetal"]
         ),
     ]
 )
