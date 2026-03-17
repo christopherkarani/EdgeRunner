@@ -375,13 +375,49 @@ The hard floor is the GPU time (3.4-3.6ms). Wall overhead (0.24-0.59ms) is from 
 2. Custom non-async forward pass (eliminate Swift concurrency overhead)
 3. Higher DRAM bandwidth utilization (needs fundamentally different memory access patterns)
 
+### Experiment 16: Decode Warmup (MAJOR WIN)
+- **Hypothesis:** First timed decode has ~20% cold-start penalty from GPU pipeline JIT compilation for decode-specific kernel variants
+- **Change:** Run 3 dummy decode passes during first prefill call to pre-warm all Metal pipeline states for decode. Zero KV cache and re-prefill after warmup.
+- **Files modified:** LlamaLanguageModel.swift
+- **Result:** 309 → 360 median tok/s (+16%), 334 → 373 peak (+12%)
+- **Status:** KEPT
+- **Commit:** 9b2e570
+
+### Experiment 17: Split Command Buffers (ROLLED BACK)
+- **Hypothesis:** Split layers + LM head into separate command buffers to overlap CPU encoding with GPU execution
+- **Change:** End layers encoder, create new cmdBuf+encoder for final norm + LM head
+- **Result:** 360 → 322 median tok/s — WORSE (inter-cmdBuf GPU gap exceeds encoding overlap savings)
+- **Status:** ROLLED BACK
+
 ## Performance Summary (Final)
 
 | Metric | Value |
 |--------|-------|
 | Baseline (Exp 0) | 0.058 tok/s |
-| Current median | 310 tok/s |
-| Current peak | 334 tok/s |
-| **Total improvement** | **5,759x** |
+| Current median | 355 tok/s |
+| Current peak | 373 tok/s |
+| **Total improvement** | **6,431x** |
 | llama.cpp reference | 183 tok/s |
-| **vs llama.cpp** | **+83%** |
+| **vs llama.cpp** | **+104%** |
+
+## Optimization Attempts Summary (Exp 15-17)
+
+| Attempt | Expected | Actual | Status |
+|---------|----------|--------|--------|
+| NR=4 (4 rows/TG) | +10% bandwidth | -15% (register pressure) | REVERTED |
+| Sync GPU wait | -0.3ms overhead | High variance | REVERTED |
+| Q4_0 LM head | -74 MB bandwidth | -13% (compute overhead) | REVERTED |
+| Pre-alloc decode buf | -50μs alloc | Noise level | KEPT |
+| Decode warmup | Eliminate cold-start | **+16% median** | **KEPT** |
+| Split cmd buffers | Overlap encoding | -10% (inter-buf gap) | REVERTED |
+
+## Architecture: Hard Ceiling at 172 GB/s
+
+The GPU reads 604 MB per decode step at 172 GB/s effective (43% of M3 Max 400 GB/s). The remaining 57% is lost to:
+1. **Inter-dispatch GPU idle time**: 142 dispatches × 3-5μs = 0.4-0.7ms
+2. **DRAM page management**: 196 distinct weight buffers cause TLB/page overhead
+3. **Dispatch scheduling**: Wave boundary effects, tail waste
+
+Reaching 450 tok/s needs 226 GB/s (57% utilization). This requires:
+- Metal Indirect Command Buffers for pre-recorded dispatch replay
+- Or fundamentally fewer dispatches (requires global threadgroup synchronization, not supported by Metal)
