@@ -125,3 +125,46 @@
 2. **Float16 intermediates**: Halves bandwidth for KV cache and scratch buffers.
 3. **Reduce dispatch count**: Kernel fusion (RMSNorm+GEMV, SwiGLU+down).
 4. **Flash attention**: Fused QKV attention instead of separate dispatches.
+
+### Experiment 10: Kernel Fusion — Eliminate Tiny Dispatch Overhead
+- **Root cause found via profiling**: GPU dispatch encoding is only 1.2μs (not 25μs). The 15.5ms GPU time was from Q8_0 GEMV achieving only 40 GB/s on small matrices (10% bandwidth utilization). 196 tiny non-GEMV dispatches (RMSNorm, Q/K norm, RoPE, conversions) each cost ~30μs of GPU launch latency.
+- **Phase 1**: Fused RMSNorm into QKV GEMV and Gate+Up+SwiGLU kernels. Cooperative RMSNorm: all threads compute sum of squares, simd_sum reduces, then norm applied inline during x-value loading. Saves 2 dispatches × 28 layers = 56.
+- **Result**: 64 → 107 tok/s (+67%)
+- **Commit**: 7cd8cb4
+
+- **Phase 2**: Fused Q/K per-head norm + RoPE Q + RoPE K→f16 into single kernel. Thread grid (halfDim, numHeads+numKVHeads). Cross-simdgroup norm reduction via threadgroup memory. Saves 3 dispatches × 28 layers = 84.
+- **Result**: 107 → 120 tok/s (+12%)
+- **Commit**: 76ed83a
+
+### Experiment 11: 32-Thread Single-Simdgroup GEMV Architecture  
+- **Change**: Rewrote all 5 Q8_0 GEMV kernels to use 32 threads (1 simdgroup) per threadgroup, each thread processing 1 full block (32 elements). Eliminated cross-simdgroup reduction overhead. Each kernel has independent LOCAL_NR=2.
+- **Result**: No measurable change (GEMV is bandwidth-bound, not compute-bound for our matrix sizes)
+- **Commit**: 257d48f
+
+## Current Performance
+
+| Mode | tok/s | ms/token | Dispatches/token |
+|------|-------|----------|-----------------|
+| Release | 120 | 8.3 | 170 |
+| llama.cpp ref | 183 | 5.5 | — |
+
+## Current Per-Layer Decode Dispatches (6 total)
+
+1. Fused RMSNorm + QKV GEMV (LARGE — reads wq+wk+wv Q8_0)
+2. Fused Q/K norm + RoPE Q + RoPE K→f16 (medium — per-head norm + rotation)
+3. GQA f16kv (tiny for small kvLen)
+4. Fused Wo GEMV + residual add (LARGE — reads wo Q8_0)
+5. Fused RMSNorm + Gate+Up+SwiGLU GEMV (LARGE — reads gate+up Q8_0)
+6. Fused Down GEMV + residual add (LARGE — reads down Q8_0)
+
+## Remaining Path to 300 tok/s
+
+At 120 tok/s = 8.3ms/token with 170 dispatches:
+- GEMV weight bandwidth: ~5ms (627MB at ~125 GB/s effective)
+- GQA + dispatch overhead: ~2ms (170 × ~6μs + GQA compute)  
+- Other: ~1.3ms
+
+Reaching 300 tok/s = 3.3ms/token requires:
+1. Higher GEMV bandwidth utilization (125 → 200+ GB/s)
+2. Further dispatch count reduction
+3. Flash attention for GQA
