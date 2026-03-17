@@ -46,6 +46,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Dequantized weight cache — avoids re-dequantizing on every forward pass
     private let weightCache: WeightCacheActor
 
+    // Metal buffer cache — avoids re-creating MTLBuffers from [Float] on every GEMV call
+    private let metalBufferCache: MetalBufferCacheActor
+
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -82,6 +85,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         )
 
         self.weightCache = WeightCacheActor()
+        self.metalBufferCache = MetalBufferCacheActor()
     }
 
     // MARK: - EdgeRunnerLanguageModel conformance
@@ -148,25 +152,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // 4. LM head: project last token's hidden state to vocab logits
         let lastTokenHidden = Array(hidden.suffix(dim))
 
-        if weights["lmHead.weight"] != nil {
-            let lmHeadWeight = try await readWeight("lmHead.weight")
-            return try await gemvKernel.execute(
-                a: lmHeadWeight,
-                x: lastTokenHidden,
-                M: config.vocabSize,
-                K: dim,
-                commandQueue: commandQueue
-            )
-        }
-
-        // Tied embeddings: compute logits as dot product with each embedding row (CPU)
-        // This avoids dequantizing the full 593MB embedding table at once
-        let embStorage = weights["embedding.weight"]!
-        return computeTiedLMHead(
-            hidden: lastTokenHidden,
-            embeddingStorage: embStorage,
-            vocabSize: config.vocabSize,
-            dim: dim
+        // GPU LM head — uses cached MTLBuffer to avoid per-call buffer creation
+        let lmHeadName = weights["lmHead.weight"] != nil
+            ? "lmHead.weight"
+            : "embedding.weight"
+        let lmHeadBuf = try await readWeightBuffer(lmHeadName)
+        return try await gemvKernel.executeWithWeightBuffer(
+            weightBuffer: lmHeadBuf,
+            x: lastTokenHidden,
+            M: config.vocabSize,
+            K: dim,
+            commandQueue: commandQueue
         )
     }
 
@@ -193,11 +189,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             commandQueue: commandQueue
         )
 
-        // Q, K, V projections
-        let wq = try await readWeight("\(prefix).attention.wq.weight")
-        let wk = try await readWeight("\(prefix).attention.wk.weight")
-        let wv = try await readWeight("\(prefix).attention.wv.weight")
-        let wo = try await readWeight("\(prefix).attention.wo.weight")
+        // Q, K, V projections — using cached weight MTLBuffers
+        let wqBuf = try await readWeightBuffer("\(prefix).attention.wq.weight")
+        let wkBuf = try await readWeightBuffer("\(prefix).attention.wk.weight")
+        let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
+        let woBuf = try await readWeightBuffer("\(prefix).attention.wo.weight")
 
         var allQ = [Float]()
         var allK = [Float]()
@@ -209,18 +205,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         for t in 0..<seqLen {
             let tokenHidden = Array(normed[t * dim..<(t + 1) * dim])
 
-            let q = try await gemvKernel.execute(
-                a: wq, x: tokenHidden,
+            let q = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: wqBuf, x: tokenHidden,
                 M: config.headCount * headDim, K: dim,
                 commandQueue: commandQueue
             )
-            let k = try await gemvKernel.execute(
-                a: wk, x: tokenHidden,
+            let k = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: wkBuf, x: tokenHidden,
                 M: config.kvHeadCount * headDim, K: dim,
                 commandQueue: commandQueue
             )
-            let v = try await gemvKernel.execute(
-                a: wv, x: tokenHidden,
+            let v = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: wvBuf, x: tokenHidden,
                 M: config.kvHeadCount * headDim, K: dim,
                 commandQueue: commandQueue
             )
@@ -252,12 +248,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             causal: true, commandQueue: commandQueue
         )
 
-        // Output projection + residual
+        // Output projection + residual — using cached weight buffer
         var afterAttn = hidden
         for t in 0..<seqLen {
             let tokenAttn = Array(attnOutput[t * config.headCount * headDim..<(t + 1) * config.headCount * headDim])
-            let projected = try await gemvKernel.execute(
-                a: wo, x: tokenAttn,
+            let projected = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: woBuf, x: tokenAttn,
                 M: dim, K: config.headCount * headDim,
                 commandQueue: commandQueue
             )
@@ -276,22 +272,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             commandQueue: commandQueue
         )
 
-        // SwiGLU FFN
-        let gateWeight = try await readWeight("\(prefix).feedForward.gate.weight")
-        let upWeight = try await readWeight("\(prefix).feedForward.up.weight")
-        let downWeight = try await readWeight("\(prefix).feedForward.down.weight")
+        // SwiGLU FFN — using cached weight MTLBuffers
+        let gateBuf = try await readWeightBuffer("\(prefix).feedForward.gate.weight")
+        let upBuf = try await readWeightBuffer("\(prefix).feedForward.up.weight")
+        let downBuf = try await readWeightBuffer("\(prefix).feedForward.down.weight")
 
         var output = afterAttn
         for t in 0..<seqLen {
             let tokenHidden = Array(ffnNormed[t * dim..<(t + 1) * dim])
 
-            let gateResult = try await gemvKernel.execute(
-                a: gateWeight, x: tokenHidden,
+            let gateResult = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: gateBuf, x: tokenHidden,
                 M: config.intermediateDim, K: dim,
                 commandQueue: commandQueue
             )
-            let upResult = try await gemvKernel.execute(
-                a: upWeight, x: tokenHidden,
+            let upResult = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: upBuf, x: tokenHidden,
                 M: config.intermediateDim, K: dim,
                 commandQueue: commandQueue
             )
@@ -301,8 +297,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 commandQueue: commandQueue
             )
 
-            let downResult = try await gemvKernel.execute(
-                a: downWeight, x: activated,
+            let downResult = try await gemvKernel.executeWithWeightBuffer(
+                weightBuffer: downBuf, x: activated,
                 M: dim, K: config.intermediateDim,
                 commandQueue: commandQueue
             )
@@ -385,6 +381,27 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Cache for future use
         await weightCache.set(name, value: floats)
         return floats
+    }
+
+    /// Read a weight tensor as a cached MTLBuffer for use with executeWithWeightBuffer.
+    /// On first access, dequantizes the weight (via readWeight) and creates an MTLBuffer.
+    /// Subsequent accesses return the cached MTLBuffer with zero copy.
+    private func readWeightBuffer(_ name: String) async throws -> MTLBuffer {
+        if let cached = await metalBufferCache.get(name) {
+            return cached.rawValue
+        }
+
+        let floats = try await readWeight(name)
+        guard let buffer = device.makeBuffer(
+            bytes: floats,
+            length: floats.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTLBuffer for \(name)")
+        }
+
+        await metalBufferCache.set(name, handle: MetalBufferHandle(buffer))
+        return buffer
     }
 
     /// Embedding lookup — dequantizes only the needed rows, not the full table.
@@ -549,5 +566,23 @@ private actor WeightCacheActor {
 
     func set(_ name: String, value: [Float]) {
         cache[name] = value
+    }
+}
+
+// MARK: - Metal Buffer Cache Actor
+
+/// Thread-safe cache for MTLBuffers created from dequantized weight arrays.
+/// Eliminates repeated buffer allocation + CPU→GPU copy for weight matrices
+/// that are reused across every forward pass (4-12 MB each, 196 per pass).
+/// Uses MetalBufferHandle (@unchecked Sendable) to cross actor isolation boundaries.
+private actor MetalBufferCacheActor {
+    private var cache: [String: MetalBufferHandle] = [:]
+
+    func get(_ name: String) -> MetalBufferHandle? {
+        cache[name]
+    }
+
+    func set(_ name: String, handle: MetalBufferHandle) {
+        cache[name] = handle
     }
 }

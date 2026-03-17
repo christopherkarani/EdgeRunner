@@ -69,6 +69,57 @@ public final class GEMVKernel: Sendable {
         return Array(UnsafeBufferPointer(start: ptr, count: M))
     }
 
+    /// Execute Float32 GEMV with pre-allocated weight buffer: y[M] = A[M,K] * x[K].
+    /// Avoids re-creating the weight MTLBuffer on every call.
+    public func executeWithWeightBuffer(
+        weightBuffer: MTLBuffer,
+        x: [Float],
+        M: Int, K: Int,
+        commandQueue: MTLCommandQueue
+    ) async throws -> [Float] {
+        guard x.count == K else {
+            throw GEMVError.invalidVectorShape
+        }
+
+        let bufX = device.makeBuffer(
+            bytes: x, length: x.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        )!
+        let bufY = device.makeBuffer(
+            length: M * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        )!
+
+        var params = ERGEMVParams(
+            M: UInt32(M), K: UInt32(K), lda: UInt32(K)
+        )
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer(),
+              let encoder = cmdBuf.makeComputeCommandEncoder() else {
+            throw GEMVError.encodingFailed
+        }
+
+        encoder.setComputePipelineState(pipelineF32)
+        encoder.setBuffer(weightBuffer, offset: 0, index: 0)
+        encoder.setBuffer(bufX, offset: 0, index: 1)
+        encoder.setBuffer(bufY, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+
+        let gridSize = MTLSize(width: M, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: Self.threadsPerRow, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+        cmdBuf.commit()
+        await cmdBuf.completed()
+
+        if let error = cmdBuf.error {
+            throw error
+        }
+
+        let ptr = bufY.contents().bindMemory(to: Float.self, capacity: M)
+        return Array(UnsafeBufferPointer(start: ptr, count: M))
+    }
+
     /// Execute Float16 GEMV: y[M] = A[M,K] * x[K].
     public func executeF16(
         a: [Float16], x: [Float16],
