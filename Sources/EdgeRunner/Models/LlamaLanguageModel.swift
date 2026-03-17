@@ -863,38 +863,25 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let layerVCache = layerVCaches[layerIndex]
             let cacheWriteOffF16 = currentPos * kvDim * halfStride
 
-            // 1. RMSNorm (attention) — single token: rows=1
-            do {
-                var p = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
-                enc.setComputePipelineState(rmsNormPSO)
-                enc.setBuffer(currentHidden, offset: 0, index: 0)
-                enc.setBuffer(lw.attnNorm, offset: 0, index: 1)
-                enc.setBuffer(normedBuf, offset: 0, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
-                enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-            }
-
-            // 2. Q/K/V projections for single token
+            // 1+2. FUSED RMSNorm + Q/K/V projections (saves 1 dispatch per layer)
             let useQ8Fused = lw.wqRaw != nil
             let blocksPerRowDim = dim / 32
 
             if useQ8Fused {
-                // Fused Q+K+V: 1 dispatch instead of 3.
-                // Shares x-value cache across all 3 projections.
-                // V writes f16 directly to cache (no f32→f16 conversion needed).
+                // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
                 let fusedQKVPSO = fusedQKVPipeline
                 enc.setComputePipelineState(fusedQKVPSO)
                 enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
                 enc.setBuffer(lw.wkRaw!, offset: 0, index: 1)
                 enc.setBuffer(lw.wvRaw!, offset: 0, index: 2)
-                enc.setBuffer(normedBuf, offset: 0, index: 3)
+                enc.setBuffer(currentHidden, offset: 0, index: 3)  // raw hidden (RMSNorm applied inline)
                 enc.setBuffer(allQBuf, offset: 0, index: 4)
                 enc.setBuffer(allKBuf, offset: 0, index: 5)
                 enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 6)
                 var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim),
-                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
                 enc.setBytes(&qkvP, length: MemoryLayout<FusedQKVParams>.stride, index: 7)
+                enc.setBuffer(lw.attnNorm, offset: 0, index: 8)  // RMSNorm weight
                 let totalQKVRows = qDim + kvDim + kvDim
                 enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
@@ -1047,28 +1034,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(dim, addPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 7. RMSNorm (FFN) — single token
-            do {
-                var p = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
-                enc.setComputePipelineState(rmsNormPSO)
-                enc.setBuffer(afterAttnBuf, offset: 0, index: 0)
-                enc.setBuffer(lw.ffnNorm, offset: 0, index: 1)
-                enc.setBuffer(ffnNormedBuf, offset: 0, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
-                enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-            }
-
-            // 8+9. Fused Gate + Up + SwiGLU (single dispatch: 2 GEMVs + activation)
+            // 7+8+9. FUSED RMSNorm + Gate + Up + SwiGLU (saves 1 dispatch per layer)
             if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
                 let fusedGUSPSO = fusedGateUpSiluPipeline
                 enc.setComputePipelineState(fusedGUSPSO)
                 enc.setBuffer(gateRaw, offset: 0, index: 0)
                 enc.setBuffer(upRaw, offset: 0, index: 1)
-                enc.setBuffer(ffnNormedBuf, offset: 0, index: 2)
+                enc.setBuffer(afterAttnBuf, offset: 0, index: 2)  // raw input (RMSNorm applied inline)
                 enc.setBuffer(activBuf, offset: 0, index: 3)
-                var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
-                enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
+                var p = FusedGateUpSiluParams(rows: UInt32(interDim), cols: UInt32(dim),
+                    blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+                enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
+                enc.setBuffer(lw.ffnNorm, offset: 0, index: 5)  // RMSNorm weight
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
@@ -1479,6 +1456,14 @@ private struct FusedQKVParams {
     var kvRows: UInt32         // K/V output rows (numKVHeads * headDim)
     var cols: UInt32           // input columns (dim)
     var blocksPerRow: UInt32   // Q8_0 blocks per row
+    var rmsEps: Float          // RMSNorm epsilon (for fused RMSNorm+QKV)
+}
+
+private struct FusedGateUpSiluParams {
+    var rows: UInt32
+    var cols: UInt32
+    var blocksPerRow: UInt32
+    var rmsEps: Float
 }
 
 // MARK: - Pre-loaded Weight Buffers

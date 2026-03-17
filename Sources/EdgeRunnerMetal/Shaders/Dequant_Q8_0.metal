@@ -94,15 +94,18 @@ kernel void dequant_q8_0_gemv(
     }
 }
 
-// === Fused Q+K+V projection — 3 outputs from 1 input in a single dispatch ===
-// Reads input x once, multiplies by 3 different weight matrices, writes 3 outputs.
-// Eliminates 2 dispatches per layer (3->1) and shares x-value cache across all 3 projections.
+// === Fused RMSNorm + Q+K+V projection ===
+// Single dispatch replaces: RMSNorm + QKV GEMV (saves 1 dispatch per layer).
+// Computes: normed = RMSNorm(x, normWeight, eps), then Q/K/V = dequant(W) * normed
+// RMSNorm is computed cooperatively: each threadgroup calculates the normalization
+// factor from the input, then uses it while processing weight blocks.
 
 struct ERFusedQKVParams {
     uint qRows;          // Q output rows (numHeads * headDim)
     uint kvRows;         // K/V output rows (numKVHeads * headDim)
     uint cols;           // input columns (dim)
     uint blocksPerRow;   // Q8_0 blocks per row
+    float rmsEps;        // RMSNorm epsilon
 };
 
 kernel void dequant_q8_0_fused_qkv(
@@ -113,6 +116,7 @@ kernel void dequant_q8_0_fused_qkv(
     device float* outQ [[buffer(4)]],
     device float* outK [[buffer(5)]],
     device half* outV [[buffer(6)]],     // V writes f16 directly to cache
+    device const float* normWeight [[buffer(8)]],  // RMSNorm weight [cols]
     constant ERFusedQKVParams& params [[buffer(7)]],
     uint tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
@@ -149,10 +153,27 @@ kernel void dequant_q8_0_fused_qkv(
         ax[r] = weights + localRow * nb * q8_0BlockBytes;
     }
 
+    // === Cooperative RMSNorm: compute normalization factor ===
+    // Each thread sums squares for its assigned blocks, then simd_sum reduces.
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
+
+    // === Main GEMV loop with inline RMSNorm ===
     for (short ib = tiisg; ib < nb; ib += 32) {
         device const float* xb = x + ib * 32;
         float xl[32];
-        for (short i = 0; i < 32; i++) xl[i] = xb[i];
+        // Apply RMSNorm inline: normed_x = x * rmsScale * normWeight
+        for (short i = 0; i < 32; i++) {
+            xl[i] = xb[i] * rmsScale * normWeight[ib * 32 + i];
+        }
 
         for (short r = 0; r < LOCAL_NR; r++) {
             if (row0 + r >= totalRows) break;
@@ -184,19 +205,28 @@ kernel void dequant_q8_0_fused_qkv(
     }
 }
 
-// === Fused Gate+Up+SwiGLU — 2 GEMVs + activation in 1 dispatch ===
-// Computes: activated[row] = silu(gate_proj[row]) * up_proj[row]
-// where gate_proj = dequant(Wg) * x, up_proj = dequant(Wu) * x
-// Eliminates 2 dispatches per layer (gate + up + swiglu -> 1).
+// === Fused RMSNorm + Gate+Up+SwiGLU ===
+// Single dispatch replaces: FFN RMSNorm + gate GEMV + up GEMV + SwiGLU (saves 1 dispatch per layer).
+// Computes: normed = RMSNorm(x, normWeight, eps)
+//           activated[row] = silu(gate_proj[row]) * up_proj[row]
+// where gate_proj = dequant(Wg) * normed, up_proj = dequant(Wu) * normed
 
 inline float silu_fn(float x) { return x / (1.0f + exp(-x)); }
+
+struct ERFusedGateUpSiluParams {
+    uint rows;
+    uint cols;
+    uint blocksPerRow;
+    float rmsEps;
+};
 
 kernel void dequant_q8_0_fused_gate_up_silu(
     device const uchar* wGate [[buffer(0)]],
     device const uchar* wUp [[buffer(1)]],
     device const float* x [[buffer(2)]],
     device float* activated [[buffer(3)]],
-    constant ERDequantQ8GEMVParams& params [[buffer(4)]],
+    device const float* normWeight [[buffer(5)]],  // RMSNorm weight [cols]
+    constant ERFusedGateUpSiluParams& params [[buffer(4)]],
     uint tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
@@ -206,6 +236,18 @@ kernel void dequant_q8_0_fused_gate_up_silu(
     if (row0 >= params.rows) return;
 
     const short nb = params.blocksPerRow;
+
+    // === Cooperative RMSNorm ===
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
 
     float sumGate[LOCAL_NR] = { 0.f };
     float sumUp[LOCAL_NR] = { 0.f };
@@ -222,7 +264,10 @@ kernel void dequant_q8_0_fused_gate_up_silu(
     for (short ib = tiisg; ib < nb; ib += 32) {
         device const float* xb = x + ib * 32;
         float xl[32];
-        for (short i = 0; i < 32; i++) xl[i] = xb[i];
+        // Apply RMSNorm inline
+        for (short i = 0; i < 32; i++) {
+            xl[i] = xb[i] * rmsScale * normWeight[ib * 32 + i];
+        }
 
         for (short r = 0; r < LOCAL_NR; r++) {
             if (row0 + r >= params.rows) break;
