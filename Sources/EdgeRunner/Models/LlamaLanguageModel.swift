@@ -294,10 +294,34 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 )!
             }
 
-            let logitsBuf = try await fusedPrefillPass(
+            var logitsBuf = try await fusedPrefillPass(
                 hiddenBuf: hiddenBuf,
                 seqLen: seqLen
             )
+
+            // Decode warmup: run 3 dummy decode passes to warm GPU pipeline for decode-specific
+            // kernel variants (different kvSeqLen, currentPos). This eliminates the ~20% cold-start
+            // penalty on the first real decode pass. Runs once, during the first prefill call.
+            if !decoderState.decodeWarmedUp {
+                decoderState.decodeWarmedUp = true
+                let warmupHidden = scratch.decodeHidden
+                let dummyPtr = warmupHidden.contents().bindMemory(to: Float.self, capacity: dim)
+                memset(dummyPtr, 0, dim * floatStride)
+                // Run 3 dummy decodes at increasing positions to warm all kvSeqLen variants
+                for warmupIdx in 0..<3 {
+                    let warmupPos = seqLen + warmupIdx
+                    kvCache.setPosition(warmupPos)  // Set position so mega-kernel uses correct kvSeqLen
+                    _ = try await fusedDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
+                }
+                // Zero ALL KV cache buffers to remove stale warmup data
+                for i in 0..<config.layerCount {
+                    memset(layerKCaches[i].contents(), 0, layerKCaches[i].length)
+                    memset(layerVCaches[i].contents(), 0, layerVCaches[i].length)
+                }
+                kvCache.reset()
+                // Re-run prefill to populate KV cache with correct data
+                logitsBuf = try await fusedPrefillPass(hiddenBuf: hiddenBuf, seqLen: seqLen)
+            }
 
             // Update decoder state and KV cache position
             decoderState.previousTokenIDs = tokenIDs
