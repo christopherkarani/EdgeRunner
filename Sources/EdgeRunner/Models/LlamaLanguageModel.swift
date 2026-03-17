@@ -38,6 +38,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Elementwise add pipeline (for GPU residual connections)
     private let addPipeline: MTLComputePipelineState
 
+    // Fused dequant+GEMV pipeline for Q8_0 weights (3.8x bandwidth reduction)
+    private let fusedQ8GemvPipeline: MTLComputePipelineState
+
     // Dequantization kernels
     private let dequantQ4_0: DequantQ4_0Kernel
     private let dequantQ8_0: DequantQ8_0Kernel
@@ -78,6 +81,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Load elementwise add pipeline for GPU residual connections
         let registry = try KernelRegistry(device: device)
         self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
+        self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
 
         // Initialize dequant kernels
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
@@ -219,16 +223,43 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             layers.reserveCapacity(config.layerCount)
             for i in 0..<config.layerCount {
                 let p = "layers.\(i)"
+                // Load dequantized float32 buffers
+                let wqBuf = try await readWeightBuffer("\(p).attention.wq.weight")
+                let wkBuf = try await readWeightBuffer("\(p).attention.wk.weight")
+                let wvBuf = try await readWeightBuffer("\(p).attention.wv.weight")
+                let woBuf = try await readWeightBuffer("\(p).attention.wo.weight")
+                let gatBuf = try await readWeightBuffer("\(p).feedForward.gate.weight")
+                let upBuf = try await readWeightBuffer("\(p).feedForward.up.weight")
+                let downBuf = try await readWeightBuffer("\(p).feedForward.down.weight")
+
+                // Also create raw Q8_0 buffers from the original quantized data
+                let rawNames = [
+                    "\(p).attention.wq.weight", "\(p).attention.wk.weight",
+                    "\(p).attention.wv.weight", "\(p).attention.wo.weight",
+                    "\(p).feedForward.gate.weight", "\(p).feedForward.up.weight",
+                    "\(p).feedForward.down.weight"
+                ]
+                var rawBufs = [MTLBuffer?](repeating: nil, count: 7)
+                for (idx, name) in rawNames.enumerated() {
+                    if let storage = weights[name], storage.dataType == .q8_0 {
+                        let blockCount = storage.elementCount / 32
+                        let byteCount = blockCount * 34
+                        rawBufs[idx] = device.makeBuffer(
+                            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+                            length: byteCount,
+                            options: .storageModeShared,
+                            deallocator: nil
+                        )
+                    }
+                }
+
                 layers.append(LayerWeightBuffers(
                     attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
-                    wq: try await readWeightBuffer("\(p).attention.wq.weight"),
-                    wk: try await readWeightBuffer("\(p).attention.wk.weight"),
-                    wv: try await readWeightBuffer("\(p).attention.wv.weight"),
-                    wo: try await readWeightBuffer("\(p).attention.wo.weight"),
+                    wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
                     ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
-                    gate: try await readWeightBuffer("\(p).feedForward.gate.weight"),
-                    up: try await readWeightBuffer("\(p).feedForward.up.weight"),
-                    down: try await readWeightBuffer("\(p).feedForward.down.weight")
+                    gate: gatBuf, up: upBuf, down: downBuf,
+                    wqRaw: rawBufs[0], wkRaw: rawBufs[1], wvRaw: rawBufs[2], woRaw: rawBufs[3],
+                    gateRaw: rawBufs[4], upRaw: rawBufs[5], downRaw: rawBufs[6]
                 ))
             }
             let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
@@ -249,6 +280,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let rmsNormPSO = rmsNormKernel.pipeline
         let gemvPSO = gemvKernel.f32Pipeline
+        let fusedQ8PSO = fusedQ8GemvPipeline
         let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF32
         let swigluPSO = activationKernels.swigluPipeline
@@ -275,32 +307,58 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 2. Q/K/V projections
-            enc.setComputePipelineState(gemvPSO)
+            // 2. Q/K/V projections (use fused Q8_0 GEMV when available for ~3.8x bandwidth reduction)
+            let useQ8Fused = lw.wqRaw != nil
+            let blocksPerRowDim = dim / 32  // Q8_0: 32 elements per block
+
             for t in 0..<seqLen {
                 let tokOff = t * dim * floatStride
                 let qOff = t * qDim * floatStride
                 let kvOff = t * kvDim * floatStride
-                // Q
-                var qP = ERGEMVParams(M: UInt32(qDim), K: UInt32(dim), lda: UInt32(dim))
-                enc.setBuffer(lw.wq, offset: 0, index: 0)
-                enc.setBuffer(normedBuf, offset: tokOff, index: 1)
-                enc.setBuffer(allQBuf, offset: qOff, index: 2)
-                enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: qDim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                // K
-                var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
-                enc.setBuffer(lw.wk, offset: 0, index: 0)
-                enc.setBuffer(allKBuf, offset: kvOff, index: 2)
-                enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                // V
-                enc.setBuffer(lw.wv, offset: 0, index: 0)
-                enc.setBuffer(allVBuf, offset: kvOff, index: 2)
-                enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
+                if useQ8Fused {
+                    // Fused Q8_0 dequant+GEMV: reads ~1.06 bytes/element vs 4 bytes for float32
+                    enc.setComputePipelineState(fusedQ8PSO)
+                    // Q
+                    var qP = ERDequantGEMVParams(rows: UInt32(qDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                    enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
+                    enc.setBuffer(normedBuf, offset: tokOff, index: 1)
+                    enc.setBuffer(allQBuf, offset: qOff, index: 2)
+                    enc.setBytes(&qP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: qDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    // K
+                    var kvP = ERDequantGEMVParams(rows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                    enc.setBuffer(lw.wkRaw!, offset: 0, index: 0)
+                    enc.setBuffer(allKBuf, offset: kvOff, index: 2)
+                    enc.setBytes(&kvP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    // V
+                    enc.setBuffer(lw.wvRaw!, offset: 0, index: 0)
+                    enc.setBuffer(allVBuf, offset: kvOff, index: 2)
+                    enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    enc.setComputePipelineState(gemvPSO)
+                    var qP = ERGEMVParams(M: UInt32(qDim), K: UInt32(dim), lda: UInt32(dim))
+                    enc.setBuffer(lw.wq, offset: 0, index: 0)
+                    enc.setBuffer(normedBuf, offset: tokOff, index: 1)
+                    enc.setBuffer(allQBuf, offset: qOff, index: 2)
+                    enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: qDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                    var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
+                    enc.setBuffer(lw.wk, offset: 0, index: 0)
+                    enc.setBuffer(allKBuf, offset: kvOff, index: 2)
+                    enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                    enc.setBuffer(lw.wv, offset: 0, index: 0)
+                    enc.setBuffer(allVBuf, offset: kvOff, index: 2)
+                    enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                }
             }
 
             // 3. RoPE Q
@@ -345,16 +403,28 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
             }
 
-            // 5. Output projection
-            enc.setComputePipelineState(gemvPSO)
+            // 5. Output projection (fused Q8_0 when available)
+            let blocksPerRowQDim = qDim / 32
             for t in 0..<seqLen {
-                var p = ERGEMVParams(M: UInt32(dim), K: UInt32(qDim), lda: UInt32(qDim))
-                enc.setBuffer(lw.wo, offset: 0, index: 0)
-                enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
-                enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                if useQ8Fused, let woRaw = lw.woRaw {
+                    enc.setComputePipelineState(fusedQ8PSO)
+                    var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
+                    enc.setBuffer(woRaw, offset: 0, index: 0)
+                    enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
+                    enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    enc.setComputePipelineState(gemvPSO)
+                    var p = ERGEMVParams(M: UInt32(dim), K: UInt32(qDim), lda: UInt32(qDim))
+                    enc.setBuffer(lw.wo, offset: 0, index: 0)
+                    enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
+                    enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                }
             }
 
             // 6. Residual add (attention)
@@ -381,24 +451,37 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 8. Gate + Up projections
-            enc.setComputePipelineState(gemvPSO)
+            // 8. Gate + Up projections (fused Q8_0 when available)
             for t in 0..<seqLen {
                 let tokOff = t * dim * floatStride
                 let intOff = t * interDim * floatStride
-                var p = ERGEMVParams(M: UInt32(interDim), K: UInt32(dim), lda: UInt32(dim))
-                // gate
-                enc.setBuffer(lw.gate, offset: 0, index: 0)
-                enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
-                enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                // up
-                enc.setBuffer(lw.up, offset: 0, index: 0)
-                enc.setBuffer(upOutBuf, offset: intOff, index: 2)
-                enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
+                    enc.setComputePipelineState(fusedQ8PSO)
+                    var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                    enc.setBuffer(gateRaw, offset: 0, index: 0)
+                    enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
+                    enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    enc.setBuffer(upRaw, offset: 0, index: 0)
+                    enc.setBuffer(upOutBuf, offset: intOff, index: 2)
+                    enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    enc.setComputePipelineState(gemvPSO)
+                    var p = ERGEMVParams(M: UInt32(interDim), K: UInt32(dim), lda: UInt32(dim))
+                    enc.setBuffer(lw.gate, offset: 0, index: 0)
+                    enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
+                    enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                    enc.setBuffer(lw.up, offset: 0, index: 0)
+                    enc.setBuffer(upOutBuf, offset: intOff, index: 2)
+                    enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                }
             }
 
             // 9. SwiGLU
@@ -413,16 +496,28 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(seqLen * interDim, swigluPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 10. Down projection
-            enc.setComputePipelineState(gemvPSO)
+            // 10. Down projection (fused Q8_0 when available)
+            let blocksPerRowInterDim = interDim / 32
             for t in 0..<seqLen {
-                var p = ERGEMVParams(M: UInt32(dim), K: UInt32(interDim), lda: UInt32(interDim))
-                enc.setBuffer(lw.down, offset: 0, index: 0)
-                enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
-                enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                if useQ8Fused, let downRaw = lw.downRaw {
+                    enc.setComputePipelineState(fusedQ8PSO)
+                    var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
+                    enc.setBuffer(downRaw, offset: 0, index: 0)
+                    enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
+                    enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    enc.setComputePipelineState(gemvPSO)
+                    var p = ERGEMVParams(M: UInt32(dim), K: UInt32(interDim), lda: UInt32(interDim))
+                    enc.setBuffer(lw.down, offset: 0, index: 0)
+                    enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
+                    enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                }
             }
 
             // 11. Residual add (FFN)
@@ -748,6 +843,8 @@ private actor WeightCacheActor {
 // MARK: - Pre-loaded Weight Buffers
 
 /// Holds all layer weight MTLBuffers for zero-async access during forward pass.
+/// Stores both the dequantized float32 buffer (for standard GEMV) and the raw Q8_0
+/// quantized buffer (for fused dequant+GEMV with 3.8x less bandwidth).
 private struct LayerWeightBuffers {
     let attnNorm: MTLBuffer
     let wq: MTLBuffer
@@ -758,6 +855,15 @@ private struct LayerWeightBuffers {
     let gate: MTLBuffer
     let up: MTLBuffer
     let down: MTLBuffer
+
+    // Raw Q8_0 quantized weight buffers (nil if not Q8_0)
+    let wqRaw: MTLBuffer?
+    let wkRaw: MTLBuffer?
+    let wvRaw: MTLBuffer?
+    let woRaw: MTLBuffer?
+    let gateRaw: MTLBuffer?
+    let upRaw: MTLBuffer?
+    let downRaw: MTLBuffer?
 }
 
 /// Thread-safe store for pre-loaded weights. Loaded once on first forward pass,
