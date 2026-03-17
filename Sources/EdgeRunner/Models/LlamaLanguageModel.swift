@@ -45,6 +45,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let fusedGateUpSiluPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
+    private let fusedQKNormRoPEPipeline: MTLComputePipelineState
     private let gemvAddPipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -103,6 +104,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
+        self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
 
         // Initialize dequant kernels
@@ -920,64 +922,51 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 3a. Per-head Q/K RMSNorm (single token: rows = numHeads or numKVHeads)
+            // 3. FUSED Q/K per-head norm + RoPE Q + RoPE K→f16 (replaces 4 dispatches with 1)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             if hasQKNorm {
-                // Q norm: rows = 1 * numHeads = numHeads
+                let fusedPSO = fusedQKNormRoPEPipeline
+                enc.setComputePipelineState(fusedPSO)
+                enc.setBuffer(allQBuf, offset: 0, index: 0)        // Q input
+                enc.setBuffer(allKBuf, offset: 0, index: 1)        // K input
+                enc.setBuffer(lw.qNorm!, offset: 0, index: 2)      // Q norm weight
+                enc.setBuffer(lw.kNorm!, offset: 0, index: 3)      // K norm weight
+                enc.setBuffer(ropeQBuf, offset: 0, index: 4)       // Q output (f32)
+                enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 5) // K output (f16 → cache)
+                var p = (UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim),
+                         UInt32(currentPos), ropeTheta, Float(1.0), rmsEps)
+                enc.setBytes(&p, length: 7 * 4, index: 6)
+                let halfDim = headDim / 2
+                let totalHeads = numHeads + numKVHeads
+                enc.dispatchThreads(MTLSize(width: halfDim, height: totalHeads, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, fusedPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            } else {
+                // Fallback: separate RoPE Q and K
+                let activeRopePSO = ropeKernel.pipelineNeoX
+                // RoPE Q
                 do {
-                    var p = ERRMSNormParams(rows: UInt32(numHeads), cols: UInt32(headDim), eps: rmsEps)
-                    enc.setComputePipelineState(rmsNormPSO)
+                    var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
+                        headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                    enc.setComputePipelineState(activeRopePSO)
                     enc.setBuffer(allQBuf, offset: 0, index: 0)
-                    enc.setBuffer(lw.qNorm!, offset: 0, index: 1)
-                    enc.setBuffer(ropeQBuf, offset: 0, index: 2)
-                    enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
-                    enc.dispatchThreads(MTLSize(width: numHeads, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(numHeads, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    enc.setBuffer(ropeQBuf, offset: 0, index: 1)
+                    enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+                    let halfDim = headDim / 2
+                    enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                // K norm: rows = 1 * numKVHeads = numKVHeads
+                // RoPE K→f16
                 do {
-                    var p = ERRMSNormParams(rows: UInt32(numKVHeads), cols: UInt32(headDim), eps: rmsEps)
-                    enc.setComputePipelineState(rmsNormPSO)
+                    var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
+                        headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                    enc.setComputePipelineState(ropeNeoXF16OutPipeline)
                     enc.setBuffer(allKBuf, offset: 0, index: 0)
-                    enc.setBuffer(lw.kNorm!, offset: 0, index: 1)
-                    enc.setBuffer(ropeKBuf, offset: 0, index: 2)
-                    enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
-                    enc.dispatchThreads(MTLSize(width: numKVHeads, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(numKVHeads, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                }
-            }
-
-            // 3b. RoPE Q and K for single token with startPos = currentPos
-            let useNeoXRoPE = hasQKNorm
-            let activeRopePSO = useNeoXRoPE ? ropeKernel.pipelineNeoX : ropePSO
-            let ropeQIn = hasQKNorm ? ropeQBuf : allQBuf
-            let ropeQOut = hasQKNorm ? allQBuf : ropeQBuf
-            let ropeKIn = hasQKNorm ? ropeKBuf : allKBuf
-
-            // RoPE Q (single token, seqLen=1, startPos=currentPos)
-            do {
-                var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
-                    headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
-                enc.setComputePipelineState(activeRopePSO)
-                enc.setBuffer(ropeQIn, offset: 0, index: 0)
-                enc.setBuffer(ropeQOut, offset: 0, index: 1)
-                enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
-                let halfDim = headDim / 2
-                enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-            }
-            // RoPE K (single token) → f16 directly to cache (fused RoPE+convert, saves 1 dispatch)
-            do {
-                let ropeF16PSO = useNeoXRoPE ? ropeNeoXF16OutPipeline : activeRopePSO
-                var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
-                    headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
-                enc.setComputePipelineState(ropeF16PSO)
-                enc.setBuffer(ropeKIn, offset: 0, index: 0)
-                enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 1)
-                enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
-                let halfDim = headDim / 2
-                enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
+                    enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 1)
+                    enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+                    let halfDim = headDim / 2
+                    enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                }
             }
 
             // 4. GQA: Q has seqLen=1, K/V from cache have kvSeqLen=totalKVLen
@@ -990,7 +979,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
                     kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
                 enc.setComputePipelineState(gqaPSO)
-                enc.setBuffer(ropeQOut, offset: 0, index: 0)
+                enc.setBuffer(ropeQBuf, offset: 0, index: 0)
                 enc.setBuffer(layerKCache, offset: 0, index: 1)
                 enc.setBuffer(layerVCache, offset: 0, index: 2)
                 enc.setBuffer(attnOutBuf, offset: 0, index: 3)
