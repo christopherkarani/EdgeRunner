@@ -137,6 +137,114 @@ kernel void fused_qk_norm_rope_neox(
     }
 }
 
+/// Fused Q/K norm + RoPE + GQA in a SINGLE dispatch.
+/// Replaces norm+RoPE + GQA = 2 dispatches per layer with 1.
+/// Phase 1: Q/K heads compute norm + RoPE (same as fused_qk_norm_rope_neox)
+/// Phase 2: Q heads cooperatively compute attention against KV cache
+/// Thread grid: (halfDim, numHeads+numKVHeads)
+struct ERFusedNormRoPEGQAParams {
+    uint numHeads;
+    uint numKVHeads;
+    uint headDim;
+    uint startPos;
+    float theta;
+    float scalingFactor;
+    float rmsEps;
+    uint kvSeqLen;       // total K/V cache positions
+    float attnScale;     // 1/sqrt(headDim)
+};
+
+kernel void fused_qk_norm_rope_gqa(
+    device const float *Q [[buffer(0)]],          // raw Q from GEMV [numHeads*headDim]
+    device const float *K [[buffer(1)]],          // raw K from GEMV [numKVHeads*headDim]
+    device const float *qNormW [[buffer(2)]],     // Q norm weight [headDim]
+    device const float *kNormW [[buffer(3)]],     // K norm weight [headDim]
+    device float *outAttn [[buffer(4)]],          // attention output [numHeads*headDim]
+    device half  *kCache [[buffer(5)]],           // K cache [kvSeqLen, numKVHeads, headDim]
+    device half  *vCache [[buffer(6)]],           // V cache [kvSeqLen, numKVHeads, headDim]
+    constant ERFusedNormRoPEGQAParams &p [[buffer(7)]],
+    uint2 tid [[thread_position_in_grid]]
+) {
+    uint dimPair = tid.x;
+    uint headIdx = tid.y;
+    uint halfDim = p.headDim / 2;
+    uint totalHeads = p.numHeads + p.numKVHeads;
+    if (dimPair >= halfDim || headIdx >= totalHeads) return;
+
+    bool isQ = headIdx < p.numHeads;
+    uint head = isQ ? headIdx : (headIdx - p.numHeads);
+    device const float* src = isQ ? Q : K;
+    device const float* nw = isQ ? qNormW : kNormW;
+    uint hb = head * p.headDim;
+
+    // === Phase 1: Per-head RMSNorm + RoPE (identical to fused_qk_norm_rope_neox) ===
+    float raw0 = src[hb + dimPair];
+    float raw1 = src[hb + dimPair + halfDim];
+
+    float pairSq = raw0 * raw0 + raw1 * raw1;
+    float sumSq = simd_sum(pairSq);
+    threadgroup float tgSq[48];
+    uint sgIdx = dimPair / 32;
+    if (dimPair % 32 == 0) tgSq[headIdx * 2 + sgIdx] = sumSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumSq = tgSq[headIdx * 2] + tgSq[headIdx * 2 + 1];
+
+    float rs = rsqrt(sumSq / float(p.headDim) + p.rmsEps);
+    float x0 = raw0 * rs * nw[dimPair];
+    float x1 = raw1 * rs * nw[dimPair + halfDim];
+
+    float expt = float(2 * dimPair) / float(p.headDim);
+    float freq = 1.0f / pow(p.theta, expt);
+    float angle = float(p.startPos) * (freq / p.scalingFactor);
+    float cv = cos(angle), sv = sin(angle);
+    float q0 = x0 * cv - x1 * sv;
+    float q1 = x0 * sv + x1 * cv;
+
+    // K heads: write to cache and exit
+    if (!isQ) {
+        kCache[p.startPos * p.numKVHeads * p.headDim + hb + dimPair] = half(q0);
+        kCache[p.startPos * p.numKVHeads * p.headDim + hb + dimPair + halfDim] = half(q1);
+        return;  // K threads are done — only Q threads continue to GQA
+    }
+
+    // === Phase 2: GQA — Q threads compute attention inline ===
+    // Each Q head has 64 threads (halfDim=64). Cooperatively compute attention
+    // against all kvSeqLen K/V positions.
+    uint kvHead = headIdx / (p.numHeads / p.numKVHeads);  // GQA grouping
+    uint kvStride = p.numKVHeads * p.headDim;
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f;  // accumulated output for this thread's 2 dims
+
+    for (uint kv = 0; kv < p.kvSeqLen; kv++) {
+        // Dot product: Q[head] · K[kv, kvHead]
+        uint kvBase = kv * kvStride + kvHead * p.headDim;
+        float dk0 = float(kCache[kvBase + dimPair]);
+        float dk1 = float(kCache[kvBase + dimPair + halfDim]);
+        float partial = q0 * dk0 + q1 * dk1;
+        float score = simd_sum(partial);
+        // Cross-SG reduction for full dot product
+        threadgroup float tgScore[32];
+        if (dimPair % 32 == 0) tgScore[headIdx * 2 + sgIdx] = score;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        score = (tgScore[headIdx * 2] + tgScore[headIdx * 2 + 1]) * p.attnScale;
+
+        // Online softmax
+        float oldMax = runMax;
+        runMax = max(runMax, score);
+        float correction = exp(oldMax - runMax);
+        runSum = runSum * correction + exp(score - runMax);
+        acc0 = acc0 * correction + exp(score - runMax) * float(vCache[kvBase + dimPair]);
+        acc1 = acc1 * correction + exp(score - runMax) * float(vCache[kvBase + dimPair + halfDim]);
+    }
+
+    // Normalize and write output
+    float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
+    outAttn[hb + dimPair] = acc0 * invSum;
+    outAttn[hb + dimPair + halfDim] = acc1 * invSum;
+}
+
 /// NeoX RoPE with f16 output — eliminates separate f32→f16 conversion dispatch.
 /// Used for K before writing to float16 KV cache.
 kernel void rope_neox_f32_to_f16(

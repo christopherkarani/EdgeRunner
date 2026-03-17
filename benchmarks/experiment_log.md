@@ -239,3 +239,28 @@ With Swift overhead: 20.7 + 6ms = 26.7ms → 150 tok/s wall clock
 2. Further dispatch reduction (5→4 per layer) — removes 0.5ms/call
 3. Then: 3.45ms GPU + 0.3ms encoding = 3.75ms → 267 tok/s
 4. Plus bandwidth optimization (cache-friendly access patterns): 3ms → 333 tok/s
+
+### Experiment 13: Mega-Kernel — Fused Q/K Norm + RoPE + GQA in Single Dispatch
+- **Change**: Created `fused_qk_norm_rope_gqa` Metal kernel that performs:
+  - Per-head Q/K RMSNorm
+  - NeoX RoPE for Q (f32 output) and K (f16 output to cache)
+  - GQA attention inline — dot product + online softmax + weighted V accumulation
+  All in a SINGLE GPU dispatch replacing 2 dispatches per layer.
+- **Per-layer dispatches**: 6 → 5 (28 layers × 1 saved = 28 fewer dispatches)
+- **Result**: 150 → 210 tok/s median (227 peak!)
+- **Key**: K threads exit after writing to cache. Q threads continue to compute
+  attention against the FULL KV cache (including just-written K). 64 threads per
+  head cooperatively compute 128-dim dot products via simd_sum + cross-SG reduction.
+
+## Updated Performance: 210 tok/s median, 227 peak
+
+| Metric | Value |
+|--------|-------|
+| Baseline | 0.058 tok/s |
+| Current median | 210 tok/s |
+| Current peak | 227 tok/s |
+| Improvement | 3,621x from baseline |
+| llama.cpp ref | 183 tok/s |
+| **We EXCEED llama.cpp** | **✓** |
+
+Per-layer dispatches: 5 (was 15 originally, then 11, 9, 6, now 5)

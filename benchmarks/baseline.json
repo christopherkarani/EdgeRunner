@@ -8,10 +8,10 @@
     5371,
     1
   ],
-  "improvement_pct" : -37.397214420109592,
+  "improvement_pct" : -14.604455628125249,
   "is_improvement" : false,
   "model" : "Qwen3-0.6B-Q8_0",
-  "ms_per_token" : 6.2034479999999999,
-  "timestamp" : "2026-03-17T17:18:48Z",
-  "tokens_per_sec" : 161.20067420569978
+  "ms_per_token" : 4.5476977500000002,
+  "timestamp" : "2026-03-17T17:31:23Z",
+  "tokens_per_sec" : 219.89148245395154
 }

@@ -46,6 +46,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let convertF32ToF16Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEPipeline: MTLComputePipelineState
+    private let fusedNormRoPEGQAPipeline: MTLComputePipelineState
     private let gemvAddPipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -105,6 +106,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
         self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
+        self.fusedNormRoPEGQAPipeline = try registry.pipeline(for: "fused_qk_norm_rope_gqa")
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
 
         // Initialize dequant kernels
@@ -996,28 +998,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 3. FUSED Q/K per-head norm + RoPE Q + RoPE K→f16 (replaces 4 dispatches with 1)
+            // 3+4. MEGA-FUSED: Q/K norm + RoPE + GQA in SINGLE dispatch (saves 1 dispatch/layer)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             if hasQKNorm {
-                let fusedPSO = fusedQKNormRoPEPipeline
-                enc.setComputePipelineState(fusedPSO)
+                let megaPSO = fusedNormRoPEGQAPipeline
+                enc.setComputePipelineState(megaPSO)
                 enc.setBuffer(allQBuf, offset: 0, index: 0)        // Q input
                 enc.setBuffer(allKBuf, offset: 0, index: 1)        // K input
                 enc.setBuffer(lw.qNorm!, offset: 0, index: 2)      // Q norm weight
                 enc.setBuffer(lw.kNorm!, offset: 0, index: 3)      // K norm weight
-                enc.setBuffer(ropeQBuf, offset: 0, index: 4)       // Q output (f32)
-                enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 5) // K output (f16 → cache)
+                enc.setBuffer(attnOutBuf, offset: 0, index: 4)     // attention output (direct!)
+                enc.setBuffer(layerKCache, offset: 0, index: 5)    // K cache (writes new K + reads all K)
+                enc.setBuffer(layerVCache, offset: 0, index: 6)    // V cache (reads all V)
                 var p = (UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim),
-                         UInt32(currentPos), ropeTheta, Float(1.0), rmsEps)
-                enc.setBytes(&p, length: 7 * 4, index: 6)
+                         UInt32(currentPos), ropeTheta, Float(1.0), rmsEps,
+                         UInt32(totalKVLen), 1.0 / sqrt(Float(headDim)))
+                enc.setBytes(&p, length: 9 * 4, index: 7)
                 let halfDim = headDim / 2
                 let totalHeads = numHeads + numKVHeads
                 enc.dispatchThreads(MTLSize(width: halfDim, height: totalHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(halfDim, fusedPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             } else {
-                // Fallback: separate RoPE Q and K
+                // Fallback: separate RoPE + GQA (for models without Q/K norm)
                 let activeRopePSO = ropeKernel.pipelineNeoX
-                // RoPE Q
                 do {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
                         headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
@@ -1029,7 +1032,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                // RoPE K→f16
                 do {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
                         headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
@@ -1039,28 +1041,24 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                     let halfDim = headDim / 2
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                        threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-            }
-
-            // 4. GQA: Q has seqLen=1, K/V from cache have kvSeqLen=totalKVLen
-            //    qOffset = currentPos so causal mask allows Q at position 0 to attend to all kvSeqLen positions
-            do {
-                let groupSize = numHeads / numKVHeads
-                var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
-                    numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
-                    groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
-                    causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
-                    kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
-                enc.setComputePipelineState(gqaPSO)
-                enc.setBuffer(ropeQBuf, offset: 0, index: 0)
-                enc.setBuffer(layerKCache, offset: 0, index: 1)
-                enc.setBuffer(layerVCache, offset: 0, index: 2)
-                enc.setBuffer(attnOutBuf, offset: 0, index: 3)
-                enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
-                // seqLen=1, so only 1 Q block
-                enc.dispatchThreadgroups(MTLSize(width: 1, height: numHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
+                do {
+                    let groupSize = numHeads / numKVHeads
+                    var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
+                        numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
+                        groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
+                        causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
+                        kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
+                    enc.setComputePipelineState(gqaPSO)
+                    enc.setBuffer(ropeQBuf, offset: 0, index: 0)
+                    enc.setBuffer(layerKCache, offset: 0, index: 1)
+                    enc.setBuffer(layerVCache, offset: 0, index: 2)
+                    enc.setBuffer(attnOutBuf, offset: 0, index: 3)
+                    enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                    enc.dispatchThreadgroups(MTLSize(width: 1, height: numHeads, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
+                }
             }
 
             // 5+6. Fused output projection + residual add (saves 1 dispatch)
