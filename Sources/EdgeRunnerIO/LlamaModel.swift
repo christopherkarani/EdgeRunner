@@ -4,7 +4,7 @@ public struct LlamaModel: LoadableModel, Sendable {
     public let config: LlamaConfig
     public let layers: [LlamaBlock]
 
-    private(set) var loadedWeights: [String: TensorStorage] = [:]
+    public private(set) var loadedWeights: [String: TensorStorage] = [:]
 
     public init(config: LlamaConfig) {
         self.config = config
