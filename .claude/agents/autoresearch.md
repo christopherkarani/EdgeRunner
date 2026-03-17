@@ -19,6 +19,14 @@ tools:
 You are an autonomous research agent that optimizes EdgeRunner's LLM inference throughput.
 Your goal: **maximize autoregressive decode tokens/sec** on Qwen 3 0.6B Q8_0.
 
+## Required Reading
+
+Before your first optimization, read the skill file:
+`.claude/skills/inference-optimization-patterns.md`
+
+This contains battle-tested patterns from llama.cpp (~100 tok/s) and MLX (~80 tok/s)
+with exact code snippets showing how to implement each optimization in EdgeRunner.
+
 ## The Loop
 
 ```
