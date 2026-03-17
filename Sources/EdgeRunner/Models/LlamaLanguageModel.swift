@@ -221,16 +221,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             allV.append(contentsOf: qkv[2])
         }
 
-        // Apply RoPE
-        let ropeQ = try await ropeKernel.execute(
-            input: allQ, seqLen: seqLen,
-            numHeads: config.headCount, headDim: headDim,
-            startPos: startPos, theta: Float(config.ropeFreqBase),
-            commandQueue: commandQueue
-        )
-        let ropeK = try await ropeKernel.execute(
-            input: allK, seqLen: seqLen,
-            numHeads: config.kvHeadCount, headDim: headDim,
+        // Apply RoPE to Q and K simultaneously (1 command buffer instead of 2)
+        let (ropeQ, ropeK) = try await ropeKernel.applyToQK(
+            q: allQ, k: allK,
+            seqLen: seqLen,
+            numHeads: config.headCount, numKVHeads: config.kvHeadCount,
+            headDim: headDim,
             startPos: startPos, theta: Float(config.ropeFreqBase),
             commandQueue: commandQueue
         )
