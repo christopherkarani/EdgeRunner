@@ -185,3 +185,31 @@ Reaching 300 tok/s = 3.3ms/token requires:
 | Release (peak) | 166 | 6.0 |
 | Decode-only | ~192 | ~5.2 |
 | llama.cpp ref | 183 | 5.5 |
+
+## Current State: 150 tok/s median, 173 peak
+
+| Metric | Value |
+|--------|-------|
+| Baseline (start) | 0.058 tok/s |
+| Pre-fusion plateau | 64 tok/s |
+| Post-fusion decode | 120 tok/s |
+| Fused prefill (current) | 150 tok/s median, 173 peak |
+| Decode-only | 192 tok/s |
+| llama.cpp reference | 183 tok/s |
+| **Improvement from baseline** | **2,586x → 2,983x** |
+
+## Theoretical Analysis
+
+Per-decode-step at 5.2ms:
+- GEMV bandwidth (627MB Q8_0): ~2.45ms at 256 GB/s proven
+- GPU dispatch latency (170 × 6μs): ~1.0ms  
+- Fused kernel overhead (RMSNorm compute): ~0.5ms
+- Non-GEMV dispatch compute (norm+RoPE, GQA): ~1.25ms
+
+Theoretical minimum with current 6 dispatches/layer:
+- 2.45ms bandwidth + 1.0ms dispatch = 3.45ms → 290 tok/s per decode
+
+Remaining path to 300 tok/s:
+1. Reduce fused kernel overhead (simpler norm computation)
+2. Merge GQA into adjacent dispatch where possible  
+3. System-level: ensure no thermal throttling during benchmark
