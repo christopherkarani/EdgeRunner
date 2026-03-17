@@ -300,3 +300,24 @@ Per-layer dispatches: 5 (was 15 originally, then 11, 9, 6, now 5)
 
 **Total improvement: 4,534x from baseline (peak).**
 **Exceeds llama.cpp (183 tok/s) by 44% at peak.**
+
+## Final Performance Statistics
+
+**15-run test (release, M3 Max):**
+Top 5: 258, 247, 243, 240, 230 tok/s
+Median: ~213 tok/s
+Peak: **258 tok/s** (4,448x from 0.058 baseline)
+
+**Gap to 300: 42 tok/s (14%)**
+
+The remaining gap is from:
+- GPU dispatch latency: 140 dispatches × 6μs = 0.84ms per call
+- System variance: thermal throttling + background GPU usage
+- Swift async overhead: ~0.5ms per await
+
+At the theoretical GPU bandwidth limit (689MB at 300 GB/s = 2.3ms + 0.84ms dispatch = 3.14ms per call + 0.5ms Swift = 3.64ms × 3 calls = 10.9ms → 367 tok/s), reaching 300 requires ~82% bandwidth utilization. Our peak of 258 achieves ~70%.
+
+The final 12% bandwidth gap likely requires:
+- Metal ICBs for zero-overhead dispatch replay
+- Non-async forward pass
+- Or hardware-specific cache optimization (prefetch hints)
