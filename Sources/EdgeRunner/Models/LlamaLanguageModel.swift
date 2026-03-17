@@ -1638,6 +1638,7 @@ private final class DecoderStateStore: @unchecked Sendable {
         get { lock.withLock { _cachedLogits } }
         set { lock.withLock { _cachedLogits = newValue } }
     }
+    var decodeWarmedUp: Bool = false
     var cachedLogitsInput: [Int]? {
         get { lock.withLock { _cachedLogitsInput } }
         set { lock.withLock { _cachedLogitsInput = newValue } }
