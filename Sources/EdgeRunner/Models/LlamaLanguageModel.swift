@@ -264,7 +264,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             decoderState.previousTokenIDs = tokenIDs
 
             let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
-            return Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
+            let result = Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
+            decoderState.cachedLogits = result
+            decoderState.cachedLogitsInput = tokenIDs
+            return result
         } else {
             // PREFILL MODE: process full sequence, populate KV cache
             let seqLen = tokenIDs.count
@@ -305,7 +308,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             kvCache.setPosition(seqLen)
 
             let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
-            return Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
+            let result = Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
+            decoderState.cachedLogits = result
+            decoderState.cachedLogitsInput = tokenIDs
+            return result
         }
     }
 
