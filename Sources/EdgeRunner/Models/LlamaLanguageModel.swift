@@ -58,6 +58,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Pre-loaded weight buffers — eliminates async actor hops during forward pass
     private let preloadedWeights: PreloadedWeightsStore
 
+    // Pre-allocated scratch buffers — eliminates per-call buffer allocations
+    private let scratch: ScratchBuffers
+
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -101,6 +104,34 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.weightCache = WeightCacheActor()
         self.metalBufferCache = MetalBufferCacheActor()
         self.preloadedWeights = PreloadedWeightsStore()
+
+        // Pre-allocate scratch buffers for max seqLen
+        let maxSeq = min(maxSeqLen, 64) // cap for reasonable allocation
+        let fs = MemoryLayout<Float>.stride
+        let qDim = config.headCount * config.headDim
+        let kvDim = config.kvHeadCount * config.headDim
+        let dim = config.embeddingDim
+        let interDim = config.intermediateDim
+        self.scratch = ScratchBuffers(
+            normed: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            afterAttn: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            ffnNormed: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            outputA: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            outputB: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            allQ: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
+            allK: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
+            allV: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
+            ropeQ: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
+            ropeK: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
+            attnOut: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
+            proj: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            gateOut: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
+            upOut: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
+            activ: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
+            downOut: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            finalOut: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
+            logits: device.makeBuffer(length: config.vocabSize * fs, options: .storageModeShared)!
+        )
     }
 
     // MARK: - EdgeRunnerLanguageModel conformance
@@ -197,25 +228,23 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
         }
 
-        // Pre-allocate scratch buffers ONCE — reused across all 28 layers
-        let normedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        let afterAttnBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        let ffnNormedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        // Ping-pong output buffers for alternating layers
-        let outputBufA = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        let outputBufB = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-
-        let allQBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
-        let allKBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
-        let allVBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
-        let ropeQBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
-        let ropeKBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
-        let attnOutBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
-        let projBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        let gateOutBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
-        let upOutBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
-        let activBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
-        let downOutBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        // Use pre-allocated scratch buffers (zero allocation overhead)
+        let normedBuf = scratch.normed
+        let afterAttnBuf = scratch.afterAttn
+        let ffnNormedBuf = scratch.ffnNormed
+        let outputBufA = scratch.outputA
+        let outputBufB = scratch.outputB
+        let allQBuf = scratch.allQ
+        let allKBuf = scratch.allK
+        let allVBuf = scratch.allV
+        let ropeQBuf = scratch.ropeQ
+        let ropeKBuf = scratch.ropeK
+        let attnOutBuf = scratch.attnOut
+        let projBuf = scratch.proj
+        let gateOutBuf = scratch.gateOut
+        let upOutBuf = scratch.upOut
+        let activBuf = scratch.activ
+        let downOutBuf = scratch.downOut
 
         // Pre-load ALL weight buffers on first call — eliminates 254 actor hops per subsequent call
         if !preloadedWeights.isLoaded {
@@ -556,7 +585,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         // === FINAL NORM ===
         do {
-            let finalOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+            let finalOutputBuf = scratch.finalOut
             var p = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
             enc.setComputePipelineState(rmsNormPSO)
             enc.setBuffer(currentHidden, offset: 0, index: 0)
@@ -569,7 +598,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         // === LM HEAD (fused Q8_0 when available — saves ~428MB bandwidth) ===
-        let logitsBuf = device.makeBuffer(length: config.vocabSize * floatStride, options: .storageModeShared)!
+        let logitsBuf = scratch.logits
         let lastHiddenOff = (seqLen - 1) * dim * floatStride
         if let lmRaw = preloadedWeights.lmHeadRaw {
             let blocksPerRow = preloadedWeights.lmHeadCols / 32
@@ -868,6 +897,31 @@ private actor WeightCacheActor {
     private var cache: [String: [Float]] = [:]
     func get(_ name: String) -> [Float]? { cache[name] }
     func set(_ name: String, value: [Float]) { cache[name] = value }
+}
+
+// MARK: - Pre-allocated Scratch Buffers
+
+/// Pre-allocated GPU buffers reused across all forward passes.
+/// Eliminates ~17 MTLBuffer allocations per call.
+private struct ScratchBuffers: @unchecked Sendable {
+    let normed: MTLBuffer
+    let afterAttn: MTLBuffer
+    let ffnNormed: MTLBuffer
+    let outputA: MTLBuffer
+    let outputB: MTLBuffer
+    let allQ: MTLBuffer
+    let allK: MTLBuffer
+    let allV: MTLBuffer
+    let ropeQ: MTLBuffer
+    let ropeK: MTLBuffer
+    let attnOut: MTLBuffer
+    let proj: MTLBuffer
+    let gateOut: MTLBuffer
+    let upOut: MTLBuffer
+    let activ: MTLBuffer
+    let downOut: MTLBuffer
+    let finalOut: MTLBuffer
+    let logits: MTLBuffer
 }
 
 // MARK: - Pre-loaded Weight Buffers
