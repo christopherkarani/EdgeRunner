@@ -93,9 +93,23 @@ struct EspressoTensorNameMapperTests {
         #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.attn_q.bias", architecture: "gpt2") == false)
     }
 
-    @Test("Non-GPT-2 architectures never require transpose")
-    func llamaNoTranspose() {
-        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.attn_q.weight", architecture: "llama") == false)
-        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.ffn_gate.weight", architecture: "llama") == false)
+    @Test("All architectures require transpose for matrix weights (GGML convention)")
+    func llamaAlsoTransposes() {
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.attn_q.weight", architecture: "llama") == true)
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.ffn_gate.weight", architecture: "llama") == true)
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.ffn_down.weight", architecture: "llama") == true)
+    }
+
+    @Test("Global matrix weights require transpose")
+    func globalTranspose() {
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "output.weight", architecture: "llama") == true)
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "token_embd.weight", architecture: "llama") == true)
+    }
+
+    @Test("1D tensors do not require transpose")
+    func normsNoTranspose() {
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.attn_norm.weight", architecture: "llama") == false)
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "blk.0.ffn_norm.weight", architecture: "llama") == false)
+        #expect(EspressoTensorNameMapper.requiresTranspose(ggufName: "output_norm.weight", architecture: "llama") == false)
     }
 }

@@ -85,10 +85,25 @@ public enum EspressoTensorNameMapper: Sendable {
         "ffn_up.weight",
     ]
 
-    /// Returns `true` if the tensor requires transposition (GPT-2 matrix weights only).
-    public static func requiresTranspose(ggufName: String, architecture: String) -> Bool {
-        guard architecture == "gpt2" else { return false }
+    /// Global tensors that require transposition.
+    private static let globalTransposeNames: Set<String> = [
+        "output.weight",        // lm_head: [inDim, vocab] → [vocab, inDim]
+        "token_embd.weight",    // embedding: [dim, vocab] → [vocab, dim]
+    ]
 
+    /// Returns `true` if the tensor requires transposition.
+    /// GGUF stores ALL matrix weights in GGML convention [inDim, outDim],
+    /// but ANE conv1x1 expects [outChannels, inChannels, 1, 1] and
+    /// Espresso's CPU embedding expects [vocab, dim] row-major.
+    /// All 2D matrix weights from GGUF need transposition regardless of architecture.
+    /// 1D tensors (norms, biases) do NOT need transposition.
+    public static func requiresTranspose(ggufName: String, architecture: String) -> Bool {
+        // Check global names first
+        if globalTransposeNames.contains(ggufName) {
+            return true
+        }
+
+        // Check layer suffixes
         let parts = ggufName.split(separator: ".")
         guard parts.count >= 3, parts[0] == "blk" else { return false }
 
