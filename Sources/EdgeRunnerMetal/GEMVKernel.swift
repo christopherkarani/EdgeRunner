@@ -4,9 +4,12 @@ import EdgeRunnerSharedTypes
 /// Swift wrapper for the row-parallel GEMV Metal kernel.
 /// Optimized for autoregressive decoding: y[M] = A[M,K] * x[K].
 public final class GEMVKernel: Sendable {
-    private let pipelineF32: MTLComputePipelineState
+    public let pipelineF32: MTLComputePipelineState // exposed for fused pipeline encoding
     private let pipelineF16: MTLComputePipelineState
     private let device: MTLDevice
+
+    /// Expose pipeline for external fused command buffer encoding
+    public var f32Pipeline: MTLComputePipelineState { pipelineF32 }
 
     private static let threadsPerRow = 256
 

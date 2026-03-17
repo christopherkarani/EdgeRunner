@@ -136,6 +136,42 @@ public final class RoPEKernel: Sendable {
         return (Array(UnsafeBufferPointer(start: qPtr, count: q.count)),
                 Array(UnsafeBufferPointer(start: kPtr, count: k.count)))
     }
+
+    /// Encode a RoPE dispatch into an existing command buffer without committing.
+    public func encode(
+        commandBuffer: MTLCommandBuffer,
+        inputBuffer: MTLBuffer, outputBuffer: MTLBuffer,
+        seqLen: Int, numHeads: Int, headDim: Int,
+        startPos: Int, theta: Float, scalingFactor: Float = 1
+    ) throws {
+        var params = ERRoPEParams(
+            seqLen: UInt32(seqLen),
+            numHeads: UInt32(numHeads),
+            headDim: UInt32(headDim),
+            startPos: UInt32(startPos),
+            theta: theta,
+            scalingFactor: scalingFactor
+        )
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw RoPEError.encodingFailed
+        }
+
+        encoder.setComputePipelineState(pipelineF32)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+
+        let halfDim = headDim / 2
+        let gridSize = MTLSize(width: halfDim, height: numHeads, depth: seqLen)
+        let threadgroupSize = MTLSize(
+            width: min(halfDim, pipelineF32.maxTotalThreadsPerThreadgroup),
+            height: 1,
+            depth: 1
+        )
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
 }
 
 public enum RoPEError: Error, Sendable {

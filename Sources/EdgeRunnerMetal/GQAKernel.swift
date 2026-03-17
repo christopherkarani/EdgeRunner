@@ -94,6 +94,47 @@ public final class GQAKernel: Sendable {
         let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: outputCount)
         return Array(UnsafeBufferPointer(start: pointer, count: outputCount))
     }
+
+    /// Encode a GQA attention dispatch into an existing command buffer without committing.
+    public func encode(
+        commandBuffer: MTLCommandBuffer,
+        qBuffer: MTLBuffer, kBuffer: MTLBuffer, vBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        seqLen: Int, headDim: Int,
+        numHeads: Int, numKVHeads: Int,
+        causal: Bool
+    ) throws {
+        let groupSize = numHeads / numKVHeads
+
+        var params = ERGQAParams(
+            seqLen: UInt32(seqLen),
+            headDim: UInt32(headDim),
+            numHeads: UInt32(numHeads),
+            numKVHeads: UInt32(numKVHeads),
+            groupSize: UInt32(groupSize),
+            scale: 1.0 / sqrt(Float(headDim)),
+            causal: causal ? 1 : 0,
+            kvBlockSize: UInt32(Self.blockSize),
+            qBlockSize: UInt32(Self.blockSize)
+        )
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw GQAError.encodingFailed
+        }
+
+        encoder.setComputePipelineState(pipelineF32)
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(kBuffer, offset: 0, index: 1)
+        encoder.setBuffer(vBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
+        encoder.setBytes(&params, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+
+        let qBlockCount = (seqLen + Self.blockSize - 1) / Self.blockSize
+        let gridSize = MTLSize(width: qBlockCount, height: numHeads, depth: 1)
+        let threadgroupSize = MTLSize(width: Self.blockSize, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
 }
 
 public enum GQAError: Error, Sendable {

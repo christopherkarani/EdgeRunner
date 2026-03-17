@@ -35,6 +35,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let activationKernels: ActivationKernels
     private let gemvKernel: GEMVKernel
 
+    // Elementwise add pipeline (for GPU residual connections)
+    private let addPipeline: MTLComputePipelineState
+
     // Dequantization kernels
     private let dequantQ4_0: DequantQ4_0Kernel
     private let dequantQ8_0: DequantQ8_0Kernel
@@ -68,6 +71,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.gqaKernel = try GQAKernel(device: device)
         self.activationKernels = try ActivationKernels(device: device)
         self.gemvKernel = try GEMVKernel(device: device)
+
+        // Load elementwise add pipeline for GPU residual connections
+        let registry = try KernelRegistry(device: device)
+        self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
 
         // Initialize dequant kernels
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
@@ -106,8 +113,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     }
 
     public func tokenize(_ text: String) -> [Int] {
-        // Byte-level fallback tokenizer.
-        // Real usage should pair with BPETokenizer loaded from the GGUF vocab.
         Array(text.utf8).map { Int($0) }
     }
 
@@ -115,8 +120,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         String(ids.compactMap { UInt8(exactly: $0) }.map { Character(UnicodeScalar($0)) })
     }
 
-    public var eosTokenID: Int { 151645 } // Qwen EOS (<|endoftext|>)
-    public var bosTokenID: Int? { 151643 } // Qwen BOS
+    public var eosTokenID: Int { 151645 }
+    public var bosTokenID: Int? { 151643 }
     public var vocabularySize: Int { config.vocabSize }
 
     // MARK: - LogitsModel: forward pass
@@ -125,37 +130,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let seqLen = tokenIDs.count
         let dim = config.embeddingDim
 
-        // 1. Token embedding lookup (embedding is always fp32/fp16, not quantized)
-        var hidden = try await embeddingLookup(tokenIDs: tokenIDs)
+        // 1. Token embedding lookup
+        let embeddingFloats = try await embeddingLookup(tokenIDs: tokenIDs)
 
-        // 2. Process through transformer layers
-        for layerIndex in 0..<config.layerCount {
-            hidden = try await transformerLayer(
-                hidden: hidden,
-                layerIndex: layerIndex,
-                seqLen: seqLen,
-                startPos: 0
-            )
-        }
+        // Create initial hidden state as MTLBuffer
+        let hiddenBuf = device.makeBuffer(
+            bytes: embeddingFloats,
+            length: embeddingFloats.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        )!
 
-        // 3. Final RMS norm — using cached weight buffer
-        let finalNormBuf = try await readWeightBuffer("finalNorm.weight")
-        hidden = try await rmsNormKernel.executeWithWeightBuffer(
-            input: hidden,
-            weightBuffer: finalNormBuf,
-            rows: seqLen,
-            cols: dim,
-            eps: Float(config.rmsNormEpsilon),
-            commandQueue: commandQueue
+        // 2. Process through ALL transformer layers — fully fused GPU pipeline
+        let resultBuf = try await fusedForwardPass(
+            hiddenBuf: hiddenBuf,
+            seqLen: seqLen
         )
 
-        // 4. LM head: project last token's hidden state to vocab logits
-        let lastTokenHidden = Array(hidden.suffix(dim))
+        // 3. Read back the last token's hidden state for LM head
+        let resultPtr = resultBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
+        let lastTokenOffset = (seqLen - 1) * dim
+        let lastTokenHidden = Array(UnsafeBufferPointer(start: resultPtr + lastTokenOffset, count: dim))
 
-        // GPU LM head — uses cached MTLBuffer to avoid per-call buffer creation
-        let lmHeadName = weights["lmHead.weight"] != nil
-            ? "lmHead.weight"
-            : "embedding.weight"
+        // 4. LM head — GPU GEMV
+        let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
         let lmHeadBuf = try await readWeightBuffer(lmHeadName)
         return try await gemvKernel.executeWithWeightBuffer(
             weightBuffer: lmHeadBuf,
@@ -166,182 +163,281 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         )
     }
 
-    // MARK: - Transformer Layer
+    // MARK: - Fully Fused Forward Pass
 
-    private func transformerLayer(
-        hidden: [Float],
-        layerIndex: Int,
-        seqLen: Int,
-        startPos: Int
-    ) async throws -> [Float] {
+    /// Encode ALL 28 transformer layers into a SINGLE command buffer.
+    /// Data stays as MTLBuffers throughout — no [Float]↔MTLBuffer round-trips between layers.
+    /// ONE GPU sync point for the entire transformer stack.
+    private func fusedForwardPass(
+        hiddenBuf: MTLBuffer,
+        seqLen: Int
+    ) async throws -> MTLBuffer {
         let dim = config.embeddingDim
         let headDim = config.headDim
-        let prefix = "layers.\(layerIndex)"
-
-        // Fused RMSNorm + Q/K/V projections — single command buffer per position
-        let attnNormBuf = try await readWeightBuffer("\(prefix).attentionNorm.weight")
-        let wqBuf = try await readWeightBuffer("\(prefix).attention.wq.weight")
-        let wkBuf = try await readWeightBuffer("\(prefix).attention.wk.weight")
-        let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
-        let woBuf = try await readWeightBuffer("\(prefix).attention.wo.weight")
-
         let qDim = config.headCount * headDim
         let kvDim = config.kvHeadCount * headDim
-        var allQ = [Float]()
-        var allK = [Float]()
-        var allV = [Float]()
-        allQ.reserveCapacity(seqLen * qDim)
-        allK.reserveCapacity(seqLen * kvDim)
-        allV.reserveCapacity(seqLen * kvDim)
+        let interDim = config.intermediateDim
+        let totalHiddenBytes = seqLen * dim * MemoryLayout<Float>.stride
 
-        for t in 0..<seqLen {
-            // Create input buffer for this token's hidden state
-            let tokenStart = t * dim
-            let inputBuf = device.makeBuffer(
-                bytes: Array(hidden[tokenStart..<tokenStart + dim]),
-                length: dim * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            )!
+        // Pre-allocate ALL scratch buffers for the pipeline
+        // We use ping-pong: layerInput → layerOutput, then swap
+        var currentHidden = hiddenBuf
 
-            // Pre-allocate output buffers
-            let normedBuf = device.makeBuffer(length: dim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let qBuf = device.makeBuffer(length: qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let kBuf = device.makeBuffer(length: kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let vBuf = device.makeBuffer(length: kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
+        }
 
-            // Single command buffer: RMSNorm → Q/K/V GEMV (4 dispatches, 1 sync)
-            guard let cmdBuf = commandQueue.makeCommandBuffer() else {
-                throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
-            }
+        for layerIndex in 0..<config.layerCount {
+            let prefix = "layers.\(layerIndex)"
 
+            // Load cached weight MTLBuffers
+            let attnNormBuf = try await readWeightBuffer("\(prefix).attentionNorm.weight")
+            let wqBuf = try await readWeightBuffer("\(prefix).attention.wq.weight")
+            let wkBuf = try await readWeightBuffer("\(prefix).attention.wk.weight")
+            let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
+            let woBuf = try await readWeightBuffer("\(prefix).attention.wo.weight")
+            let ffnNormBuf = try await readWeightBuffer("\(prefix).ffnNorm.weight")
+            let gateBuf = try await readWeightBuffer("\(prefix).feedForward.gate.weight")
+            let upBuf = try await readWeightBuffer("\(prefix).feedForward.up.weight")
+            let downBuf = try await readWeightBuffer("\(prefix).feedForward.down.weight")
+
+            // Allocate per-layer scratch buffers (seqLen positions)
+            let normedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+            let afterAttnBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+            let ffnNormedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+            let layerOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+
+            // Per-token Q/K/V buffers (concatenated across positions)
+            let allQBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let allKBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let allVBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let ropeQBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let ropeKBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let attnOutBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let projBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+
+            // FFN scratch
+            let gateOutBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let upOutBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let activBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let downOutBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+
+            // === ATTENTION BLOCK ===
+
+            // 1. Pre-attention RMSNorm
             try rmsNormKernel.encode(
                 commandBuffer: cmdBuf,
-                inputBuffer: inputBuf,
+                inputBuffer: currentHidden,
                 weightBuffer: attnNormBuf,
                 outputBuffer: normedBuf,
-                rows: 1, cols: dim,
+                rows: seqLen, cols: dim,
                 eps: Float(config.rmsNormEpsilon)
             )
-            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wqBuf,
-                                   inputBuffer: normedBuf, outputBuffer: qBuf, M: qDim, K: dim)
-            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wkBuf,
-                                   inputBuffer: normedBuf, outputBuffer: kBuf, M: kvDim, K: dim)
-            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wvBuf,
-                                   inputBuffer: normedBuf, outputBuffer: vBuf, M: kvDim, K: dim)
 
-            cmdBuf.commit()
-            await cmdBuf.completed()
-            if let error = cmdBuf.error { throw error }
+            // 2. Q/K/V projections for each position
+            for t in 0..<seqLen {
+                let tokenOffset = t * dim * MemoryLayout<Float>.stride
+                let qOffset = t * qDim * MemoryLayout<Float>.stride
+                let kvOffset = t * kvDim * MemoryLayout<Float>.stride
 
-            let qPtr = qBuf.contents().bindMemory(to: Float.self, capacity: qDim)
-            let kPtr = kBuf.contents().bindMemory(to: Float.self, capacity: kvDim)
-            let vPtr = vBuf.contents().bindMemory(to: Float.self, capacity: kvDim)
-            allQ.append(contentsOf: UnsafeBufferPointer(start: qPtr, count: qDim))
-            allK.append(contentsOf: UnsafeBufferPointer(start: kPtr, count: kvDim))
-            allV.append(contentsOf: UnsafeBufferPointer(start: vPtr, count: kvDim))
-        }
+                // Use sub-buffer views via offset encoding
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: wqBuf,
+                    inputBuffer: normedBuf, inputOffset: tokenOffset,
+                    outputBuffer: allQBuf, outputOffset: qOffset,
+                    M: qDim, K: dim
+                )
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: wkBuf,
+                    inputBuffer: normedBuf, inputOffset: tokenOffset,
+                    outputBuffer: allKBuf, outputOffset: kvOffset,
+                    M: kvDim, K: dim
+                )
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: wvBuf,
+                    inputBuffer: normedBuf, inputOffset: tokenOffset,
+                    outputBuffer: allVBuf, outputOffset: kvOffset,
+                    M: kvDim, K: dim
+                )
+            }
 
-        // Apply RoPE to Q and K simultaneously (1 command buffer instead of 2)
-        let (ropeQ, ropeK) = try await ropeKernel.applyToQK(
-            q: allQ, k: allK,
-            seqLen: seqLen,
-            numHeads: config.headCount, numKVHeads: config.kvHeadCount,
-            headDim: headDim,
-            startPos: startPos, theta: Float(config.ropeFreqBase),
-            commandQueue: commandQueue
-        )
-
-        // GQA
-        let attnOutput = try await gqaKernel.execute(
-            q: ropeQ, k: ropeK, v: allV,
-            seqLen: seqLen, headDim: headDim,
-            numHeads: config.headCount, numKVHeads: config.kvHeadCount,
-            causal: true, commandQueue: commandQueue
-        )
-
-        // Output projection + residual — using cached weight buffer
-        var afterAttn = hidden
-        for t in 0..<seqLen {
-            let tokenAttn = Array(attnOutput[t * config.headCount * headDim..<(t + 1) * config.headCount * headDim])
-            let projected = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: woBuf, x: tokenAttn,
-                M: dim, K: config.headCount * headDim,
-                commandQueue: commandQueue
+            // 3. RoPE for Q and K
+            try ropeKernel.encode(
+                commandBuffer: cmdBuf,
+                inputBuffer: allQBuf, outputBuffer: ropeQBuf,
+                seqLen: seqLen, numHeads: config.headCount, headDim: headDim,
+                startPos: 0, theta: Float(config.ropeFreqBase)
             )
-            for d in 0..<dim {
-                afterAttn[t * dim + d] += projected[d]
+            try ropeKernel.encode(
+                commandBuffer: cmdBuf,
+                inputBuffer: allKBuf, outputBuffer: ropeKBuf,
+                seqLen: seqLen, numHeads: config.kvHeadCount, headDim: headDim,
+                startPos: 0, theta: Float(config.ropeFreqBase)
+            )
+
+            // 4. GQA attention
+            try gqaKernel.encode(
+                commandBuffer: cmdBuf,
+                qBuffer: ropeQBuf, kBuffer: ropeKBuf, vBuffer: allVBuf,
+                outputBuffer: attnOutBuf,
+                seqLen: seqLen, headDim: headDim,
+                numHeads: config.headCount, numKVHeads: config.kvHeadCount,
+                causal: true
+            )
+
+            // 5. Output projection for each position
+            for t in 0..<seqLen {
+                let attnOffset = t * qDim * MemoryLayout<Float>.stride
+                let projOffset = t * dim * MemoryLayout<Float>.stride
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: woBuf,
+                    inputBuffer: attnOutBuf, inputOffset: attnOffset,
+                    outputBuffer: projBuf, outputOffset: projOffset,
+                    M: dim, K: qDim
+                )
             }
-        }
 
-        // Fused FFN RMSNorm + gate/up projections — single command buffer per position
-        let ffnNormBuf = try await readWeightBuffer("\(prefix).ffnNorm.weight")
-        let gateBuf = try await readWeightBuffer("\(prefix).feedForward.gate.weight")
-        let upBuf = try await readWeightBuffer("\(prefix).feedForward.up.weight")
-        let downBuf = try await readWeightBuffer("\(prefix).feedForward.down.weight")
-        let interDim = config.intermediateDim
+            // 6. Residual add: afterAttn = hidden + projected (GPU)
+            try encodeElementwiseAdd(
+                cmdBuf: cmdBuf,
+                aBuf: currentHidden, bBuf: projBuf,
+                outBuf: afterAttnBuf,
+                count: seqLen * dim
+            )
 
-        var output = afterAttn
-        for t in 0..<seqLen {
-            let tokenStart = t * dim
-            let ffnInputBuf = device.makeBuffer(
-                bytes: Array(afterAttn[tokenStart..<tokenStart + dim]),
-                length: dim * MemoryLayout<Float>.stride,
-                options: .storageModeShared
-            )!
-            let ffnNormedBuf = device.makeBuffer(length: dim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let gatOutBuf = device.makeBuffer(length: interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let upOutBuf = device.makeBuffer(length: interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            // === FFN BLOCK ===
 
-            // Single command buffer: FFN RMSNorm → gate + up GEMV (3 dispatches, 1 sync)
-            guard let cmdBuf = commandQueue.makeCommandBuffer() else {
-                throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
-            }
+            // 7. Pre-FFN RMSNorm
             try rmsNormKernel.encode(
                 commandBuffer: cmdBuf,
-                inputBuffer: ffnInputBuf,
+                inputBuffer: afterAttnBuf,
                 weightBuffer: ffnNormBuf,
                 outputBuffer: ffnNormedBuf,
-                rows: 1, cols: dim,
+                rows: seqLen, cols: dim,
                 eps: Float(config.rmsNormEpsilon)
             )
-            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: gateBuf,
-                                   inputBuffer: ffnNormedBuf, outputBuffer: gatOutBuf, M: interDim, K: dim)
-            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: upBuf,
-                                   inputBuffer: ffnNormedBuf, outputBuffer: upOutBuf, M: interDim, K: dim)
 
-            cmdBuf.commit()
-            await cmdBuf.completed()
-            if let error = cmdBuf.error { throw error }
-
-            let gatePtr = gatOutBuf.contents().bindMemory(to: Float.self, capacity: interDim)
-            let upPtr = upOutBuf.contents().bindMemory(to: Float.self, capacity: interDim)
-            let gateResult = Array(UnsafeBufferPointer(start: gatePtr, count: interDim))
-            let upResult = Array(UnsafeBufferPointer(start: upPtr, count: interDim))
-
-            let activated = try await activationKernels.swiglu(
-                gate: gateResult, up: upResult,
-                commandQueue: commandQueue
-            )
-
-            let downResult = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: downBuf, x: activated,
-                M: dim, K: config.intermediateDim,
-                commandQueue: commandQueue
-            )
-
-            for d in 0..<dim {
-                output[t * dim + d] += downResult[d]
+            // 8. Gate + Up projections for each position
+            for t in 0..<seqLen {
+                let tokenOffset = t * dim * MemoryLayout<Float>.stride
+                let interOffset = t * interDim * MemoryLayout<Float>.stride
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: gateBuf,
+                    inputBuffer: ffnNormedBuf, inputOffset: tokenOffset,
+                    outputBuffer: gateOutBuf, outputOffset: interOffset,
+                    M: interDim, K: dim
+                )
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: upBuf,
+                    inputBuffer: ffnNormedBuf, inputOffset: tokenOffset,
+                    outputBuffer: upOutBuf, outputOffset: interOffset,
+                    M: interDim, K: dim
+                )
             }
+
+            // 9. SwiGLU activation
+            try activationKernels.encodeSwiglu(
+                commandBuffer: cmdBuf,
+                gateBuffer: gateOutBuf, upBuffer: upOutBuf,
+                outputBuffer: activBuf,
+                count: seqLen * interDim
+            )
+
+            // 10. Down projection for each position
+            for t in 0..<seqLen {
+                let interOffset = t * interDim * MemoryLayout<Float>.stride
+                let tokenOffset = t * dim * MemoryLayout<Float>.stride
+                try encodeGEMVWithOffsets(
+                    cmdBuf: cmdBuf, weightBuffer: downBuf,
+                    inputBuffer: activBuf, inputOffset: interOffset,
+                    outputBuffer: downOutBuf, outputOffset: tokenOffset,
+                    M: dim, K: interDim
+                )
+            }
+
+            // 11. Residual add: output = afterAttn + downResult (GPU)
+            try encodeElementwiseAdd(
+                cmdBuf: cmdBuf,
+                aBuf: afterAttnBuf, bBuf: downOutBuf,
+                outBuf: layerOutputBuf,
+                count: seqLen * dim
+            )
+
+            currentHidden = layerOutputBuf
         }
 
-        return output
+        // === FINAL NORM ===
+        let finalNormBuf = try await readWeightBuffer("finalNorm.weight")
+        let finalOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        try rmsNormKernel.encode(
+            commandBuffer: cmdBuf,
+            inputBuffer: currentHidden,
+            weightBuffer: finalNormBuf,
+            outputBuffer: finalOutputBuf,
+            rows: seqLen, cols: dim,
+            eps: Float(config.rmsNormEpsilon)
+        )
+
+        // ONE sync point for the entire transformer stack!
+        cmdBuf.commit()
+        await cmdBuf.completed()
+        if let error = cmdBuf.error { throw error }
+
+        return finalOutputBuf
+    }
+
+    // MARK: - GPU Pipeline Helpers
+
+    /// Encode a GEMV dispatch with buffer offsets for per-token slicing.
+    /// y[M] = weight[M,K] * input[offset..offset+K]
+    private func encodeGEMVWithOffsets(
+        cmdBuf: MTLCommandBuffer,
+        weightBuffer: MTLBuffer,
+        inputBuffer: MTLBuffer, inputOffset: Int,
+        outputBuffer: MTLBuffer, outputOffset: Int,
+        M: Int, K: Int
+    ) throws {
+        guard let encoder = cmdBuf.makeComputeCommandEncoder() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create compute encoder")
+        }
+        var params = ERGEMVParams(M: UInt32(M), K: UInt32(K), lda: UInt32(K))
+        encoder.setComputePipelineState(gemvKernel.f32Pipeline)
+        encoder.setBuffer(weightBuffer, offset: 0, index: 0)
+        encoder.setBuffer(inputBuffer, offset: inputOffset, index: 1)
+        encoder.setBuffer(outputBuffer, offset: outputOffset, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+        let gridSize = MTLSize(width: M, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: 256, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
+
+    /// Encode element-wise addition: out[i] = a[i] + b[i]
+    private func encodeElementwiseAdd(
+        cmdBuf: MTLCommandBuffer,
+        aBuf: MTLBuffer, bBuf: MTLBuffer,
+        outBuf: MTLBuffer,
+        count: Int
+    ) throws {
+        guard let encoder = cmdBuf.makeComputeCommandEncoder() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create compute encoder")
+        }
+        var params = ERElementwiseParams(elementCount: UInt32(count))
+        encoder.setComputePipelineState(addPipeline)
+        encoder.setBuffer(aBuf, offset: 0, index: 0)
+        encoder.setBuffer(bBuf, offset: 0, index: 1)
+        encoder.setBuffer(outBuf, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERElementwiseParams>.stride, index: 3)
+        let gridSize = MTLSize(width: count, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: min(count, addPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
     }
 
     // MARK: - Weight Reading with Dequantization
 
     /// Read a weight tensor, dequantizing on first access and caching the result.
     private func readWeight(_ name: String) async throws -> [Float] {
-        // Check cache first
         if let cached = await weightCache.get(name) {
             return cached
         }
@@ -351,8 +447,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let floats: [Float]
-
-        // Compute actual byte count for this tensor from element count + data type
         let elementCount = storage.elementCount
         let basePtr = storage.buffer.contents() + storage.byteOffset
 
@@ -371,9 +465,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
             floats = try await dequantQ4_0.dequantise(
-                blockData: blockData,
-                blockCount: blockCount,
-                commandQueue: commandQueue
+                blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
             )
 
         case .q8_0:
@@ -382,9 +474,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
             floats = try await dequantQ8_0.dequantise(
-                blockData: blockData,
-                blockCount: blockCount,
-                commandQueue: commandQueue
+                blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
             )
 
         case .q4_K:
@@ -393,9 +483,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
             floats = try await dequantQ4KM.dequantise(
-                blockData: blockData,
-                superBlockCount: superBlockCount,
-                commandQueue: commandQueue
+                blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
             )
 
         default:
@@ -404,19 +492,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             )
         }
 
-        // Cache for future use
         await weightCache.set(name, value: floats)
         return floats
     }
 
-    /// Read a weight tensor as a cached MTLBuffer for use with executeWithWeightBuffer.
-    /// On first access, dequantizes the weight (via readWeight) and creates an MTLBuffer.
-    /// Subsequent accesses return the cached MTLBuffer with zero copy.
+    /// Read a weight tensor as a cached MTLBuffer.
     private func readWeightBuffer(_ name: String) async throws -> MTLBuffer {
         if let cached = await metalBufferCache.get(name) {
             return cached.rawValue
         }
-
         let floats = try await readWeight(name)
         guard let buffer = device.makeBuffer(
             bytes: floats,
@@ -425,7 +509,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         ) else {
             throw GenerationError.modelLoadFailed(reason: "Failed to create MTLBuffer for \(name)")
         }
-
         await metalBufferCache.set(name, handle: MetalBufferHandle(buffer))
         return buffer
     }
@@ -465,7 +548,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
         case .q8_0:
-            // Q8_0: 32 elements per block, 34 bytes per block (2 bytes scale + 32 bytes quants)
             let bytesPerBlock = 34
             let elementsPerBlock = 32
             let blocksPerRow = dim / elementsPerBlock
@@ -476,13 +558,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
                 let rowStart = clampedID * bytesPerRow
                 let dstOffset = i * dim
-
                 for block in 0..<blocksPerRow {
                     let blockStart = rowStart + block * bytesPerBlock
-                    // First 2 bytes: scale as Float16 (stored as UInt16)
                     let scaleBits = UInt16(rawPtr[blockStart]) | (UInt16(rawPtr[blockStart + 1]) << 8)
                     let scale = Float(Float16(bitPattern: scaleBits))
-                    // Next 32 bytes: quantized int8 values
                     for j in 0..<elementsPerBlock {
                         let qval = Int8(bitPattern: rawPtr[blockStart + 2 + j])
                         result[dstOffset + block * elementsPerBlock + j] = scale * Float(qval)
@@ -491,7 +570,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
         case .q4_0:
-            // Q4_0: 32 elements per block, 18 bytes per block (2 bytes scale + 16 bytes quants)
             let bytesPerBlock = 18
             let elementsPerBlock = 32
             let blocksPerRow = dim / elementsPerBlock
@@ -502,12 +580,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
                 let rowStart = clampedID * bytesPerRow
                 let dstOffset = i * dim
-
                 for block in 0..<blocksPerRow {
                     let blockStart = rowStart + block * bytesPerBlock
                     let scaleBits = UInt16(rawPtr[blockStart]) | (UInt16(rawPtr[blockStart + 1]) << 8)
                     let scale = Float(Float16(bitPattern: scaleBits))
-                    // 16 bytes encode 32 4-bit values (2 per byte)
                     for j in 0..<16 {
                         let byte = rawPtr[blockStart + 2 + j]
                         let lo = Int(byte & 0x0F) - 8
@@ -526,17 +602,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         return result
     }
-    /// Compute LM head logits using tied embedding weights.
-    /// Dequantizes one row at a time to avoid allocating 593MB at once.
+
+    /// Compute LM head logits using tied embedding weights (CPU fallback).
     private func computeTiedLMHead(
-        hidden: [Float],
-        embeddingStorage: TensorStorage,
-        vocabSize: Int,
-        dim: Int
+        hidden: [Float], embeddingStorage: TensorStorage, vocabSize: Int, dim: Int
     ) -> [Float] {
         let basePtr = embeddingStorage.buffer.contents() + embeddingStorage.byteOffset
         var logits = [Float](repeating: 0, count: vocabSize)
-
         switch embeddingStorage.dataType {
         case .q8_0:
             let bytesPerBlock = 34
@@ -544,7 +616,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let blocksPerRow = dim / elementsPerBlock
             let bytesPerRow = blocksPerRow * bytesPerBlock
             let rawPtr = basePtr.bindMemory(to: UInt8.self, capacity: vocabSize * bytesPerRow)
-
             for vocabIdx in 0..<vocabSize {
                 let rowStart = vocabIdx * bytesPerRow
                 var dot: Float = 0
@@ -559,56 +630,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
                 logits[vocabIdx] = dot
             }
-
         case .float32:
             let ptr = basePtr.bindMemory(to: Float.self, capacity: vocabSize * dim)
             for vocabIdx in 0..<vocabSize {
                 var dot: Float = 0
                 let offset = vocabIdx * dim
-                for d in 0..<dim {
-                    dot += ptr[offset + d] * hidden[d]
-                }
+                for d in 0..<dim { dot += ptr[offset + d] * hidden[d] }
                 logits[vocabIdx] = dot
             }
-
         default:
-            break // Unsupported — return zeros
+            break
         }
-
         return logits
     }
 }
 
 // MARK: - Weight Cache Actor
 
-/// Thread-safe cache for dequantized weights.
-/// Avoids re-dequantizing the same weight tensor on every forward pass.
 private actor WeightCacheActor {
     private var cache: [String: [Float]] = [:]
-
-    func get(_ name: String) -> [Float]? {
-        cache[name]
-    }
-
-    func set(_ name: String, value: [Float]) {
-        cache[name] = value
-    }
+    func get(_ name: String) -> [Float]? { cache[name] }
+    func set(_ name: String, value: [Float]) { cache[name] = value }
 }
 
 // MARK: - Metal Buffer Cache Actor
 
-/// Thread-safe cache for MTLBuffers created from dequantized weight arrays.
-/// Eliminates repeated buffer allocation + CPU→GPU copy for weight matrices
-/// that are reused across every forward pass (4-12 MB each, 196 per pass).
-/// Uses MetalBufferHandle (@unchecked Sendable) to cross actor isolation boundaries.
 private actor MetalBufferCacheActor {
     private var cache: [String: MetalBufferHandle] = [:]
-
-    func get(_ name: String) -> MetalBufferHandle? {
-        cache[name]
-    }
-
-    func set(_ name: String, handle: MetalBufferHandle) {
-        cache[name] = handle
-    }
+    func get(_ name: String) -> MetalBufferHandle? { cache[name] }
+    func set(_ name: String, handle: MetalBufferHandle) { cache[name] = handle }
 }

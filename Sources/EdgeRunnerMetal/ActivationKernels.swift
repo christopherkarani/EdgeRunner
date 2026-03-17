@@ -110,6 +110,30 @@ public struct ActivationKernels: Sendable {
         let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: input.count)
         return Array(UnsafeBufferPointer(start: pointer, count: input.count))
     }
+
+    /// Encode a SwiGLU dispatch into an existing command buffer without committing.
+    public func encodeSwiglu(
+        commandBuffer: MTLCommandBuffer,
+        gateBuffer: MTLBuffer, upBuffer: MTLBuffer, outputBuffer: MTLBuffer,
+        count: Int
+    ) throws {
+        var params = ERActivationParams(count: UInt32(count))
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw ActivationError.encodingFailed
+        }
+
+        encoder.setComputePipelineState(swigluPipeline)
+        encoder.setBuffer(gateBuffer, offset: 0, index: 0)
+        encoder.setBuffer(upBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERActivationParams>.stride, index: 3)
+
+        let gridSize = MTLSize(width: count, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: min(count, swigluPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
 }
 
 public enum ActivationError: Error, Sendable {
