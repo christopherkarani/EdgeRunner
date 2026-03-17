@@ -15,24 +15,22 @@ kernel void dequant_q8_0(
     constant ERDequantQ8_0Params& params [[buffer(2)]],
     uint tid [[thread_position_in_grid]]
 ) {
-    if (tid >= params.blockCount) {
-        return;
-    }
-
+    if (tid >= params.blockCount) return;
     device const uchar* block = input + (tid * q8_0BlockBytes);
-    const device ushort* scaleBits = reinterpret_cast<const device ushort*>(block);
-    float scale = float(as_type<half>(*scaleBits));
-
+    float scale = float(as_type<half>(*(device const ushort*)block));
     uint outputBase = params.outputOffset + (tid * q8_0WeightsPerBlock);
     for (uint index = 0; index < q8_0WeightsPerBlock; index++) {
-        char quantised = as_type<char>(block[2 + index]);
-        output[outputBase + index] = scale * float(quantised);
+        output[outputBase + index] = scale * float(as_type<char>(block[2 + index]));
     }
 }
 
-// === Fused Dequant+GEMV for Q8_0 ===
-// Reads quantized weights directly, dequantizes in GPU registers, and multiplies.
-// Reduces memory bandwidth by ~3.8x vs pre-dequantized float32 GEMV.
+// === High-Performance Fused Q8_0 GEMV ===
+// Architecture inspired by llama.cpp's ggml Metal kernel:
+//   - 4 simdgroups (128 threads) per threadgroup
+//   - 2 rows per threadgroup — Y-value caching across rows
+//   - Each thread processes NQ=8 elements at a time
+//   - Cross-simdgroup reduction via threadgroup memory
+//
 // y[row] = sum_k dequant(W_q8[row, k]) * x[k]
 
 struct ERDequantQ8GEMVParams {
@@ -41,34 +39,411 @@ struct ERDequantQ8GEMVParams {
     uint blocksPerRow;
 };
 
+constant constexpr short NQ = 8;        // elements per thread per iteration
+constant constexpr short NR = 4;        // rows per threadgroup (4x Y-value reuse)
+constant constexpr short NSG = 4;       // simdgroups per threadgroup (4×32=128 threads)
+constant constexpr short NW = 32;       // simdwidth
+
 kernel void dequant_q8_0_gemv(
     device const uchar* quantisedW [[buffer(0)]],
     device const float* x [[buffer(1)]],
     device float* y [[buffer(2)]],
     constant ERDequantQ8GEMVParams& params [[buffer(3)]],
-    uint row [[threadgroup_position_in_grid]],
-    uint localID [[thread_position_in_threadgroup]],
-    uint simdLane [[thread_index_in_simdgroup]]
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
 ) {
-    if (row >= params.rows) return;
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
 
-    float partial = 0.0f;
-    uint rowOffset = row * params.blocksPerRow;
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);  // 0..7 (which block set)
+    const short il = tiisg % (NW / NQ);  // 0..3 (which 8-element chunk within block)
 
-    for (uint blockIndex = localID; blockIndex < params.blocksPerRow; blockIndex += 32) {
-        device const uchar* block = quantisedW + (rowOffset + blockIndex) * q8_0BlockBytes;
-        device const ushort* scaleBits = reinterpret_cast<device const ushort*>(block);
-        float scale = float(as_type<half>(*scaleBits));
-        uint colBase = blockIndex * q8_0WeightsPerBlock;
+    float sumf[NR] = { 0.f };
 
-        for (uint j = 0; j < q8_0WeightsPerBlock; j++) {
-            char quantised = as_type<char>(block[2 + j]);
-            partial += scale * float(quantised) * x[colBase + j];
-        }
+    // Pointers to weight rows
+    device const uchar* ax[NR];
+    for (short row = 0; row < NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
     }
 
-    partial = simd_sum(partial);
-    if (simdLane == 0) {
-        y[row] = partial;
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    // Main loop: each iteration processes NQ elements from one block
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        // Cache x values in registers (reused across NR rows)
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) {
+            yl[i] = yb[i];
+        }
+
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) {
+                sumq += float(qs[i]) * yl[i];
+            }
+            sumf[row] += sumq * scale;
+        }
+
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    // Reduction: first within simdgroup, then across simdgroups
+    for (short row = 0; row < NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    // Cross-simdgroup reduction via threadgroup memory
+    threadgroup float tg_sum[NR][NSG];
+
+    if (tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            tg_sum[row][sgitg] = sumf[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // First thread of first simdgroup writes final result
+    if (sgitg == 0 && tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) {
+                total += tg_sum[row][sg];
+            }
+            y[row0 + row] = total;
+        }
+    }
+}
+
+// === Fused Q+K+V projection — 3 outputs from 1 input in a single dispatch ===
+// Reads input x once, multiplies by 3 different weight matrices, writes 3 outputs.
+// Eliminates 2 dispatches per layer (3→1) and shares x-value cache across all 3 projections.
+
+struct ERFusedQKVParams {
+    uint qRows;          // Q output rows (numHeads * headDim)
+    uint kvRows;         // K/V output rows (numKVHeads * headDim)
+    uint cols;           // input columns (dim)
+    uint blocksPerRow;   // Q8_0 blocks per row
+};
+
+kernel void dequant_q8_0_fused_qkv(
+    device const uchar* wq [[buffer(0)]],
+    device const uchar* wk [[buffer(1)]],
+    device const uchar* wv [[buffer(2)]],
+    device const float* x [[buffer(3)]],
+    device float* outQ [[buffer(4)]],
+    device float* outK [[buffer(5)]],
+    device half* outV [[buffer(6)]],     // V writes f16 directly to cache
+    constant ERFusedQKVParams& params [[buffer(7)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    // Total rows = qRows + kvRows + kvRows. Each threadgroup handles NR consecutive rows
+    // across the concatenated Q/K/V output space.
+    const uint totalRows = params.qRows + params.kvRows + params.kvRows;
+    const uint row0 = tgIndex * NR;
+    if (row0 >= totalRows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumf[NR] = { 0.f };
+
+    // Determine which weight matrix and output each row belongs to
+    device const uchar* ax[NR];
+    for (short r = 0; r < NR; r++) {
+        uint globalRow = row0 + r;
+        if (globalRow >= totalRows) { ax[r] = wq; continue; }
+        uint localRow;
+        device const uchar* weights;
+        if (globalRow < params.qRows) {
+            localRow = globalRow;
+            weights = wq;
+        } else if (globalRow < params.qRows + params.kvRows) {
+            localRow = globalRow - params.qRows;
+            weights = wk;
+        } else {
+            localRow = globalRow - params.qRows - params.kvRows;
+            weights = wv;
+        }
+        ax[r] = weights + localRow * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short r = 0; r < NR; r++) {
+            if (row0 + r >= totalRows) break;
+            device const uchar* block = ax[r] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) sumq += float(qs[i]) * yl[i];
+            sumf[r] += sumq * scale;
+        }
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short r = 0; r < NR; r++) sumf[r] = simd_sum(sumf[r]);
+
+    threadgroup float tg_sum[NR][NSG];
+    if (tiisg == 0) {
+        for (short r = 0; r < NR; r++) tg_sum[r][sgitg] = sumf[r];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short r = 0; r < NR; r++) {
+            uint globalRow = row0 + r;
+            if (globalRow >= totalRows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) total += tg_sum[r][sg];
+
+            if (globalRow < params.qRows) {
+                outQ[globalRow] = total;
+            } else if (globalRow < params.qRows + params.kvRows) {
+                outK[globalRow - params.qRows] = total;
+            } else {
+                outV[globalRow - params.qRows - params.kvRows] = half(total);
+            }
+        }
+    }
+}
+
+// === Fused Gate+Up+SwiGLU — 2 GEMVs + activation in 1 dispatch ===
+// Computes: activated[row] = silu(gate_proj[row]) * up_proj[row]
+// where gate_proj = dequant(Wg) * x, up_proj = dequant(Wu) * x
+// Eliminates 2 dispatches per layer (gate + up + swiglu → 1).
+
+inline float silu_fn(float x) { return x / (1.0f + exp(-x)); }
+
+kernel void dequant_q8_0_fused_gate_up_silu(
+    device const uchar* wGate [[buffer(0)]],
+    device const uchar* wUp [[buffer(1)]],
+    device const float* x [[buffer(2)]],
+    device float* activated [[buffer(3)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(4)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumGate[NR] = { 0.f };
+    float sumUp[NR] = { 0.f };
+
+    device const uchar* axGate[NR];
+    device const uchar* axUp[NR];
+    for (short r = 0; r < NR; r++) {
+        uint row = row0 + r;
+        uint safeRow = row < params.rows ? row : row0;
+        axGate[r] = wGate + safeRow * nb * q8_0BlockBytes;
+        axUp[r] = wUp + safeRow * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short r = 0; r < NR; r++) {
+            if (row0 + r >= params.rows) break;
+
+            // Gate
+            device const uchar* blockG = axGate[r] + ib * q8_0BlockBytes;
+            float scaleG = float(as_type<half>(*(device const ushort*)blockG));
+            device const char* qsG = (device const char*)(blockG + 2) + il * NQ;
+            float sqG = 0.f;
+            for (short i = 0; i < NQ; i++) sqG += float(qsG[i]) * yl[i];
+            sumGate[r] += sqG * scaleG;
+
+            // Up
+            device const uchar* blockU = axUp[r] + ib * q8_0BlockBytes;
+            float scaleU = float(as_type<half>(*(device const ushort*)blockU));
+            device const char* qsU = (device const char*)(blockU + 2) + il * NQ;
+            float sqU = 0.f;
+            for (short i = 0; i < NQ; i++) sqU += float(qsU[i]) * yl[i];
+            sumUp[r] += sqU * scaleU;
+        }
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short r = 0; r < NR; r++) {
+        sumGate[r] = simd_sum(sumGate[r]);
+        sumUp[r] = simd_sum(sumUp[r]);
+    }
+
+    threadgroup float tg_gate[NR][NSG];
+    threadgroup float tg_up[NR][NSG];
+    if (tiisg == 0) {
+        for (short r = 0; r < NR; r++) {
+            tg_gate[r][sgitg] = sumGate[r];
+            tg_up[r][sgitg] = sumUp[r];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short r = 0; r < NR; r++) {
+            if (row0 + r >= params.rows) break;
+            float totalGate = 0.f, totalUp = 0.f;
+            for (short sg = 0; sg < NSG; sg++) {
+                totalGate += tg_gate[r][sg];
+                totalUp += tg_up[r][sg];
+            }
+            activated[row0 + r] = silu_fn(totalGate) * totalUp;
+        }
+    }
+}
+
+// === Float16 output variant — writes half directly to KV cache ===
+// Eliminates separate f32→f16 conversion dispatch.
+kernel void dequant_q8_0_gemv_f16out(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device half* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumf[NR] = { 0.f };
+
+    device const uchar* ax[NR];
+    for (short row = 0; row < NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) sumq += float(qs[i]) * yl[i];
+            sumf[row] += sumq * scale;
+        }
+
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short row = 0; row < NR; row++) sumf[row] = simd_sum(sumf[row]);
+
+    threadgroup float tg_sum[NR][NSG];
+    if (tiisg == 0) {
+        for (short row = 0; row < NR; row++) tg_sum[row][sgitg] = sumf[row];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) total += tg_sum[row][sg];
+            y[row0 + row] = half(total);
+        }
+    }
+}
+
+// === GEMV + Residual Add fused — y[i] = sum_k dequant(W[i,k])*x[k] + residual[i] ===
+// Eliminates separate elementwise_add dispatch after output/down projections.
+kernel void dequant_q8_0_gemv_add(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device const float* residual [[buffer(2)]],
+    device float* y [[buffer(3)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(4)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumf[NR] = { 0.f };
+
+    device const uchar* ax[NR];
+    for (short row = 0; row < NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) sumq += float(qs[i]) * yl[i];
+            sumf[row] += sumq * scale;
+        }
+
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short row = 0; row < NR; row++) sumf[row] = simd_sum(sumf[row]);
+
+    threadgroup float tg_sum[NR][NSG];
+    if (tiisg == 0) {
+        for (short row = 0; row < NR; row++) tg_sum[row][sgitg] = sumf[row];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) total += tg_sum[row][sg];
+            y[row0 + row] = total + residual[row0 + row];  // fused add!
+        }
     }
 }

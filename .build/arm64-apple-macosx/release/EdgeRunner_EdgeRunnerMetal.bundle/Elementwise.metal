@@ -100,3 +100,27 @@ kernel void elementwise_div_half(
         out[tid] = a[tid] / b[tid];
     }
 }
+
+// === Precision conversion kernels ===
+
+kernel void convert_f32_to_f16(
+    device const float* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant ERElementwiseParams& params [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid < params.elementCount) {
+        output[tid] = half(input[tid]);
+    }
+}
+
+kernel void convert_f16_to_f32(
+    device const half* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant ERElementwiseParams& params [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid < params.elementCount) {
+        output[tid] = float(input[tid]);
+    }
+}
