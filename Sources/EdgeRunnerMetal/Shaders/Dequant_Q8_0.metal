@@ -15,27 +15,21 @@ kernel void dequant_q8_0(
     constant ERDequantQ8_0Params& params [[buffer(2)]],
     uint tid [[thread_position_in_grid]]
 ) {
-    if (tid >= params.blockCount) {
-        return;
-    }
-
+    if (tid >= params.blockCount) return;
     device const uchar* block = input + (tid * q8_0BlockBytes);
-    const device ushort* scaleBits = reinterpret_cast<const device ushort*>(block);
-    float scale = float(as_type<half>(*scaleBits));
-
+    float scale = float(as_type<half>(*(device const ushort*)block));
     uint outputBase = params.outputOffset + (tid * q8_0WeightsPerBlock);
     for (uint index = 0; index < q8_0WeightsPerBlock; index++) {
-        char quantised = as_type<char>(block[2 + index]);
-        output[outputBase + index] = scale * float(quantised);
+        output[outputBase + index] = scale * float(as_type<char>(block[2 + index]));
     }
 }
 
-// === Optimized Fused Dequant+GEMV for Q8_0 ===
-// Inspired by llama.cpp's ggml Metal kernel optimizations:
-//   1. 2 rows per threadgroup — doubles output per dispatch, Y-value reuse across rows
-//   2. Y-value register caching — load x[k] once, multiply by 2 different weight rows
-//   3. Loop unrolling for instruction pipelining
-//   4. 32 threads (1 simdgroup) with simd_sum reduction
+// === High-Performance Fused Q8_0 GEMV ===
+// Architecture inspired by llama.cpp's ggml Metal kernel:
+//   - 4 simdgroups (128 threads) per threadgroup
+//   - 2 rows per threadgroup — Y-value caching across rows
+//   - Each thread processes NQ=8 elements at a time
+//   - Cross-simdgroup reduction via threadgroup memory
 //
 // y[row] = sum_k dequant(W_q8[row, k]) * x[k]
 
@@ -45,69 +39,88 @@ struct ERDequantQ8GEMVParams {
     uint blocksPerRow;
 };
 
-// Process 2 rows per threadgroup — halves dispatch count and reuses x[] loads
+constant constexpr short NQ = 8;        // elements per thread per iteration
+constant constexpr short NR = 2;        // rows per threadgroup
+constant constexpr short NSG = 2;       // simdgroups per threadgroup (2×32=64 threads)
+constant constexpr short NW = 32;       // simdwidth
+
 kernel void dequant_q8_0_gemv(
     device const uchar* quantisedW [[buffer(0)]],
     device const float* x [[buffer(1)]],
     device float* y [[buffer(2)]],
     constant ERDequantQ8GEMVParams& params [[buffer(3)]],
     uint tgIndex [[threadgroup_position_in_grid]],
-    uint localID [[thread_position_in_threadgroup]],
-    uint simdLane [[thread_index_in_simdgroup]]
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
 ) {
-    // Each threadgroup processes 2 rows
-    uint row0 = tgIndex * 2;
-    uint row1 = row0 + 1;
-    bool hasRow0 = row0 < params.rows;
-    bool hasRow1 = row1 < params.rows;
-    if (!hasRow0) return;
+    const uint row0 = tgIndex * NR;
+    if (row0 >= params.rows) return;
 
-    float partial0 = 0.0f;
-    float partial1 = 0.0f;
-    uint rowOffset0 = row0 * params.blocksPerRow;
-    uint rowOffset1 = row1 * params.blocksPerRow;
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);  // 0..7 (which block set)
+    const short il = tiisg % (NW / NQ);  // 0..3 (which 8-element chunk within block)
 
-    for (uint blockIndex = localID; blockIndex < params.blocksPerRow; blockIndex += 32) {
-        uint colBase = blockIndex * q8_0WeightsPerBlock;
+    float sumf[NR] = { 0.f };
 
-        // Load x values once into registers (reused across both rows)
-        float yl[32];
-        #pragma clang loop unroll(full)
-        for (uint j = 0; j < q8_0WeightsPerBlock; j++) {
-            yl[j] = x[colBase + j];
-        }
-
-        // Row 0
-        {
-            device const uchar* block = quantisedW + (rowOffset0 + blockIndex) * q8_0BlockBytes;
-            float scale = float(as_type<half>(*(device const ushort*)block));
-            float sum = 0.0f;
-            #pragma clang loop unroll(full)
-            for (uint j = 0; j < q8_0WeightsPerBlock; j++) {
-                sum += float(as_type<char>(block[2 + j])) * yl[j];
-            }
-            partial0 += scale * sum;
-        }
-
-        // Row 1 (if valid)
-        if (hasRow1) {
-            device const uchar* block = quantisedW + (rowOffset1 + blockIndex) * q8_0BlockBytes;
-            float scale = float(as_type<half>(*(device const ushort*)block));
-            float sum = 0.0f;
-            #pragma clang loop unroll(full)
-            for (uint j = 0; j < q8_0WeightsPerBlock; j++) {
-                sum += float(as_type<char>(block[2 + j])) * yl[j];
-            }
-            partial1 += scale * sum;
-        }
+    // Pointers to weight rows
+    device const uchar* ax[NR];
+    for (short row = 0; row < NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
     }
 
-    // Reduce across simdgroup
-    partial0 = simd_sum(partial0);
-    if (hasRow1) partial1 = simd_sum(partial1);
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
 
-    if (simdLane == 0) {
-        y[row0] = partial0;
-        if (hasRow1) y[row1] = partial1;
+    // Main loop: each iteration processes NQ elements from one block
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        // Cache x values in registers (reused across NR rows)
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) {
+            yl[i] = yb[i];
+        }
+
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) {
+                sumq += float(qs[i]) * yl[i];
+            }
+            sumf[row] += sumq * scale;
+        }
+
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    // Reduction: first within simdgroup, then across simdgroups
+    for (short row = 0; row < NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    // Cross-simdgroup reduction via threadgroup memory
+    threadgroup float tg_sum[NR][NSG];
+
+    if (tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            tg_sum[row][sgitg] = sumf[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // First thread of first simdgroup writes final result
+    if (sgitg == 0 && tiisg == 0) {
+        for (short row = 0; row < NR; row++) {
+            if (row0 + row >= params.rows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) {
+                total += tg_sum[row][sg];
+            }
+            y[row0 + row] = total;
+        }
     }
 }
