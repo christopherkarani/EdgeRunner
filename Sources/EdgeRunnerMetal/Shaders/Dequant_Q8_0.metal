@@ -405,3 +405,340 @@ kernel void dequant_q8_0_gemv_add(
         }
     }
 }
+
+// =============================================================================
+// === f16 Accumulation Variants ===============================================
+// =============================================================================
+// These kernels use half-precision for the inner dot product (xl[] cache and
+// per-block sumq), halving register pressure and doubling ALU throughput on
+// Apple Silicon. The outer cross-block accumulator (sumf[]) stays float32 to
+// prevent drift over hundreds of blocks.
+
+// --- 1. dequant_q8_0_gemv_f16acc ---
+kernel void dequant_q8_0_gemv_f16acc(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        half xl[32];
+        for (short i = 0; i < 32; i++) xl[i] = half(xb[i]);
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            half sumq = 0.h;
+            for (short i = 0; i < 32; i++) sumq += half(qs[i]) * xl[i];
+            sumf[row] += float(sumq) * scale;
+        }
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row];
+        }
+    }
+}
+
+// --- 2. dequant_q8_0_fused_qkv_f16acc ---
+kernel void dequant_q8_0_fused_qkv_f16acc(
+    device const uchar* wq [[buffer(0)]],
+    device const uchar* wk [[buffer(1)]],
+    device const uchar* wv [[buffer(2)]],
+    device const float* x [[buffer(3)]],
+    device float* outQ [[buffer(4)]],
+    device float* outK [[buffer(5)]],
+    device half* outV [[buffer(6)]],
+    device const float* normWeight [[buffer(8)]],
+    constant ERFusedQKVParams& params [[buffer(7)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint totalRows = params.qRows + params.kvRows + params.kvRows;
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= totalRows) return;
+
+    const short nb = params.blocksPerRow;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short r = 0; r < LOCAL_NR; r++) {
+        uint globalRow = row0 + r;
+        if (globalRow >= totalRows) { ax[r] = wq; continue; }
+        uint localRow;
+        device const uchar* weights;
+        if (globalRow < params.qRows) {
+            localRow = globalRow;
+            weights = wq;
+        } else if (globalRow < params.qRows + params.kvRows) {
+            localRow = globalRow - params.qRows;
+            weights = wk;
+        } else {
+            localRow = globalRow - params.qRows - params.kvRows;
+            weights = wv;
+        }
+        ax[r] = weights + localRow * nb * q8_0BlockBytes;
+    }
+
+    // === Cooperative RMSNorm: stays in f32 (runs once, not on hot path) ===
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
+
+    // === Main GEMV loop: f16 inner accumulation ===
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        half xl[32];
+        for (short i = 0; i < 32; i++) {
+            xl[i] = half(xb[i] * rmsScale * normWeight[ib * 32 + i]);
+        }
+
+        for (short r = 0; r < LOCAL_NR; r++) {
+            if (row0 + r >= totalRows) break;
+            device const uchar* block = ax[r] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            half sumq = 0.h;
+            for (short i = 0; i < 32; i++) sumq += half(qs[i]) * xl[i];
+            sumf[r] += float(sumq) * scale;
+        }
+    }
+
+    for (short r = 0; r < LOCAL_NR; r++) sumf[r] = simd_sum(sumf[r]);
+
+    if (tiisg == 0) {
+        for (short r = 0; r < LOCAL_NR; r++) {
+            uint globalRow = row0 + r;
+            if (globalRow >= totalRows) break;
+
+            float total = sumf[r];
+            if (globalRow < params.qRows) {
+                outQ[globalRow] = total;
+            } else if (globalRow < params.qRows + params.kvRows) {
+                outK[globalRow - params.qRows] = total;
+            } else {
+                outV[globalRow - params.qRows - params.kvRows] = half(total);
+            }
+        }
+    }
+}
+
+// --- 3. dequant_q8_0_fused_gate_up_silu_f16acc ---
+kernel void dequant_q8_0_fused_gate_up_silu_f16acc(
+    device const uchar* wGate [[buffer(0)]],
+    device const uchar* wUp [[buffer(1)]],
+    device const float* x [[buffer(2)]],
+    device float* activated [[buffer(3)]],
+    device const float* normWeight [[buffer(5)]],
+    constant ERFusedGateUpSiluParams& params [[buffer(4)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+
+    // === Cooperative RMSNorm: stays in f32 ===
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
+
+    float sumGate[LOCAL_NR] = { 0.f };
+    float sumUp[LOCAL_NR] = { 0.f };
+
+    device const uchar* axGate[LOCAL_NR];
+    device const uchar* axUp[LOCAL_NR];
+    for (short r = 0; r < LOCAL_NR; r++) {
+        uint row = row0 + r;
+        uint safeRow = row < params.rows ? row : row0;
+        axGate[r] = wGate + safeRow * nb * q8_0BlockBytes;
+        axUp[r] = wUp + safeRow * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        half xl[32];
+        for (short i = 0; i < 32; i++) {
+            xl[i] = half(xb[i] * rmsScale * normWeight[ib * 32 + i]);
+        }
+
+        for (short r = 0; r < LOCAL_NR; r++) {
+            if (row0 + r >= params.rows) break;
+
+            // Gate
+            device const uchar* blockG = axGate[r] + ib * q8_0BlockBytes;
+            float scaleG = float(as_type<half>(*(device const ushort*)blockG));
+            device const char* qsG = (device const char*)(blockG + 2);
+            half sqG = 0.h;
+            for (short i = 0; i < 32; i++) sqG += half(qsG[i]) * xl[i];
+            sumGate[r] += float(sqG) * scaleG;
+
+            // Up
+            device const uchar* blockU = axUp[r] + ib * q8_0BlockBytes;
+            float scaleU = float(as_type<half>(*(device const ushort*)blockU));
+            device const char* qsU = (device const char*)(blockU + 2);
+            half sqU = 0.h;
+            for (short i = 0; i < 32; i++) sqU += half(qsU[i]) * xl[i];
+            sumUp[r] += float(sqU) * scaleU;
+        }
+    }
+
+    for (short r = 0; r < LOCAL_NR; r++) {
+        sumGate[r] = simd_sum(sumGate[r]);
+        sumUp[r] = simd_sum(sumUp[r]);
+    }
+
+    if (tiisg == 0) {
+        for (short r = 0; r < LOCAL_NR; r++) {
+            if (row0 + r >= params.rows) break;
+            activated[row0 + r] = silu_fn(sumGate[r]) * sumUp[r];
+        }
+    }
+}
+
+// --- 4. dequant_q8_0_gemv_f16out_f16acc ---
+kernel void dequant_q8_0_gemv_f16out_f16acc(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device half* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        half xl[32];
+        for (short i = 0; i < 32; i++) xl[i] = half(xb[i]);
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            half sumq = 0.h;
+            for (short i = 0; i < 32; i++) sumq += half(qs[i]) * xl[i];
+            sumf[row] += float(sumq) * scale;
+        }
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) sumf[row] = simd_sum(sumf[row]);
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = half(sumf[row]);
+        }
+    }
+}
+
+// --- 5. dequant_q8_0_gemv_add_f16acc ---
+kernel void dequant_q8_0_gemv_add_f16acc(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device const float* residual [[buffer(2)]],
+    device float* y [[buffer(3)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(4)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        half xl[32];
+        for (short i = 0; i < 32; i++) xl[i] = half(xb[i]);
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            half sumq = 0.h;
+            for (short i = 0; i < 32; i++) sumq += half(qs[i]) * xl[i];
+            sumf[row] += float(sumq) * scale;
+        }
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) sumf[row] = simd_sum(sumf[row]);
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row] + residual[row0 + row];
+        }
+    }
+}
