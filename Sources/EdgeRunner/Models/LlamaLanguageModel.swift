@@ -539,24 +539,25 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             let ropeQOut: MTLBuffer  // used by GQA step below
             if hasQKNorm && seqLen == 1 {
-                // Fused path: Q/K norm + RoPE Q + RoPE K→f16 in a single dispatch
-                let fusedPSO = fusedQKNormRoPEPipeline
-                let cacheWriteOffF16 = 0 * kvDim * halfStride
-                enc.setComputePipelineState(fusedPSO)
-                enc.setBuffer(allQBuf, offset: 0, index: 0)        // Q input
-                enc.setBuffer(allKBuf, offset: 0, index: 1)        // K input
-                enc.setBuffer(lw.qNorm!, offset: 0, index: 2)      // Q norm weight
-                enc.setBuffer(lw.kNorm!, offset: 0, index: 3)      // K norm weight
-                enc.setBuffer(ropeQBuf, offset: 0, index: 4)       // Q output (f32)
-                enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 5) // K output (f16 → cache)
+                // MEGA-FUSED: Q/K norm + RoPE + GQA all in one dispatch
+                let megaPSO = fusedNormRoPEGQAPipeline
+                enc.setComputePipelineState(megaPSO)
+                enc.setBuffer(allQBuf, offset: 0, index: 0)
+                enc.setBuffer(allKBuf, offset: 0, index: 1)
+                enc.setBuffer(lw.qNorm!, offset: 0, index: 2)
+                enc.setBuffer(lw.kNorm!, offset: 0, index: 3)
+                enc.setBuffer(attnOutBuf, offset: 0, index: 4)     // attention output directly!
+                enc.setBuffer(layerKCache, offset: 0, index: 5)
+                enc.setBuffer(layerVCache, offset: 0, index: 6)
                 var p = (UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim),
-                         UInt32(0), ropeTheta, Float(1.0), rmsEps)  // startPos=0 for prefill
-                enc.setBytes(&p, length: 7 * 4, index: 6)
+                         UInt32(0), ropeTheta, Float(1.0), rmsEps,
+                         UInt32(1), 1.0 / sqrt(Float(headDim)))  // kvSeqLen=1 for first prefill
+                enc.setBytes(&p, length: 9 * 4, index: 7)
                 let halfDim = headDim / 2
                 let totalHeads = numHeads + numKVHeads
                 enc.dispatchThreads(MTLSize(width: halfDim, height: totalHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(halfDim, fusedPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                ropeQOut = ropeQBuf
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                ropeQOut = attnOutBuf  // mega-kernel writes attention output directly
             } else {
                 // Fallback: separate Q/K norm + RoPE (for seqLen > 1 or no Q/K norm)
                 if hasQKNorm {
@@ -631,8 +632,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             // 4. GQA (data is in [S,H,D] layout)
-            //    K/V read from per-layer cache buffers (same data, just written there instead of scratch)
-            do {
+            //    Skip GQA if mega-kernel already computed attention (seqLen==1 && hasQKNorm)
+            let megaKernelUsed = hasQKNorm && seqLen == 1
+            if !megaKernelUsed {
                 let groupSize = numHeads / numKVHeads
                 var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
                     numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),

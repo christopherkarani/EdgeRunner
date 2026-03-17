@@ -264,3 +264,18 @@ With Swift overhead: 20.7 + 6ms = 26.7ms → 150 tok/s wall clock
 | **We EXCEED llama.cpp** | **✓** |
 
 Per-layer dispatches: 5 (was 15 originally, then 11, 9, 6, now 5)
+
+### Experiment 14: Apply Mega-Kernel to Prefill Path  
+- **Change**: Prefill seqLen==1 now uses fused_qk_norm_rope_gqa mega-kernel, skipping separate GQA dispatch
+- **Result**: Peak 240 tok/s, median ~200 tok/s
+- **Variance**: System load causes 128-240 range. Consistent 190+ when warm.
+
+## Updated Performance: 240 tok/s peak
+
+| Run type | tok/s |
+|----------|-------|
+| Best observed | 240 |
+| Warm median | ~210 |
+| Cold first run | ~130 |
+| llama.cpp reference | 183 |
+| **Gap to 300** | **60 tok/s (25%)** |
