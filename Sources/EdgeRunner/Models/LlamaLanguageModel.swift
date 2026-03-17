@@ -263,10 +263,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 ))
             }
             let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
+            let lmHeadBuf = try await readWeightBuffer(lmHeadName)
+
+            // Create Q8_0 raw buffer for LM head fused GEMV
+            var lmHeadRawBuf: MTLBuffer? = nil
+            var lmHeadCols = dim
+            if let storage = weights[lmHeadName], storage.dataType == .q8_0 {
+                let blockCount = storage.elementCount / 32
+                let byteCount = blockCount * 34
+                lmHeadRawBuf = device.makeBuffer(
+                    bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+                    length: byteCount,
+                    options: .storageModeShared,
+                    deallocator: nil
+                )
+                lmHeadCols = dim
+            }
+
             preloadedWeights.load(
                 layers: layers,
                 finalNorm: try await readWeightBuffer("finalNorm.weight"),
-                lmHead: try await readWeightBuffer(lmHeadName)
+                lmHead: lmHeadBuf,
+                lmHeadRaw: lmHeadRawBuf,
+                lmHeadCols: lmHeadCols
             )
         }
 
@@ -549,14 +568,25 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             currentHidden = finalOutputBuf
         }
 
-        // === LM HEAD ===
-        let lmHeadBuf = preloadedWeights.lmHead!
+        // === LM HEAD (fused Q8_0 when available — saves ~428MB bandwidth) ===
         let logitsBuf = device.makeBuffer(length: config.vocabSize * floatStride, options: .storageModeShared)!
-        do {
-            var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
+        let lastHiddenOff = (seqLen - 1) * dim * floatStride
+        if let lmRaw = preloadedWeights.lmHeadRaw {
+            let blocksPerRow = preloadedWeights.lmHeadCols / 32
+            enc.setComputePipelineState(fusedQ8PSO)
+            var p = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
+            enc.setBuffer(lmRaw, offset: 0, index: 0)
+            enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: config.vocabSize, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else {
+            let lmHeadBuf = preloadedWeights.lmHead!
             enc.setComputePipelineState(gemvPSO)
+            var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
             enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
-            enc.setBuffer(currentHidden, offset: (seqLen - 1) * dim * floatStride, index: 1)
+            enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
             enc.dispatchThreadgroups(MTLSize(width: config.vocabSize, height: 1, depth: 1),
@@ -874,10 +904,16 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
     var lmHead: MTLBuffer?
     var isLoaded = false
 
-    func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer) {
+    var lmHeadRaw: MTLBuffer? // Q8_0 raw for fused GEMV
+    var lmHeadCols: Int = 0
+
+    func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer,
+              lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
         self.layers = layers
         self.finalNorm = finalNorm
         self.lmHead = lmHead
+        self.lmHeadRaw = lmHeadRaw
+        self.lmHeadCols = lmHeadCols
         self.isLoaded = true
     }
 }
