@@ -42,6 +42,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let fusedQ8GemvPipeline: MTLComputePipelineState
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
+    private let fusedGateUpSiluPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -97,6 +98,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
+        self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
 
         // Initialize dequant kernels
@@ -1083,21 +1085,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
             }
 
-            // 8. Gate + Up projections (single token)
+            // 8+9. Fused Gate + Up + SwiGLU (single dispatch: 2 GEMVs + activation)
             if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
-                enc.setComputePipelineState(fusedQ8PSO)
-                var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                let fusedGUSPSO = fusedGateUpSiluPipeline
+                enc.setComputePipelineState(fusedGUSPSO)
                 enc.setBuffer(gateRaw, offset: 0, index: 0)
-                enc.setBuffer(ffnNormedBuf, offset: 0, index: 1)
-                enc.setBuffer(gateOutBuf, offset: 0, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-                enc.setBuffer(upRaw, offset: 0, index: 0)
-                enc.setBuffer(upOutBuf, offset: 0, index: 2)
+                enc.setBuffer(upRaw, offset: 0, index: 1)
+                enc.setBuffer(ffnNormedBuf, offset: 0, index: 2)
+                enc.setBuffer(activBuf, offset: 0, index: 3)
+                var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
+                enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
             } else {
+                // Fallback: separate gate + up + SwiGLU
                 enc.setComputePipelineState(gemvPSO)
                 var p = ERGEMVParams(M: UInt32(interDim), K: UInt32(dim), lda: UInt32(dim))
                 enc.setBuffer(lw.gate, offset: 0, index: 0)
@@ -1110,16 +1111,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(upOutBuf, offset: 0, index: 2)
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 3) / 4, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-            }
-
-            // 9. SwiGLU (single token: interDim elements)
-            do {
-                var p = ERActivationParams(count: UInt32(interDim))
+                // SwiGLU
+                var sp = ERActivationParams(count: UInt32(interDim))
                 enc.setComputePipelineState(swigluPSO)
                 enc.setBuffer(gateOutBuf, offset: 0, index: 0)
                 enc.setBuffer(upOutBuf, offset: 0, index: 1)
                 enc.setBuffer(activBuf, offset: 0, index: 2)
-                enc.setBytes(&p, length: MemoryLayout<ERActivationParams>.stride, index: 3)
+                enc.setBytes(&sp, length: MemoryLayout<ERActivationParams>.stride, index: 3)
                 enc.dispatchThreads(MTLSize(width: interDim, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(interDim, swigluPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
