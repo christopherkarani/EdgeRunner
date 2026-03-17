@@ -1,12 +1,12 @@
 {
   "": {
-    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/master.swiftdeps"
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/master.swiftdeps"
   },
-  "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.derived/runner.swift": {
-    "dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.d",
-    "object": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.swift.o",
-    "swiftmodule": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner~partial.swiftmodule",
-    "swift-dependencies": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.swiftdeps",
-    "diagnostics": "/Users/chriskarani/CodingProjects/EdgeRunner/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.dia"
+  "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.derived/runner.swift": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/index-build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.build/runner.dia"
   }
 }

@@ -1,0 +1,157 @@
+{
+  "": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerIO.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerIO.o",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/master.swiftdeps"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/DequantKernel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantKernel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantKernel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantKernel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantKernel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/DequantQ4KMKernel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4KMKernel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4KMKernel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4KMKernel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4KMKernel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/DequantQ4_0Kernel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4_0Kernel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4_0Kernel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4_0Kernel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ4_0Kernel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/DequantQ8_0Kernel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ8_0Kernel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ8_0Kernel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ8_0Kernel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/DequantQ8_0Kernel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/EdgeRunnerMemoryPolicy.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerMemoryPolicy.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerMemoryPolicy~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerMemoryPolicy.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerMemoryPolicy.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/EdgeRunnerModelLoader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerModelLoader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerModelLoader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerModelLoader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/EdgeRunnerModelLoader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/GGUF/GGUFLoader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFLoader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFLoader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFLoader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFLoader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/GGUF/GGUFMetadata.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFMetadata.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFMetadata~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFMetadata.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFMetadata.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/GGUF/GGUFParser.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFParser.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFParser~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFParser.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFParser.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/GGUF/GGUFTypes.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFTypes.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFTypes~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFTypes.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/GGUFTypes.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/GGUF/MemoryMappedFile.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryMappedFile.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryMappedFile~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryMappedFile.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryMappedFile.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/LlamaBlock.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaBlock.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaBlock~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaBlock.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaBlock.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/LlamaConfig.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaConfig.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaConfig~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaConfig.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaConfig.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/LlamaModel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaModel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaModel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaModel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LlamaModel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/MemoryPressureHandler.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryPressureHandler.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryPressureHandler~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryPressureHandler.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/MemoryPressureHandler.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/ModelConfig.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelConfig.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelConfig~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelConfig.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelConfig.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/ModelRegistry.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelRegistry.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelRegistry~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelRegistry.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/ModelRegistry.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/NPYParser.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPYParser.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPYParser~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPYParser.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPYParser.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/NPZLoader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPZLoader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPZLoader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPZLoader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/NPZLoader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/Protocols/LoadableModel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LoadableModel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LoadableModel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LoadableModel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/LoadableModel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/SafeTensorHeader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorHeader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorHeader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorHeader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorHeader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/SafeTensorLoader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorLoader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorLoader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorLoader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/SafeTensorLoader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoader.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoader.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoader~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoader.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoader.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoaderError.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoaderError.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoaderError~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoaderError.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightLoaderError.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightMap.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightMap.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightMap~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightMap.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/WeightMap.dia"
+  }
+}

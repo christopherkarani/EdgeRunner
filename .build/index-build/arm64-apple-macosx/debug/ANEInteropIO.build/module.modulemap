@@ -1,0 +1,4 @@
+module ANEInteropIO {
+    umbrella "/private/tmp/edgerunner-autoresearch/Sources/ANEInteropIO/include"
+    export *
+}

@@ -1,0 +1,49 @@
+{
+  "": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoEdgeRunner.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoEdgeRunner.o",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/master.swiftdeps"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/BlobfileWriter.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/BlobfileWriter.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/BlobfileWriter~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/BlobfileWriter.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/BlobfileWriter.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/DequantDispatcher.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/DequantDispatcher.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/DequantDispatcher~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/DequantDispatcher.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/DequantDispatcher.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/EspressoError.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoError.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoError~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoError.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoError.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/EspressoModelConfig.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoModelConfig.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoModelConfig~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoModelConfig.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoModelConfig.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/EspressoTensorNameMapper.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoTensorNameMapper.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoTensorNameMapper~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoTensorNameMapper.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/EspressoTensorNameMapper.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/RoPEBridge.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/RoPEBridge.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/RoPEBridge~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/RoPEBridge.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/RoPEBridge.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EspressoEdgeRunner/WeightConverter.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/WeightConverter.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/WeightConverter~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/WeightConverter.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EspressoEdgeRunner.build/WeightConverter.dia"
+  }
+}

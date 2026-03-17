@@ -1,0 +1,3 @@
+module EdgeRunnerMetal {
+    header "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerMetal.build/include/EdgeRunnerMetal-Swift.h"
+}

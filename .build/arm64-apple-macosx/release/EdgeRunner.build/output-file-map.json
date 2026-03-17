@@ -1,0 +1,199 @@
+{
+  "": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner.o",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/master.swiftdeps"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Backends/BackendFactory.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/BackendFactory.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/BackendFactory~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/BackendFactory.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/BackendFactory.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Backends/EdgeRunnerLocalBackend.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLocalBackend.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLocalBackend~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLocalBackend.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLocalBackend.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Backends/FoundationModelsBackend.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FoundationModelsBackend.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FoundationModelsBackend~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FoundationModelsBackend.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FoundationModelsBackend.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Chat/ChatMessage.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatMessage.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatMessage~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatMessage.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatMessage.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Chat/ChatViewModelState.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatViewModelState.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatViewModelState~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatViewModelState.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ChatViewModelState.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Chat/ModelInfo.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelInfo.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelInfo~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelInfo.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelInfo.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/EdgeRunner.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunner.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/EdgeRunnerLanguageModel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLanguageModel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLanguageModel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLanguageModel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerLanguageModel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Metrics/Perplexity.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Perplexity.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Perplexity~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Perplexity.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Perplexity.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/ModelConfiguration.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelConfiguration.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelConfiguration~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelConfiguration.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ModelConfiguration.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/Embedding.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Embedding.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Embedding~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Embedding.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Embedding.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/GPT2Attention.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Attention.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Attention~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Attention.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Attention.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/GPT2Block.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Block.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Block~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Block.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Block.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/GPT2Config.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Config.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Config~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Config.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Config.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/GPT2FeedForward.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2FeedForward.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2FeedForward~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2FeedForward.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2FeedForward.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/GPT2Model.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Model.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Model~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Model.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GPT2Model.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Models/LlamaLanguageModel.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/LlamaLanguageModel.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/LlamaLanguageModel~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/LlamaLanguageModel.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/LlamaLanguageModel.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Module/EdgeRunnerModule.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerModule.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerModule~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerModule.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerModule.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Module/Linear.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Linear.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Linear~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Linear.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Linear.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Module/Sequential.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Sequential.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Sequential~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Sequential.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/Sequential.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Module/TensorBox.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TensorBox.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TensorBox~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TensorBox.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TensorBox.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/SamplingConfiguration.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/SamplingConfiguration.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/SamplingConfiguration~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/SamplingConfiguration.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/SamplingConfiguration.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Streaming/GenerationSession.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GenerationSession.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GenerationSession~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GenerationSession.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/GenerationSession.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Streaming/TokenStream.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TokenStream.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TokenStream~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TokenStream.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TokenStream.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/ToolCalling/EdgeRunnerTool.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerTool.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerTool~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerTool.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/EdgeRunnerTool.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/ToolCalling/ToolCallParser.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolCallParser.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolCallParser~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolCallParser.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolCallParser.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/ToolCalling/ToolChoice.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolChoice.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolChoice~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolChoice.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolChoice.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/ToolCalling/ToolExecutor.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolExecutor.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolExecutor~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolExecutor.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/ToolExecutor.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Transformer/FeedForward.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FeedForward.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FeedForward~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FeedForward.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/FeedForward.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Transformer/MultiHeadAttention.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/MultiHeadAttention.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/MultiHeadAttention~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/MultiHeadAttention.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/MultiHeadAttention.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Transformer/TransformerBlock.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerBlock.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerBlock~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerBlock.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerBlock.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunner/Transformer/TransformerConfig.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerConfig.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerConfig~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerConfig.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunner.build/TransformerConfig.dia"
+  }
+}

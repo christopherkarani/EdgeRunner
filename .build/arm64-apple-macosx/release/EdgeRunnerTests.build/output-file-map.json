@@ -1,0 +1,97 @@
+{
+  "": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerTests.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerTests.o",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/master.swiftdeps"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/BackendTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BackendTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BackendTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BackendTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BackendTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/BenchmarkReportGenerator.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BenchmarkReportGenerator.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BenchmarkReportGenerator~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BenchmarkReportGenerator.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/BenchmarkReportGenerator.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/ChatViewModelTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ChatViewModelTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ChatViewModelTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ChatViewModelTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ChatViewModelTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/EdgeRunnerLanguageModelTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/EdgeRunnerLanguageModelTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/GPT2Tests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GPT2Tests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GPT2Tests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GPT2Tests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GPT2Tests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/GenerationBenchmarks.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GenerationBenchmarks.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GenerationBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GenerationBenchmarks.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/GenerationBenchmarks.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/IntegrationTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/IntegrationTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/IntegrationTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/IntegrationTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/IntegrationTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/MemoryBenchmarks.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/MemoryBenchmarks.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/MemoryBenchmarks~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/MemoryBenchmarks.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/MemoryBenchmarks.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/ModuleTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ModuleTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ModuleTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ModuleTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ModuleTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/PerplexityTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PerplexityTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PerplexityTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PerplexityTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PerplexityTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/PlaceholderTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PlaceholderTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PlaceholderTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PlaceholderTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/PlaceholderTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/QwenBenchmark.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/QwenBenchmark.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/QwenBenchmark~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/QwenBenchmark.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/QwenBenchmark.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/StreamingTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/StreamingTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/StreamingTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/StreamingTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/StreamingTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/ToolCallingTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ToolCallingTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ToolCallingTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ToolCallingTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/ToolCallingTests.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Tests/EdgeRunnerTests/TransformerBlockTests.swift": {
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/TransformerBlockTests.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/TransformerBlockTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/TransformerBlockTests.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerTests.build/TransformerBlockTests.dia"
+  }
+}

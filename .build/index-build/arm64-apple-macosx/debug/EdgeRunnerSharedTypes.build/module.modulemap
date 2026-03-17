@@ -1,4 +1,4 @@
 module EdgeRunnerSharedTypes {
-    umbrella "/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerSharedTypes/include"
+    umbrella "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerSharedTypes/include"
     export *
 }

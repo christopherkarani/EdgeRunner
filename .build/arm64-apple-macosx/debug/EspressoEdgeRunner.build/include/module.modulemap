@@ -1,0 +1,3 @@
+module EspressoEdgeRunner {
+    header "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EspressoEdgeRunner.build/include/EspressoEdgeRunner-Swift.h"
+}

@@ -3,7 +3,7 @@ import Foundation
 extension Foundation.Bundle {
     static let module: Bundle = {
         let mainPath = Bundle.main.bundleURL.appendingPathComponent("EdgeRunner_EdgeRunnerMetal.bundle").path
-        let buildPath = "/Users/chriskarani/CodingProjects/EdgeRunner/.build/arm64-apple-macosx/debug/EdgeRunner_EdgeRunnerMetal.bundle"
+        let buildPath = "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunner_EdgeRunnerMetal.bundle"
 
         let preferredBundle = Bundle(path: mainPath)
 
