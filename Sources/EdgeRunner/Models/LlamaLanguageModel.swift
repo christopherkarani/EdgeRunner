@@ -115,7 +115,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.dequantQ4KM = try DequantQ4KMKernel(device: device)
 
         // Initialize KV cache
-        let effectiveMaxSeq = min(maxSeqLen, 64) // cap for reasonable allocation
+        let effectiveMaxSeq = maxSeqLen
         self.kvCache = try KVCache(
             device: device,
             maxSeqLen: effectiveMaxSeq,
@@ -152,25 +152,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let kvDim = config.kvHeadCount * config.headDim
         let dim = config.embeddingDim
         let interDim = config.intermediateDim
-        self.scratch = ScratchBuffers(
-            normed: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            afterAttn: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            ffnNormed: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            outputA: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            outputB: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            allQ: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
-            allK: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
-            allV: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
-            ropeQ: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
-            ropeK: device.makeBuffer(length: maxSeq * kvDim * fs, options: .storageModeShared)!,
-            attnOut: device.makeBuffer(length: maxSeq * qDim * fs, options: .storageModeShared)!,
-            proj: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            gateOut: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
-            upOut: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
-            activ: device.makeBuffer(length: maxSeq * interDim * fs, options: .storageModeShared)!,
-            downOut: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            finalOut: device.makeBuffer(length: maxSeq * dim * fs, options: .storageModeShared)!,
-            logits: device.makeBuffer(length: config.vocabSize * fs, options: .storageModeShared)!
+
+        func allocBuffer(_ size: Int) throws -> MTLBuffer {
+            guard let buf = device.makeBuffer(length: size, options: .storageModeShared) else {
+                throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed (\(size) bytes)")
+            }
+            return buf
+        }
+
+        self.scratch = try ScratchBuffers(
+            normed: allocBuffer(maxSeq * dim * fs),
+            afterAttn: allocBuffer(maxSeq * dim * fs),
+            ffnNormed: allocBuffer(maxSeq * dim * fs),
+            outputA: allocBuffer(maxSeq * dim * fs),
+            outputB: allocBuffer(maxSeq * dim * fs),
+            allQ: allocBuffer(maxSeq * qDim * fs),
+            allK: allocBuffer(maxSeq * kvDim * fs),
+            allV: allocBuffer(maxSeq * kvDim * fs),
+            ropeQ: allocBuffer(maxSeq * qDim * fs),
+            ropeK: allocBuffer(maxSeq * kvDim * fs),
+            attnOut: allocBuffer(maxSeq * qDim * fs),
+            proj: allocBuffer(maxSeq * dim * fs),
+            gateOut: allocBuffer(maxSeq * interDim * fs),
+            upOut: allocBuffer(maxSeq * interDim * fs),
+            activ: allocBuffer(maxSeq * interDim * fs),
+            downOut: allocBuffer(maxSeq * dim * fs),
+            finalOut: allocBuffer(maxSeq * dim * fs),
+            logits: allocBuffer(config.vocabSize * fs)
         )
     }
 
@@ -225,7 +233,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             if preloadedWeights.isLoaded {
                 let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
                 let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
-                hiddenBuf = device.makeBuffer(length: dim * floatStride, options: .storageModeShared)!
+                guard let hBuf = device.makeBuffer(length: dim * floatStride, options: .storageModeShared) else {
+                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for decode embedding")
+                }
+                hiddenBuf = hBuf
                 let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
                 let clampedID = min(max(newTokenID, 0), config.vocabSize - 1)
                 memcpy(dstPtr, embPtr + clampedID * dim, dim * floatStride)
@@ -260,7 +271,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             if preloadedWeights.isLoaded {
                 let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
                 let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
-                hiddenBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared)!
+                guard let hBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared) else {
+                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for prefill embedding")
+                }
+                hiddenBuf = hBuf
                 let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
                 for (i, tokenID) in tokenIDs.enumerated() {
                     let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
@@ -1491,6 +1505,8 @@ private actor WeightCacheActor {
 
 /// Pre-allocated GPU buffers reused across all forward passes.
 /// Eliminates ~17 MTLBuffer allocations per call.
+/// @unchecked Sendable: all fields are immutable `let` MTLBuffer references.
+/// MTLBuffer contents are mutated by GPU kernels (not Swift), synchronized via command buffer ordering.
 private struct ScratchBuffers: @unchecked Sendable {
     let normed: MTLBuffer
     let afterAttn: MTLBuffer
@@ -1558,24 +1574,36 @@ private struct LayerWeightBuffers {
 }
 
 /// Thread-safe store for pre-loaded weights. Loaded once on first forward pass,
-/// then accessed directly (zero actor hops) on all subsequent passes.
-private final class PreloadedWeightsStore: @unchecked Sendable {
-    var layers: [LayerWeightBuffers] = []
-    var finalNorm: MTLBuffer?
-    var lmHead: MTLBuffer?
-    var isLoaded = false
+/// then accessed directly on all subsequent passes. Uses Mutex for safe initialization.
+private final class PreloadedWeightsStore: Sendable {
+    private struct State {
+        var layers: [LayerWeightBuffers] = []
+        var finalNorm: MTLBuffer?
+        var lmHead: MTLBuffer?
+        var isLoaded = false
+        var lmHeadRaw: MTLBuffer?
+        var lmHeadCols: Int = 0
+    }
 
-    var lmHeadRaw: MTLBuffer? // Q8_0 raw for fused GEMV
-    var lmHeadCols: Int = 0
+    private let state = Mutex(State())
+
+    var layers: [LayerWeightBuffers] { state.withLock { $0.layers } }
+    var finalNorm: MTLBuffer? { state.withLock { $0.finalNorm } }
+    var lmHead: MTLBuffer? { state.withLock { $0.lmHead } }
+    var isLoaded: Bool { state.withLock { $0.isLoaded } }
+    var lmHeadRaw: MTLBuffer? { state.withLock { $0.lmHeadRaw } }
+    var lmHeadCols: Int { state.withLock { $0.lmHeadCols } }
 
     func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer,
               lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
-        self.layers = layers
-        self.finalNorm = finalNorm
-        self.lmHead = lmHead
-        self.lmHeadRaw = lmHeadRaw
-        self.lmHeadCols = lmHeadCols
-        self.isLoaded = true
+        state.withLock {
+            $0.layers = layers
+            $0.finalNorm = finalNorm
+            $0.lmHead = lmHead
+            $0.lmHeadRaw = lmHeadRaw
+            $0.lmHeadCols = lmHeadCols
+            $0.isLoaded = true
+        }
     }
 }
 
@@ -1592,6 +1620,11 @@ private actor MetalBufferCacheActor {
 /// Tracks the previously processed token sequence for KV cache decode detection.
 /// When the new tokenIDs are the previous sequence plus one new token,
 /// we can skip recomputing the full sequence and only process the new token.
-private final class DecoderStateStore: @unchecked Sendable {
-    var previousTokenIDs: [Int] = []
+private final class DecoderStateStore: Sendable {
+    private let state = Mutex<[Int]>([])
+
+    var previousTokenIDs: [Int] {
+        get { state.withLock { $0 } }
+        set { state.withLock { $0 = newValue } }
+    }
 }
