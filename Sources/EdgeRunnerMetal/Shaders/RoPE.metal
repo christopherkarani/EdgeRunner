@@ -68,7 +68,8 @@ kernel void rope_neox_f32(
     output[headBase + dimPair + halfDim] = x0 * sinValue + x1 * cosValue;
 }
 
-// NeoX RoPE with float16 output — writes directly to KV cache, eliminating conversion dispatch.
+/// NeoX RoPE with f16 output — eliminates separate f32→f16 conversion dispatch.
+/// Used for K before writing to float16 KV cache.
 kernel void rope_neox_f32_to_f16(
     device const float *input [[buffer(0)]],
     device half *output [[buffer(1)]],
