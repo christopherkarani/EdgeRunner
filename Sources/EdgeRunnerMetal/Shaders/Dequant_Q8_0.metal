@@ -692,6 +692,220 @@ kernel void dequant_q8_0_gemv_f16out_f16acc(
     }
 }
 
+// =============================================================================
+// === Fused FFN Block (Mega-Kernel) ==========================================
+// =============================================================================
+// Merges 3 GPU dispatches into 1 per transformer layer:
+//   Phase 1: Wo GEMV + residual add     (replaces Dispatch 3)
+//   Phase 2: RMSNorm                     (was implicit in Dispatch 4)
+//   Phase 3: Gate + Up + SwiGLU GEMV     (replaces Dispatch 4)
+//   Phase 4: Down GEMV + residual add    (replaces Dispatch 5)
+//
+// Architecture: 1 threadgroup x 1024 threads (32 simdgroups).
+// Dispatched once per layer (28 times total).
+// Uses threadgroup_barrier instead of pipeline drains between phases.
+
+struct ERFusedFFNBlockParams {
+    uint dim;               // 1024 (Wo output rows, Down output rows)
+    uint qDim;              // 2048 (Wo input cols = attn output dim)
+    uint interDim;          // 3072 (Gate/Up output rows, Down input cols)
+    uint woBlocksPerRow;    // qDim/32 = 64
+    uint ffnBlocksPerRow;   // dim/32 = 32
+    uint downBlocksPerRow;  // interDim/32 = 96
+    float rmsEps;           // RMSNorm epsilon
+};
+
+kernel void dequant_q8_0_fused_ffn_block(
+    device const uchar*  woRaw       [[buffer(0)]],   // Wo weights Q8_0 [dim x qDim]
+    device const float*  attnOut     [[buffer(1)]],   // attention output [qDim]
+    device const float*  residual    [[buffer(2)]],   // currentHidden (residual for Wo add) [dim]
+    device       float*  afterAttn   [[buffer(3)]],   // Wo output dest (also FFN residual) [dim]
+    device const uchar*  gateRaw     [[buffer(4)]],   // gate weights Q8_0 [interDim x dim]
+    device const uchar*  upRaw       [[buffer(5)]],   // up weights Q8_0 [interDim x dim]
+    device const float*  normWeight  [[buffer(6)]],   // FFN RMSNorm weight [dim]
+    device       float*  activBuf    [[buffer(7)]],   // intermediate activated [interDim]
+    device const uchar*  downRaw     [[buffer(8)]],   // down weights Q8_0 [dim x interDim]
+    device       float*  layerOutput [[buffer(9)]],   // final output [dim]
+    constant ERFusedFFNBlockParams& params [[buffer(10)]],
+    uint  tid    [[thread_index_in_threadgroup]],
+    ushort sgIdx [[simdgroup_index_in_threadgroup]],
+    ushort laneIdx [[thread_index_in_simdgroup]]
+) {
+    // Shared memory for cross-simdgroup RMSNorm reduction (32 simdgroups)
+    threadgroup float partial_sums[32];
+
+    const uint dim      = params.dim;        // 1024
+    const uint qDim     = params.qDim;       // 2048
+    const uint interDim = params.interDim;   // 3072
+
+    // =========================================================================
+    // Phase 1: Wo GEMV + residual add
+    //   afterAttn[i] = dot(Wo[i,:], attnOut[:]) + residual[i]
+    //   Each thread computes 1 output row (tid < dim=1024, all threads active)
+    // =========================================================================
+    {
+        const uint woNb = params.woBlocksPerRow;  // qDim/32 = 64
+        device const uchar* rowPtr = woRaw + tid * woNb * q8_0BlockBytes;
+
+        float acc = 0.0f;
+        for (uint ib = 0; ib < woNb; ib++) {
+            device const uchar* block = rowPtr + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            device const float* xb = attnOut + ib * q8_0WeightsPerBlock;
+
+            half sumq = 0.h;
+            for (ushort j = 0; j < 32; j++) {
+                sumq += half(qs[j]) * half(xb[j]);
+            }
+            acc += float(sumq) * scale;
+        }
+
+        afterAttn[tid] = acc + residual[tid];
+    }
+
+    // =========================================================================
+    // Phase 2: Barrier — all 1024 Wo outputs must be visible
+    // =========================================================================
+    threadgroup_barrier(mem_flags::mem_device);
+
+    // =========================================================================
+    // Phase 3: Cooperative RMSNorm over afterAttn[dim=1024]
+    //   normed[i] = afterAttn[i] * scale * normWeight[i]
+    //   where scale = rsqrt(mean(afterAttn^2) + eps)
+    //
+    //   Each thread reads afterAttn[tid], squares it.
+    //   Reduce within simdgroup via simd_sum, then cross-SG via threadgroup mem.
+    // =========================================================================
+    float myVal = afterAttn[tid];
+    float mySq  = myVal * myVal;
+
+    // Intra-simdgroup reduction
+    float sgSum = simd_sum(mySq);
+
+    // Cross-simdgroup reduction: lane 0 of each SG writes to shared mem
+    if (laneIdx == 0) {
+        partial_sums[sgIdx] = sgSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // First simdgroup reduces the 32 partial sums
+    float totalSq = 0.0f;
+    if (sgIdx == 0) {
+        totalSq = (laneIdx < 32) ? partial_sums[laneIdx] : 0.0f;
+        totalSq = simd_sum(totalSq);
+    }
+
+    // Broadcast the total to all threads via shared memory
+    if (tid == 0) {
+        partial_sums[0] = totalSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    totalSq = partial_sums[0];
+
+    float rmsScale = rsqrt(totalSq / float(dim) + params.rmsEps);
+    float normed = myVal * rmsScale * normWeight[tid];
+
+    // =========================================================================
+    // Phase 4: Gate + Up + SwiGLU GEMV
+    //   interDim=3072 output rows, 1024 threads => 3 rows per thread
+    //   For each assigned row r:
+    //     gate = dot(Wgate[r,:], normed_vec[:])
+    //     up   = dot(Wup[r,:],   normed_vec[:])
+    //     activBuf[r] = silu(gate) * up
+    //
+    //   Problem: normed_vec is distributed (each thread holds 1 element).
+    //   Solution: store normed to device memory, barrier, read back.
+    // =========================================================================
+
+    // Write normed value to afterAttn (reuse as temporary — we still have myVal
+    // for Phase 6 residual, and afterAttn is the FFN residual anyway)
+    afterAttn[tid] = normed;
+    threadgroup_barrier(mem_flags::mem_device);
+
+    // Each thread computes 3 rows of gate+up
+    const uint rowsPerThread = interDim / dim;  // 3072/1024 = 3
+    const uint ffnNb = params.ffnBlocksPerRow;  // dim/32 = 32
+
+    for (uint r = 0; r < rowsPerThread; r++) {
+        uint row = tid * rowsPerThread + r;
+        if (row >= interDim) break;
+
+        device const uchar* gateRow = gateRaw + row * ffnNb * q8_0BlockBytes;
+        device const uchar* upRow   = upRaw   + row * ffnNb * q8_0BlockBytes;
+
+        float accGate = 0.0f;
+        float accUp   = 0.0f;
+
+        for (uint ib = 0; ib < ffnNb; ib++) {
+            device const float* nb_x = afterAttn + ib * q8_0WeightsPerBlock;
+
+            // Gate block
+            device const uchar* gBlock = gateRow + ib * q8_0BlockBytes;
+            float gScale = float(as_type<half>(*(device const ushort*)gBlock));
+            device const char* gQs = (device const char*)(gBlock + 2);
+
+            // Up block
+            device const uchar* uBlock = upRow + ib * q8_0BlockBytes;
+            float uScale = float(as_type<half>(*(device const ushort*)uBlock));
+            device const char* uQs = (device const char*)(uBlock + 2);
+
+            half sqG = 0.h;
+            half sqU = 0.h;
+            for (ushort j = 0; j < 32; j++) {
+                half xv = half(nb_x[j]);
+                sqG += half(gQs[j]) * xv;
+                sqU += half(uQs[j]) * xv;
+            }
+            accGate += float(sqG) * gScale;
+            accUp   += float(sqU) * uScale;
+        }
+
+        activBuf[row] = silu_fn(accGate) * accUp;
+    }
+
+    // =========================================================================
+    // Phase 5: Barrier — all interDim=3072 activated values must be visible
+    // =========================================================================
+    threadgroup_barrier(mem_flags::mem_device);
+
+    // =========================================================================
+    // Phase 6: Down GEMV + residual add
+    //   layerOutput[i] = dot(Wdown[i,:], activBuf[:]) + afterAttn_before_norm[i]
+    //   Each thread computes 1 output row (tid < dim=1024)
+    //   Residual is the Wo output + old residual, which we stored in afterAttn
+    //   before we overwrote it with normed values.
+    //
+    //   Wait — we overwrote afterAttn with normed in Phase 4.
+    //   We need the pre-norm value for the residual.
+    //   Solution: use (acc + residual[tid]) which we computed in Phase 1.
+    //   We saved myVal = afterAttn[tid] before norming, and
+    //   afterAttn[tid] was (acc + residual[tid]) from Phase 1.
+    //   So myVal IS the correct residual for Phase 6.
+    // =========================================================================
+    {
+        const uint downNb = params.downBlocksPerRow;  // interDim/32 = 96
+        device const uchar* rowPtr = downRaw + tid * downNb * q8_0BlockBytes;
+
+        float acc = 0.0f;
+        for (uint ib = 0; ib < downNb; ib++) {
+            device const uchar* block = rowPtr + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            device const float* xb = activBuf + ib * q8_0WeightsPerBlock;
+
+            half sumq = 0.h;
+            for (ushort j = 0; j < 32; j++) {
+                sumq += half(qs[j]) * half(xb[j]);
+            }
+            acc += float(sumq) * scale;
+        }
+
+        // myVal holds the Phase 1 output (Wo GEMV + residual) = correct FFN residual
+        layerOutput[tid] = acc + myVal;
+    }
+}
+
 // --- 5. dequant_q8_0_gemv_add_f16acc ---
 kernel void dequant_q8_0_gemv_add_f16acc(
     device const uchar* quantisedW [[buffer(0)]],
