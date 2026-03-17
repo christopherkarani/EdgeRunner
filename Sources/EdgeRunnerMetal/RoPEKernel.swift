@@ -2,7 +2,7 @@ import Metal
 import EdgeRunnerSharedTypes
 
 public final class RoPEKernel: Sendable {
-    private let pipelineF32: MTLComputePipelineState
+    public let pipelineF32: MTLComputePipelineState
     private let device: MTLDevice
 
     public init(device: MTLDevice) throws {

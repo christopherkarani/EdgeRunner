@@ -2,11 +2,11 @@ import Metal
 import EdgeRunnerSharedTypes
 
 public final class GQAKernel: Sendable {
-    private let pipelineF32: MTLComputePipelineState
+    public let pipelineF32: MTLComputePipelineState
     private let device: MTLDevice
 
     /// Must match the stack array sizes in GQA.metal (scores[16], probs[16]).
-    private static let blockSize = 16
+    public static let blockSize = 16
 
     public init(device: MTLDevice) throws {
         self.device = device

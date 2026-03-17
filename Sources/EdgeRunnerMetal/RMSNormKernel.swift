@@ -2,7 +2,7 @@ import Metal
 import EdgeRunnerSharedTypes
 
 public struct RMSNormKernel: Sendable {
-    private let pipeline: MTLComputePipelineState
+    public let pipeline: MTLComputePipelineState
     private let device: MTLDevice
 
     public init(device: MTLDevice) throws {

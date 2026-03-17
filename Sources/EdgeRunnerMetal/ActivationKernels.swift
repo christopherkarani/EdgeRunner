@@ -4,7 +4,7 @@ import EdgeRunnerSharedTypes
 public struct ActivationKernels: Sendable {
     private let sigmoidPipeline: MTLComputePipelineState
     private let geluPipeline: MTLComputePipelineState
-    private let swigluPipeline: MTLComputePipelineState
+    public let swigluPipeline: MTLComputePipelineState
     private let device: MTLDevice
 
     public init(device: MTLDevice) throws {

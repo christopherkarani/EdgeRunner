@@ -52,6 +52,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Metal buffer cache — avoids re-creating MTLBuffers from [Float] on every GEMV call
     private let metalBufferCache: MetalBufferCacheActor
 
+    // Pre-loaded weight buffers — eliminates async actor hops during forward pass
+    private let preloadedWeights: PreloadedWeightsStore
+
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -93,6 +96,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         self.weightCache = WeightCacheActor()
         self.metalBufferCache = MetalBufferCacheActor()
+        self.preloadedWeights = PreloadedWeightsStore()
     }
 
     // MARK: - EdgeRunnerLanguageModel conformance
@@ -129,45 +133,48 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     public func logits(for tokenIDs: [Int]) async throws -> [Float] {
         let seqLen = tokenIDs.count
         let dim = config.embeddingDim
+        let floatStride = MemoryLayout<Float>.stride
 
-        // 1. Token embedding lookup
-        let embeddingFloats = try await embeddingLookup(tokenIDs: tokenIDs)
+        // 1. Fast embedding lookup — read directly from pre-dequantized MTLBuffer
+        //    (the embedding weight is the same buffer as lmHead for tied embeddings,
+        //    already dequantized and cached as Float32 MTLBuffer)
+        let hiddenBuf: MTLBuffer
 
-        // Create initial hidden state as MTLBuffer
-        let hiddenBuf = device.makeBuffer(
-            bytes: embeddingFloats,
-            length: embeddingFloats.count * MemoryLayout<Float>.stride,
-            options: .storageModeShared
-        )!
+        if preloadedWeights.isLoaded {
+            // FAST PATH: direct memcpy from cached embedding MTLBuffer (no Q8_0 decode)
+            let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
+            let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
+            hiddenBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared)!
+            let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
+            for (i, tokenID) in tokenIDs.enumerated() {
+                let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
+                memcpy(dstPtr + i * dim, embPtr + clampedID * dim, dim * floatStride)
+            }
+        } else {
+            // COLD PATH: first call, weights not yet loaded — use CPU Q8_0 decode
+            let embeddingFloats = try await embeddingLookup(tokenIDs: tokenIDs)
+            hiddenBuf = device.makeBuffer(
+                bytes: embeddingFloats,
+                length: embeddingFloats.count * floatStride,
+                options: .storageModeShared
+            )!
+        }
 
-        // 2. Process through ALL transformer layers — fully fused GPU pipeline
-        let resultBuf = try await fusedForwardPass(
+        // 2-4. Fully fused: ALL layers + final norm + LM head in ONE command buffer
+        let logitsBuf = try await fusedForwardPass(
             hiddenBuf: hiddenBuf,
             seqLen: seqLen
         )
 
-        // 3. Read back the last token's hidden state for LM head
-        let resultPtr = resultBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
-        let lastTokenOffset = (seqLen - 1) * dim
-        let lastTokenHidden = Array(UnsafeBufferPointer(start: resultPtr + lastTokenOffset, count: dim))
-
-        // 4. LM head — GPU GEMV
-        let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
-        let lmHeadBuf = try await readWeightBuffer(lmHeadName)
-        return try await gemvKernel.executeWithWeightBuffer(
-            weightBuffer: lmHeadBuf,
-            x: lastTokenHidden,
-            M: config.vocabSize,
-            K: dim,
-            commandQueue: commandQueue
-        )
+        // Read back logits
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
+        return Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
     }
 
     // MARK: - Fully Fused Forward Pass
 
-    /// Encode ALL 28 transformer layers into a SINGLE command buffer.
-    /// Data stays as MTLBuffers throughout — no [Float]↔MTLBuffer round-trips between layers.
-    /// ONE GPU sync point for the entire transformer stack.
+    /// Encode ALL 28 transformer layers + final norm + LM head into a SINGLE command buffer.
+    /// Returns MTLBuffer containing vocab-sized logits. ONE GPU sync for the entire forward pass.
     private func fusedForwardPass(
         hiddenBuf: MTLBuffer,
         seqLen: Int
@@ -177,213 +184,298 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let qDim = config.headCount * headDim
         let kvDim = config.kvHeadCount * headDim
         let interDim = config.intermediateDim
-        let totalHiddenBytes = seqLen * dim * MemoryLayout<Float>.stride
+        let floatStride = MemoryLayout<Float>.stride
+        let totalHiddenBytes = seqLen * dim * floatStride
 
-        // Pre-allocate ALL scratch buffers for the pipeline
-        // We use ping-pong: layerInput → layerOutput, then swap
         var currentHidden = hiddenBuf
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else {
             throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
         }
 
+        // Pre-allocate scratch buffers ONCE — reused across all 28 layers
+        let normedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        let afterAttnBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        let ffnNormedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        // Ping-pong output buffers for alternating layers
+        let outputBufA = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        let outputBufB = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+
+        let allQBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
+        let allKBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
+        let allVBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
+        let ropeQBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
+        let ropeKBuf = device.makeBuffer(length: seqLen * kvDim * floatStride, options: .storageModeShared)!
+        let attnOutBuf = device.makeBuffer(length: seqLen * qDim * floatStride, options: .storageModeShared)!
+        let projBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+        let gateOutBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
+        let upOutBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
+        let activBuf = device.makeBuffer(length: seqLen * interDim * floatStride, options: .storageModeShared)!
+        let downOutBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+
+        // Pre-load ALL weight buffers on first call — eliminates 254 actor hops per subsequent call
+        if !preloadedWeights.isLoaded {
+            var layers = [LayerWeightBuffers]()
+            layers.reserveCapacity(config.layerCount)
+            for i in 0..<config.layerCount {
+                let p = "layers.\(i)"
+                layers.append(LayerWeightBuffers(
+                    attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
+                    wq: try await readWeightBuffer("\(p).attention.wq.weight"),
+                    wk: try await readWeightBuffer("\(p).attention.wk.weight"),
+                    wv: try await readWeightBuffer("\(p).attention.wv.weight"),
+                    wo: try await readWeightBuffer("\(p).attention.wo.weight"),
+                    ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
+                    gate: try await readWeightBuffer("\(p).feedForward.gate.weight"),
+                    up: try await readWeightBuffer("\(p).feedForward.up.weight"),
+                    down: try await readWeightBuffer("\(p).feedForward.down.weight")
+                ))
+            }
+            let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
+            preloadedWeights.load(
+                layers: layers,
+                finalNorm: try await readWeightBuffer("finalNorm.weight"),
+                lmHead: try await readWeightBuffer(lmHeadName)
+            )
+        }
+
+        // === SINGLE ENCODER for the ENTIRE forward pass ===
+        // Metal guarantees sequential execution + implicit barriers between dispatches
+        // within the same encoder. Using 1 encoder instead of 422 eliminates encoder
+        // creation overhead (~10μs × 422 = 4.2ms per forward pass).
+        guard let enc = cmdBuf.makeComputeCommandEncoder() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create compute encoder")
+        }
+
+        let rmsNormPSO = rmsNormKernel.pipeline
+        let gemvPSO = gemvKernel.f32Pipeline
+        let ropePSO = ropeKernel.pipelineF32
+        let gqaPSO = gqaKernel.pipelineF32
+        let swigluPSO = activationKernels.swigluPipeline
+        let addPSO = addPipeline
+        let rmsEps = Float(config.rmsNormEpsilon)
+        let ropeTheta = Float(config.ropeFreqBase)
+        let numHeads = config.headCount
+        let numKVHeads = config.kvHeadCount
+        let gqaBlockSize = GQAKernel.blockSize
+
         for layerIndex in 0..<config.layerCount {
-            let prefix = "layers.\(layerIndex)"
+            let lw = preloadedWeights.layers[layerIndex]
+            let layerOutputBuf = (layerIndex % 2 == 0) ? outputBufA : outputBufB
 
-            // Load cached weight MTLBuffers
-            let attnNormBuf = try await readWeightBuffer("\(prefix).attentionNorm.weight")
-            let wqBuf = try await readWeightBuffer("\(prefix).attention.wq.weight")
-            let wkBuf = try await readWeightBuffer("\(prefix).attention.wk.weight")
-            let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
-            let woBuf = try await readWeightBuffer("\(prefix).attention.wo.weight")
-            let ffnNormBuf = try await readWeightBuffer("\(prefix).ffnNorm.weight")
-            let gateBuf = try await readWeightBuffer("\(prefix).feedForward.gate.weight")
-            let upBuf = try await readWeightBuffer("\(prefix).feedForward.up.weight")
-            let downBuf = try await readWeightBuffer("\(prefix).feedForward.down.weight")
-
-            // Allocate per-layer scratch buffers (seqLen positions)
-            let normedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-            let afterAttnBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-            let ffnNormedBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-            let layerOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-
-            // Per-token Q/K/V buffers (concatenated across positions)
-            let allQBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let allKBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let allVBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let ropeQBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let ropeKBuf = device.makeBuffer(length: seqLen * kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let attnOutBuf = device.makeBuffer(length: seqLen * qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let projBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-
-            // FFN scratch
-            let gateOutBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let upOutBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let activBuf = device.makeBuffer(length: seqLen * interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
-            let downOutBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-
-            // === ATTENTION BLOCK ===
-
-            // 1. Pre-attention RMSNorm
-            try rmsNormKernel.encode(
-                commandBuffer: cmdBuf,
-                inputBuffer: currentHidden,
-                weightBuffer: attnNormBuf,
-                outputBuffer: normedBuf,
-                rows: seqLen, cols: dim,
-                eps: Float(config.rmsNormEpsilon)
-            )
-
-            // 2. Q/K/V projections for each position
-            for t in 0..<seqLen {
-                let tokenOffset = t * dim * MemoryLayout<Float>.stride
-                let qOffset = t * qDim * MemoryLayout<Float>.stride
-                let kvOffset = t * kvDim * MemoryLayout<Float>.stride
-
-                // Use sub-buffer views via offset encoding
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: wqBuf,
-                    inputBuffer: normedBuf, inputOffset: tokenOffset,
-                    outputBuffer: allQBuf, outputOffset: qOffset,
-                    M: qDim, K: dim
-                )
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: wkBuf,
-                    inputBuffer: normedBuf, inputOffset: tokenOffset,
-                    outputBuffer: allKBuf, outputOffset: kvOffset,
-                    M: kvDim, K: dim
-                )
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: wvBuf,
-                    inputBuffer: normedBuf, inputOffset: tokenOffset,
-                    outputBuffer: allVBuf, outputOffset: kvOffset,
-                    M: kvDim, K: dim
-                )
+            // 1. RMSNorm (attention)
+            do {
+                var p = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
+                enc.setComputePipelineState(rmsNormPSO)
+                enc.setBuffer(currentHidden, offset: 0, index: 0)
+                enc.setBuffer(lw.attnNorm, offset: 0, index: 1)
+                enc.setBuffer(normedBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                enc.dispatchThreads(MTLSize(width: seqLen, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 3. RoPE for Q and K
-            try ropeKernel.encode(
-                commandBuffer: cmdBuf,
-                inputBuffer: allQBuf, outputBuffer: ropeQBuf,
-                seqLen: seqLen, numHeads: config.headCount, headDim: headDim,
-                startPos: 0, theta: Float(config.ropeFreqBase)
-            )
-            try ropeKernel.encode(
-                commandBuffer: cmdBuf,
-                inputBuffer: allKBuf, outputBuffer: ropeKBuf,
-                seqLen: seqLen, numHeads: config.kvHeadCount, headDim: headDim,
-                startPos: 0, theta: Float(config.ropeFreqBase)
-            )
-
-            // 4. GQA attention
-            try gqaKernel.encode(
-                commandBuffer: cmdBuf,
-                qBuffer: ropeQBuf, kBuffer: ropeKBuf, vBuffer: allVBuf,
-                outputBuffer: attnOutBuf,
-                seqLen: seqLen, headDim: headDim,
-                numHeads: config.headCount, numKVHeads: config.kvHeadCount,
-                causal: true
-            )
-
-            // 5. Output projection for each position
+            // 2. Q/K/V projections
+            enc.setComputePipelineState(gemvPSO)
             for t in 0..<seqLen {
-                let attnOffset = t * qDim * MemoryLayout<Float>.stride
-                let projOffset = t * dim * MemoryLayout<Float>.stride
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: woBuf,
-                    inputBuffer: attnOutBuf, inputOffset: attnOffset,
-                    outputBuffer: projBuf, outputOffset: projOffset,
-                    M: dim, K: qDim
-                )
+                let tokOff = t * dim * floatStride
+                let qOff = t * qDim * floatStride
+                let kvOff = t * kvDim * floatStride
+                // Q
+                var qP = ERGEMVParams(M: UInt32(qDim), K: UInt32(dim), lda: UInt32(dim))
+                enc.setBuffer(lw.wq, offset: 0, index: 0)
+                enc.setBuffer(normedBuf, offset: tokOff, index: 1)
+                enc.setBuffer(allQBuf, offset: qOff, index: 2)
+                enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: qDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                // K
+                var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
+                enc.setBuffer(lw.wk, offset: 0, index: 0)
+                enc.setBuffer(allKBuf, offset: kvOff, index: 2)
+                enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                // V
+                enc.setBuffer(lw.wv, offset: 0, index: 0)
+                enc.setBuffer(allVBuf, offset: kvOff, index: 2)
+                enc.dispatchThreadgroups(MTLSize(width: kvDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             }
 
-            // 6. Residual add: afterAttn = hidden + projected (GPU)
-            try encodeElementwiseAdd(
-                cmdBuf: cmdBuf,
-                aBuf: currentHidden, bBuf: projBuf,
-                outBuf: afterAttnBuf,
-                count: seqLen * dim
-            )
-
-            // === FFN BLOCK ===
-
-            // 7. Pre-FFN RMSNorm
-            try rmsNormKernel.encode(
-                commandBuffer: cmdBuf,
-                inputBuffer: afterAttnBuf,
-                weightBuffer: ffnNormBuf,
-                outputBuffer: ffnNormedBuf,
-                rows: seqLen, cols: dim,
-                eps: Float(config.rmsNormEpsilon)
-            )
-
-            // 8. Gate + Up projections for each position
-            for t in 0..<seqLen {
-                let tokenOffset = t * dim * MemoryLayout<Float>.stride
-                let interOffset = t * interDim * MemoryLayout<Float>.stride
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: gateBuf,
-                    inputBuffer: ffnNormedBuf, inputOffset: tokenOffset,
-                    outputBuffer: gateOutBuf, outputOffset: interOffset,
-                    M: interDim, K: dim
-                )
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: upBuf,
-                    inputBuffer: ffnNormedBuf, inputOffset: tokenOffset,
-                    outputBuffer: upOutBuf, outputOffset: interOffset,
-                    M: interDim, K: dim
-                )
+            // 3. RoPE Q
+            do {
+                var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads),
+                    headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
+                enc.setComputePipelineState(ropePSO)
+                enc.setBuffer(allQBuf, offset: 0, index: 0)
+                enc.setBuffer(ropeQBuf, offset: 0, index: 1)
+                enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+                let halfDim = headDim / 2
+                enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: seqLen),
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, ropePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+            // RoPE K
+            do {
+                var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
+                    headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
+                enc.setBuffer(allKBuf, offset: 0, index: 0)
+                enc.setBuffer(ropeKBuf, offset: 0, index: 1)
+                enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+                let halfDim = headDim / 2
+                enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: seqLen),
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, ropePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 9. SwiGLU activation
-            try activationKernels.encodeSwiglu(
-                commandBuffer: cmdBuf,
-                gateBuffer: gateOutBuf, upBuffer: upOutBuf,
-                outputBuffer: activBuf,
-                count: seqLen * interDim
-            )
-
-            // 10. Down projection for each position
-            for t in 0..<seqLen {
-                let interOffset = t * interDim * MemoryLayout<Float>.stride
-                let tokenOffset = t * dim * MemoryLayout<Float>.stride
-                try encodeGEMVWithOffsets(
-                    cmdBuf: cmdBuf, weightBuffer: downBuf,
-                    inputBuffer: activBuf, inputOffset: interOffset,
-                    outputBuffer: downOutBuf, outputOffset: tokenOffset,
-                    M: dim, K: interDim
-                )
+            // 4. GQA
+            do {
+                let groupSize = numHeads / numKVHeads
+                var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
+                    numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
+                    groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
+                    causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize))
+                enc.setComputePipelineState(gqaPSO)
+                enc.setBuffer(ropeQBuf, offset: 0, index: 0)
+                enc.setBuffer(ropeKBuf, offset: 0, index: 1)
+                enc.setBuffer(allVBuf, offset: 0, index: 2)
+                enc.setBuffer(attnOutBuf, offset: 0, index: 3)
+                enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                let qBlockCount = (seqLen + gqaBlockSize - 1) / gqaBlockSize
+                enc.dispatchThreadgroups(MTLSize(width: qBlockCount, height: numHeads, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
             }
 
-            // 11. Residual add: output = afterAttn + downResult (GPU)
-            try encodeElementwiseAdd(
-                cmdBuf: cmdBuf,
-                aBuf: afterAttnBuf, bBuf: downOutBuf,
-                outBuf: layerOutputBuf,
-                count: seqLen * dim
-            )
+            // 5. Output projection
+            enc.setComputePipelineState(gemvPSO)
+            for t in 0..<seqLen {
+                var p = ERGEMVParams(M: UInt32(dim), K: UInt32(qDim), lda: UInt32(qDim))
+                enc.setBuffer(lw.wo, offset: 0, index: 0)
+                enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
+                enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+
+            // 6. Residual add (attention)
+            do {
+                var p = ERElementwiseParams(elementCount: UInt32(seqLen * dim))
+                enc.setComputePipelineState(addPSO)
+                enc.setBuffer(currentHidden, offset: 0, index: 0)
+                enc.setBuffer(projBuf, offset: 0, index: 1)
+                enc.setBuffer(afterAttnBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERElementwiseParams>.stride, index: 3)
+                enc.dispatchThreads(MTLSize(width: seqLen * dim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(seqLen * dim, addPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+
+            // 7. RMSNorm (FFN)
+            do {
+                var p = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
+                enc.setComputePipelineState(rmsNormPSO)
+                enc.setBuffer(afterAttnBuf, offset: 0, index: 0)
+                enc.setBuffer(lw.ffnNorm, offset: 0, index: 1)
+                enc.setBuffer(ffnNormedBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                enc.dispatchThreads(MTLSize(width: seqLen, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+
+            // 8. Gate + Up projections
+            enc.setComputePipelineState(gemvPSO)
+            for t in 0..<seqLen {
+                let tokOff = t * dim * floatStride
+                let intOff = t * interDim * floatStride
+                var p = ERGEMVParams(M: UInt32(interDim), K: UInt32(dim), lda: UInt32(dim))
+                // gate
+                enc.setBuffer(lw.gate, offset: 0, index: 0)
+                enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
+                enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                // up
+                enc.setBuffer(lw.up, offset: 0, index: 0)
+                enc.setBuffer(upOutBuf, offset: intOff, index: 2)
+                enc.dispatchThreadgroups(MTLSize(width: interDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+
+            // 9. SwiGLU
+            do {
+                var p = ERActivationParams(count: UInt32(seqLen * interDim))
+                enc.setComputePipelineState(swigluPSO)
+                enc.setBuffer(gateOutBuf, offset: 0, index: 0)
+                enc.setBuffer(upOutBuf, offset: 0, index: 1)
+                enc.setBuffer(activBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERActivationParams>.stride, index: 3)
+                enc.dispatchThreads(MTLSize(width: seqLen * interDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(seqLen * interDim, swigluPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+
+            // 10. Down projection
+            enc.setComputePipelineState(gemvPSO)
+            for t in 0..<seqLen {
+                var p = ERGEMVParams(M: UInt32(dim), K: UInt32(interDim), lda: UInt32(interDim))
+                enc.setBuffer(lw.down, offset: 0, index: 0)
+                enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
+                enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: dim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+
+            // 11. Residual add (FFN)
+            do {
+                var p = ERElementwiseParams(elementCount: UInt32(seqLen * dim))
+                enc.setComputePipelineState(addPSO)
+                enc.setBuffer(afterAttnBuf, offset: 0, index: 0)
+                enc.setBuffer(downOutBuf, offset: 0, index: 1)
+                enc.setBuffer(layerOutputBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERElementwiseParams>.stride, index: 3)
+                enc.dispatchThreads(MTLSize(width: seqLen * dim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(seqLen * dim, addPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
 
             currentHidden = layerOutputBuf
         }
 
         // === FINAL NORM ===
-        let finalNormBuf = try await readWeightBuffer("finalNorm.weight")
-        let finalOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
-        try rmsNormKernel.encode(
-            commandBuffer: cmdBuf,
-            inputBuffer: currentHidden,
-            weightBuffer: finalNormBuf,
-            outputBuffer: finalOutputBuf,
-            rows: seqLen, cols: dim,
-            eps: Float(config.rmsNormEpsilon)
-        )
+        do {
+            let finalOutputBuf = device.makeBuffer(length: totalHiddenBytes, options: .storageModeShared)!
+            var p = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
+            enc.setComputePipelineState(rmsNormPSO)
+            enc.setBuffer(currentHidden, offset: 0, index: 0)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+            enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+            enc.dispatchThreads(MTLSize(width: seqLen, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            currentHidden = finalOutputBuf
+        }
 
-        // ONE sync point for the entire transformer stack!
+        // === LM HEAD ===
+        let lmHeadBuf = preloadedWeights.lmHead!
+        let logitsBuf = device.makeBuffer(length: config.vocabSize * floatStride, options: .storageModeShared)!
+        do {
+            var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
+            enc.setComputePipelineState(gemvPSO)
+            enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
+            enc.setBuffer(currentHidden, offset: (seqLen - 1) * dim * floatStride, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: config.vocabSize, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+
+        enc.endEncoding()
+
+        // ONE sync point for the ENTIRE forward pass (layers + norm + LM head)!
         cmdBuf.commit()
         await cmdBuf.completed()
         if let error = cmdBuf.error { throw error }
 
-        return finalOutputBuf
+        return logitsBuf
     }
 
     // MARK: - GPU Pipeline Helpers
@@ -651,6 +743,37 @@ private actor WeightCacheActor {
     private var cache: [String: [Float]] = [:]
     func get(_ name: String) -> [Float]? { cache[name] }
     func set(_ name: String, value: [Float]) { cache[name] = value }
+}
+
+// MARK: - Pre-loaded Weight Buffers
+
+/// Holds all layer weight MTLBuffers for zero-async access during forward pass.
+private struct LayerWeightBuffers {
+    let attnNorm: MTLBuffer
+    let wq: MTLBuffer
+    let wk: MTLBuffer
+    let wv: MTLBuffer
+    let wo: MTLBuffer
+    let ffnNorm: MTLBuffer
+    let gate: MTLBuffer
+    let up: MTLBuffer
+    let down: MTLBuffer
+}
+
+/// Thread-safe store for pre-loaded weights. Loaded once on first forward pass,
+/// then accessed directly (zero actor hops) on all subsequent passes.
+private final class PreloadedWeightsStore: @unchecked Sendable {
+    var layers: [LayerWeightBuffers] = []
+    var finalNorm: MTLBuffer?
+    var lmHead: MTLBuffer?
+    var isLoaded = false
+
+    func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer) {
+        self.layers = layers
+        self.finalNorm = finalNorm
+        self.lmHead = lmHead
+        self.isLoaded = true
+    }
 }
 
 // MARK: - Metal Buffer Cache Actor
