@@ -125,6 +125,107 @@ kernel void dequant_q8_0_gemv(
     }
 }
 
+// === Fused Q+K+V projection — 3 outputs from 1 input in a single dispatch ===
+// Reads input x once, multiplies by 3 different weight matrices, writes 3 outputs.
+// Eliminates 2 dispatches per layer (3→1) and shares x-value cache across all 3 projections.
+
+struct ERFusedQKVParams {
+    uint qRows;          // Q output rows (numHeads * headDim)
+    uint kvRows;         // K/V output rows (numKVHeads * headDim)
+    uint cols;           // input columns (dim)
+    uint blocksPerRow;   // Q8_0 blocks per row
+};
+
+kernel void dequant_q8_0_fused_qkv(
+    device const uchar* wq [[buffer(0)]],
+    device const uchar* wk [[buffer(1)]],
+    device const uchar* wv [[buffer(2)]],
+    device const float* x [[buffer(3)]],
+    device float* outQ [[buffer(4)]],
+    device float* outK [[buffer(5)]],
+    device half* outV [[buffer(6)]],     // V writes f16 directly to cache
+    constant ERFusedQKVParams& params [[buffer(7)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    // Total rows = qRows + kvRows + kvRows. Each threadgroup handles NR consecutive rows
+    // across the concatenated Q/K/V output space.
+    const uint totalRows = params.qRows + params.kvRows + params.kvRows;
+    const uint row0 = tgIndex * NR;
+    if (row0 >= totalRows) return;
+
+    const short nb = params.blocksPerRow;
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+
+    float sumf[NR] = { 0.f };
+
+    // Determine which weight matrix and output each row belongs to
+    device const uchar* ax[NR];
+    for (short r = 0; r < NR; r++) {
+        uint globalRow = row0 + r;
+        if (globalRow >= totalRows) { ax[r] = wq; continue; }
+        uint localRow;
+        device const uchar* weights;
+        if (globalRow < params.qRows) {
+            localRow = globalRow;
+            weights = wq;
+        } else if (globalRow < params.qRows + params.kvRows) {
+            localRow = globalRow - params.qRows;
+            weights = wk;
+        } else {
+            localRow = globalRow - params.qRows - params.kvRows;
+            weights = wv;
+        }
+        ax[r] = weights + localRow * nb * q8_0BlockBytes;
+    }
+
+    const short ib0 = sgitg * NQ + ix;
+    device const float* yb = x + ib0 * q8_0WeightsPerBlock + il * NQ;
+
+    for (short ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NQ];
+        for (short i = 0; i < NQ; i++) yl[i] = yb[i];
+
+        for (short r = 0; r < NR; r++) {
+            if (row0 + r >= totalRows) break;
+            device const uchar* block = ax[r] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2) + il * NQ;
+            float sumq = 0.f;
+            for (short i = 0; i < NQ; i++) sumq += float(qs[i]) * yl[i];
+            sumf[r] += sumq * scale;
+        }
+        yb += NSG * NQ * q8_0WeightsPerBlock;
+    }
+
+    for (short r = 0; r < NR; r++) sumf[r] = simd_sum(sumf[r]);
+
+    threadgroup float tg_sum[NR][NSG];
+    if (tiisg == 0) {
+        for (short r = 0; r < NR; r++) tg_sum[r][sgitg] = sumf[r];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        for (short r = 0; r < NR; r++) {
+            uint globalRow = row0 + r;
+            if (globalRow >= totalRows) break;
+            float total = 0.f;
+            for (short sg = 0; sg < NSG; sg++) total += tg_sum[r][sg];
+
+            if (globalRow < params.qRows) {
+                outQ[globalRow] = total;
+            } else if (globalRow < params.qRows + params.kvRows) {
+                outK[globalRow - params.qRows] = total;
+            } else {
+                outV[globalRow - params.qRows - params.kvRows] = half(total);
+            }
+        }
+    }
+}
+
 // === Float16 output variant — writes half directly to KV cache ===
 // Eliminates separate f32→f16 conversion dispatch.
 kernel void dequant_q8_0_gemv_f16out(

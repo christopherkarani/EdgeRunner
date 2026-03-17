@@ -41,6 +41,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Fused dequant+GEMV pipeline for Q8_0 weights (3.8x bandwidth reduction)
     private let fusedQ8GemvPipeline: MTLComputePipelineState
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
+    private let fusedQKVPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -95,6 +96,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
         self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
+        self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
 
         // Initialize dequant kernels
@@ -882,14 +884,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&qP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (qDim + 3) / 4, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-                // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
+                // K → allKBuf
                 var kvP = ERDequantGEMVParams(rows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                 enc.setBuffer(lw.wkRaw!, offset: 0, index: 0)
                 enc.setBuffer(allKBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (kvDim + 3) / 4, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-                // V → f16 directly to layerVCache at currentPos (eliminates convert dispatch)
+                // V → f16 directly to layerVCache
                 enc.setComputePipelineState(fusedQ8F16OutPSO)
                 enc.setBuffer(lw.wvRaw!, offset: 0, index: 0)
                 enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 2)
