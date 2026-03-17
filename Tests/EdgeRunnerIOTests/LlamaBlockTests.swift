@@ -21,7 +21,7 @@ struct LlamaBlockTests: Sendable {
         #expect(block.ffnNorm.dim == 64)
         #expect(block.attention.config == config)
         #expect(block.feedForward.hiddenDim == 128)
-        #expect(block.parameterNames.count == 9)
+        #expect(block.parameterNames.count == 11)
     }
 
     @Test("Weight name mapping from GGUF tensor names")
@@ -29,6 +29,8 @@ struct LlamaBlockTests: Sendable {
         #expect(LlamaWeightNameMapper.mapGGUFName("blk.0.attn_q.weight") == "layers.0.attention.wq.weight")
         #expect(LlamaWeightNameMapper.mapGGUFName("blk.5.attn_norm.weight") == "layers.5.attentionNorm.weight")
         #expect(LlamaWeightNameMapper.mapGGUFName("blk.3.ffn_gate.weight") == "layers.3.feedForward.gate.weight")
+        #expect(LlamaWeightNameMapper.mapGGUFName("blk.2.attn_q_norm.weight") == "layers.2.attention.qNorm.weight")
+        #expect(LlamaWeightNameMapper.mapGGUFName("blk.2.attn_k_norm.weight") == "layers.2.attention.kNorm.weight")
         #expect(LlamaWeightNameMapper.mapGGUFName("output.weight") == "lmHead.weight")
         #expect(LlamaWeightNameMapper.mapGGUFName("token_embd.weight") == "embedding.weight")
     }

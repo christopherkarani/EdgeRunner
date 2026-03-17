@@ -23,7 +23,10 @@ struct EndToEndLoadTests: Sendable {
 
         #expect(llama.layers.count == 1)
         #expect(llama.config.vocabSize == 16)
-        #expect(llama.loadedWeights.count == llama.parameterNames.count)
+        // The loaded weight count may be less than parameterNames.count because
+        // some weights (qNorm, kNorm) are optional and not in every model.
+        let requiredNames = llama.parameterNames.filter { !LlamaModel.isOptional($0) }
+        #expect(llama.loadedWeights.count >= requiredNames.count)
         #expect(llama.loadedWeights["embedding.weight"] != nil)
         #expect(llama.loadedWeights["layers.0.feedForward.down.weight"] != nil)
         #expect(llama.loadedWeights["finalNorm.weight"] != nil)
@@ -48,7 +51,8 @@ struct EndToEndLoadTests: Sendable {
 
         #expect(llama.layers.count == 1)
         #expect(llama.config.embeddingDim == 8)
-        #expect(llama.loadedWeights.count == llama.parameterNames.count)
+        let safetensorRequiredNames = llama.parameterNames.filter { !LlamaModel.isOptional($0) }
+        #expect(llama.loadedWeights.count >= safetensorRequiredNames.count)
         #expect(llama.loadedWeights["embedding.weight"] != nil)
         #expect(llama.loadedWeights["layers.0.attention.wq.weight"] != nil)
         #expect(llama.loadedWeights["lmHead.weight"] != nil)
@@ -113,6 +117,8 @@ struct EndToEndLoadTests: Sendable {
             ("blk.0.ffn_down.weight", "layers.0.feedForward.down.weight"),
             ("blk.0.attn_norm.weight", "layers.0.attentionNorm.weight"),
             ("blk.0.ffn_norm.weight", "layers.0.ffnNorm.weight"),
+            ("blk.0.attn_q_norm.weight", "layers.0.attention.qNorm.weight"),
+            ("blk.0.attn_k_norm.weight", "layers.0.attention.kNorm.weight"),
             ("output_norm.weight", "finalNorm.weight"),
             ("output.weight", "lmHead.weight"),
         ]

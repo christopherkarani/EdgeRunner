@@ -59,6 +59,8 @@ public final class LlamaBlock: Sendable {
             "\(prefix).attention.wk.weight",
             "\(prefix).attention.wv.weight",
             "\(prefix).attention.wo.weight",
+            "\(prefix).attention.qNorm.weight",
+            "\(prefix).attention.kNorm.weight",
             "\(prefix).feedForward.gate.weight",
             "\(prefix).feedForward.up.weight",
             "\(prefix).feedForward.down.weight",
@@ -103,6 +105,10 @@ public enum LlamaWeightNameMapper: Sendable {
             mappedSuffix = "attention.wv.weight"
         case "attn_output.weight":
             mappedSuffix = "attention.wo.weight"
+        case "attn_q_norm.weight":
+            mappedSuffix = "attention.qNorm.weight"
+        case "attn_k_norm.weight":
+            mappedSuffix = "attention.kNorm.weight"
         case "ffn_gate.weight":
             mappedSuffix = "feedForward.gate.weight"
         case "ffn_up.weight":

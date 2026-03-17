@@ -26,13 +26,13 @@ public final class GQAKernel: Sendable {
         commandQueue: MTLCommandQueue
     ) async throws -> [Float] {
         precondition(numHeads % numKVHeads == 0, "numHeads must be divisible by numKVHeads")
-        precondition(q.count == numHeads * seqLen * headDim)
-        precondition(k.count == numKVHeads * seqLen * headDim)
-        precondition(v.count == numKVHeads * seqLen * headDim)
+        precondition(q.count == seqLen * numHeads * headDim)
+        precondition(k.count == seqLen * numKVHeads * headDim)
+        precondition(v.count == seqLen * numKVHeads * headDim)
         precondition(headDim <= 128, "headDim must be <= 128")
 
         let groupSize = numHeads / numKVHeads
-        let outputCount = numHeads * seqLen * headDim
+        let outputCount = seqLen * numHeads * headDim
 
         let qBuffer = device.makeBuffer(
             bytes: q,

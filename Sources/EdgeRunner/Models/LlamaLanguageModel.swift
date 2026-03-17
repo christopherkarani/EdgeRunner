@@ -282,9 +282,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     }
                 }
 
+                // Load per-head Q/K norm weights if present (Qwen3)
+                let qNormName = "\(p).attention.qNorm.weight"
+                let kNormName = "\(p).attention.kNorm.weight"
+                let qNormBuf: MTLBuffer? = weights[qNormName] != nil ? try await readWeightBuffer(qNormName) : nil
+                let kNormBuf: MTLBuffer? = weights[kNormName] != nil ? try await readWeightBuffer(kNormName) : nil
+
                 layers.append(LayerWeightBuffers(
                     attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
                     wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
+                    qNorm: qNormBuf, kNorm: kNormBuf,
                     ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
                     gate: gatBuf, up: upBuf, down: downBuf,
                     wqRaw: rawBufs[0], wkRaw: rawBufs[1], wvRaw: rawBufs[2], woRaw: rawBufs[3],
@@ -409,31 +416,72 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
             }
 
-            // 3. RoPE Q
+            // 3a. Per-head Q/K RMSNorm (Qwen3: applied AFTER projection, BEFORE RoPE)
+            // Q has [S, H*D] in [S,H,D] contiguous layout.
+            // Treat as [S*numHeads, headDim] matrix → each row is one head for one position.
+            // The norm weight is [headDim], applied identically to every row.
+            let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
+            if hasQKNorm {
+                // Q norm: rows = seqLen * numHeads, cols = headDim
+                do {
+                    var p = ERRMSNormParams(rows: UInt32(seqLen * numHeads), cols: UInt32(headDim), eps: rmsEps)
+                    enc.setComputePipelineState(rmsNormPSO)
+                    enc.setBuffer(allQBuf, offset: 0, index: 0)
+                    enc.setBuffer(lw.qNorm!, offset: 0, index: 1)
+                    enc.setBuffer(ropeQBuf, offset: 0, index: 2)  // reuse ropeQ as temp
+                    enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                    let totalRows = seqLen * numHeads
+                    enc.dispatchThreads(MTLSize(width: totalRows, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(totalRows, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                }
+                // K norm: rows = seqLen * numKVHeads, cols = headDim
+                do {
+                    var p = ERRMSNormParams(rows: UInt32(seqLen * numKVHeads), cols: UInt32(headDim), eps: rmsEps)
+                    enc.setComputePipelineState(rmsNormPSO)
+                    enc.setBuffer(allKBuf, offset: 0, index: 0)
+                    enc.setBuffer(lw.kNorm!, offset: 0, index: 1)
+                    enc.setBuffer(ropeKBuf, offset: 0, index: 2)  // reuse ropeK as temp
+                    enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                    let totalRows = seqLen * numKVHeads
+                    enc.dispatchThreads(MTLSize(width: totalRows, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(totalRows, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                }
+                // After norm: ropeQBuf has normed Q, ropeKBuf has normed K
+            }
+
+            // 3b. RoPE Q (NeoX split-halves when Q/K norm present, standard interleaved otherwise)
+            let useNeoXRoPE = hasQKNorm
+            let activeRopePSO = useNeoXRoPE ? ropeKernel.pipelineNeoX : ropePSO
+            // When Q/K norm is used, RoPE reads from ropeQBuf (normed) and writes to allQBuf.
+            // When no Q/K norm, RoPE reads from allQBuf and writes to ropeQBuf (original flow).
+            let ropeQIn = hasQKNorm ? ropeQBuf : allQBuf
+            let ropeQOut = hasQKNorm ? allQBuf : ropeQBuf
+            let ropeKIn = hasQKNorm ? ropeKBuf : allKBuf
+            let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
             do {
                 var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads),
                     headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
-                enc.setComputePipelineState(ropePSO)
-                enc.setBuffer(allQBuf, offset: 0, index: 0)
-                enc.setBuffer(ropeQBuf, offset: 0, index: 1)
+                enc.setComputePipelineState(activeRopePSO)
+                enc.setBuffer(ropeQIn, offset: 0, index: 0)
+                enc.setBuffer(ropeQOut, offset: 0, index: 1)
                 enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                 let halfDim = headDim / 2
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: seqLen),
-                    threadsPerThreadgroup: MTLSize(width: min(halfDim, ropePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
             // RoPE K
             do {
                 var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
                     headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
-                enc.setBuffer(allKBuf, offset: 0, index: 0)
-                enc.setBuffer(ropeKBuf, offset: 0, index: 1)
+                enc.setBuffer(ropeKIn, offset: 0, index: 0)
+                enc.setBuffer(ropeKOut, offset: 0, index: 1)
                 enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                 let halfDim = headDim / 2
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: seqLen),
-                    threadsPerThreadgroup: MTLSize(width: min(halfDim, ropePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
-            // 4. GQA
+            // 4. GQA (data is in [S,H,D] layout)
             do {
                 let groupSize = numHeads / numKVHeads
                 var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
@@ -441,8 +489,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
                     causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize))
                 enc.setComputePipelineState(gqaPSO)
-                enc.setBuffer(ropeQBuf, offset: 0, index: 0)
-                enc.setBuffer(ropeKBuf, offset: 0, index: 1)
+                enc.setBuffer(ropeQOut, offset: 0, index: 0)
+                enc.setBuffer(ropeKOut, offset: 0, index: 1)
                 enc.setBuffer(allVBuf, offset: 0, index: 2)
                 enc.setBuffer(attnOutBuf, offset: 0, index: 3)
                 enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
@@ -935,6 +983,8 @@ private struct LayerWeightBuffers {
     let wk: MTLBuffer
     let wv: MTLBuffer
     let wo: MTLBuffer
+    let qNorm: MTLBuffer?  // Per-head Q RMSNorm weight [headDim] (Qwen3)
+    let kNorm: MTLBuffer?  // Per-head K RMSNorm weight [headDim] (Qwen3)
     let ffnNorm: MTLBuffer
     let gate: MTLBuffer
     let up: MTLBuffer

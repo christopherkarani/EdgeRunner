@@ -17,7 +17,7 @@ struct QwenBenchmark {
 
     // Expected greedy output for correctness — must be stable across optimizations.
     // If an optimization changes these tokens, the optimization broke correctness.
-    static let expectedGreedyTokens = [1, 1479, 21456, 96793, 15859]
+    static let expectedGreedyTokens = [1, 1479, 35, 5371, 1]
 
     // MARK: - Primary Benchmark (Autoresearch Target)
 

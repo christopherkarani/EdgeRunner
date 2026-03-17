@@ -3,12 +3,14 @@ import EdgeRunnerSharedTypes
 
 public final class RoPEKernel: Sendable {
     public let pipelineF32: MTLComputePipelineState
+    public let pipelineNeoX: MTLComputePipelineState
     private let device: MTLDevice
 
     public init(device: MTLDevice) throws {
         self.device = device
         let registry = try KernelRegistry(device: device)
         self.pipelineF32 = try registry.pipeline(for: "rope_f32")
+        self.pipelineNeoX = try registry.pipeline(for: "rope_neox_f32")
     }
 
     public func execute(
