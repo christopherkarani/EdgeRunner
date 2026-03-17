@@ -120,6 +120,72 @@ public final class GEMVKernel: Sendable {
         return Array(UnsafeBufferPointer(start: ptr, count: M))
     }
 
+    /// Execute N independent GEMV operations in a single command buffer.
+    /// y_i[M_i] = weightBuffers[i][M_i, K] * x[K] for i in 0..<N.
+    /// Reduces N GPU synchronization round-trips to 1.
+    public func executeBatchedWithWeightBuffers(
+        weightBuffers: [MTLBuffer],
+        x: [Float],
+        Ms: [Int],
+        K: Int,
+        commandQueue: MTLCommandQueue
+    ) async throws -> [[Float]] {
+        guard x.count == K else { throw GEMVError.invalidVectorShape }
+        let n = weightBuffers.count
+        guard n == Ms.count, n > 0 else { throw GEMVError.encodingFailed }
+
+        // Shared input buffer
+        let bufX = device.makeBuffer(
+            bytes: x, length: x.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        )!
+
+        // Output buffers
+        var outputBuffers = [MTLBuffer]()
+        outputBuffers.reserveCapacity(n)
+        for i in 0..<n {
+            outputBuffers.append(device.makeBuffer(
+                length: Ms[i] * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+            )!)
+        }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GEMVError.encodingFailed
+        }
+
+        // Encode all N dispatches into a single command buffer
+        for i in 0..<n {
+            guard let encoder = cmdBuf.makeComputeCommandEncoder() else {
+                throw GEMVError.encodingFailed
+            }
+            var params = ERGEMVParams(M: UInt32(Ms[i]), K: UInt32(K), lda: UInt32(K))
+            encoder.setComputePipelineState(pipelineF32)
+            encoder.setBuffer(weightBuffers[i], offset: 0, index: 0)
+            encoder.setBuffer(bufX, offset: 0, index: 1)
+            encoder.setBuffer(outputBuffers[i], offset: 0, index: 2)
+            encoder.setBytes(&params, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+            let gridSize = MTLSize(width: Ms[i], height: 1, depth: 1)
+            let threadgroupSize = MTLSize(width: Self.threadsPerRow, height: 1, depth: 1)
+            encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+            encoder.endEncoding()
+        }
+
+        cmdBuf.commit()
+        await cmdBuf.completed()
+
+        if let error = cmdBuf.error { throw error }
+
+        // Read back results
+        var results = [[Float]]()
+        results.reserveCapacity(n)
+        for i in 0..<n {
+            let ptr = outputBuffers[i].contents().bindMemory(to: Float.self, capacity: Ms[i])
+            results.append(Array(UnsafeBufferPointer(start: ptr, count: Ms[i])))
+        }
+        return results
+    }
+
     /// Execute Float16 GEMV: y[M] = A[M,K] * x[K].
     public func executeF16(
         a: [Float16], x: [Float16],

@@ -195,35 +195,30 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
         let woBuf = try await readWeightBuffer("\(prefix).attention.wo.weight")
 
+        let qDim = config.headCount * headDim
+        let kvDim = config.kvHeadCount * headDim
         var allQ = [Float]()
         var allK = [Float]()
         var allV = [Float]()
-        allQ.reserveCapacity(seqLen * config.headCount * headDim)
-        allK.reserveCapacity(seqLen * config.kvHeadCount * headDim)
-        allV.reserveCapacity(seqLen * config.kvHeadCount * headDim)
+        allQ.reserveCapacity(seqLen * qDim)
+        allK.reserveCapacity(seqLen * kvDim)
+        allV.reserveCapacity(seqLen * kvDim)
 
+        // Batch Q/K/V projections: 3 GEMVs → 1 command buffer per position
         for t in 0..<seqLen {
             let tokenHidden = Array(normed[t * dim..<(t + 1) * dim])
 
-            let q = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: wqBuf, x: tokenHidden,
-                M: config.headCount * headDim, K: dim,
-                commandQueue: commandQueue
-            )
-            let k = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: wkBuf, x: tokenHidden,
-                M: config.kvHeadCount * headDim, K: dim,
-                commandQueue: commandQueue
-            )
-            let v = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: wvBuf, x: tokenHidden,
-                M: config.kvHeadCount * headDim, K: dim,
+            let qkv = try await gemvKernel.executeBatchedWithWeightBuffers(
+                weightBuffers: [wqBuf, wkBuf, wvBuf],
+                x: tokenHidden,
+                Ms: [qDim, kvDim, kvDim],
+                K: dim,
                 commandQueue: commandQueue
             )
 
-            allQ.append(contentsOf: q)
-            allK.append(contentsOf: k)
-            allV.append(contentsOf: v)
+            allQ.append(contentsOf: qkv[0])
+            allK.append(contentsOf: qkv[1])
+            allV.append(contentsOf: qkv[2])
         }
 
         // Apply RoPE
@@ -281,19 +276,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         for t in 0..<seqLen {
             let tokenHidden = Array(ffnNormed[t * dim..<(t + 1) * dim])
 
-            let gateResult = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: gateBuf, x: tokenHidden,
-                M: config.intermediateDim, K: dim,
-                commandQueue: commandQueue
-            )
-            let upResult = try await gemvKernel.executeWithWeightBuffer(
-                weightBuffer: upBuf, x: tokenHidden,
-                M: config.intermediateDim, K: dim,
+            // Batch gate+up projections: 2 GEMVs → 1 command buffer
+            let gateUp = try await gemvKernel.executeBatchedWithWeightBuffers(
+                weightBuffers: [gateBuf, upBuf],
+                x: tokenHidden,
+                Ms: [config.intermediateDim, config.intermediateDim],
+                K: dim,
                 commandQueue: commandQueue
             )
 
             let activated = try await activationKernels.swiglu(
-                gate: gateResult, up: upResult,
+                gate: gateUp[0], up: gateUp[1],
                 commandQueue: commandQueue
             )
 
