@@ -21,6 +21,11 @@ public struct LlamaModel: LoadableModel, Sendable {
         return names
     }
 
+    /// Names that are allowed to be absent (e.g., tied embeddings, QK-norm).
+    public static let optionalWeightNames: Set<String> = [
+        "lmHead.weight",
+    ]
+
     public mutating func loadWeights(from map: WeightMap) throws {
         var resolvedWeights: [String: TensorStorage] = [:]
         let expectedNames = Set(parameterNames)
@@ -38,11 +43,18 @@ public struct LlamaModel: LoadableModel, Sendable {
             let mappedName = LlamaWeightNameMapper.mapGGUFName(sourceName)
             if expectedNames.contains(mappedName) {
                 resolvedWeights[mappedName] = storage
+            } else {
+                // Store unmapped weights too (e.g., QK-norm) for models that use them
+                resolvedWeights[sourceName] = storage
             }
         }
 
-        for requiredName in parameterNames where resolvedWeights[requiredName] == nil {
-            throw ModelLoadError.loadFailed(description: "Missing weight: \(requiredName)")
+        for requiredName in parameterNames {
+            if resolvedWeights[requiredName] == nil
+                && !Self.optionalWeightNames.contains(requiredName)
+            {
+                throw ModelLoadError.loadFailed(description: "Missing weight: \(requiredName)")
+            }
         }
 
         loadedWeights = resolvedWeights
