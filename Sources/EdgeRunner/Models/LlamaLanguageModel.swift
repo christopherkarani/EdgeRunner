@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 import EdgeRunnerCore
 import EdgeRunnerIO
 import EdgeRunnerMetal
@@ -921,7 +922,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let allQBuf = scratch.allQ
         let allKBuf = scratch.allK
         let ropeQBuf = scratch.ropeQ
-        let ropeKBuf = scratch.ropeK
         let attnOutBuf = scratch.attnOut
         let projBuf = scratch.proj
         let gateOutBuf = scratch.gateOut
@@ -936,8 +936,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let rmsNormPSO = rmsNormKernel.pipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
-        let fusedQ8F16OutPSO = fusedQ8GemvF16OutPipeline
-        let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
@@ -1573,37 +1571,30 @@ private struct LayerWeightBuffers {
     let downRaw: MTLBuffer?
 }
 
-/// Thread-safe store for pre-loaded weights. Loaded once on first forward pass,
-/// then accessed directly on all subsequent passes. Uses Mutex for safe initialization.
-private final class PreloadedWeightsStore: Sendable {
-    private struct State {
-        var layers: [LayerWeightBuffers] = []
-        var finalNorm: MTLBuffer?
-        var lmHead: MTLBuffer?
-        var isLoaded = false
-        var lmHeadRaw: MTLBuffer?
-        var lmHeadCols: Int = 0
-    }
-
-    private let state = Mutex(State())
-
-    var layers: [LayerWeightBuffers] { state.withLock { $0.layers } }
-    var finalNorm: MTLBuffer? { state.withLock { $0.finalNorm } }
-    var lmHead: MTLBuffer? { state.withLock { $0.lmHead } }
-    var isLoaded: Bool { state.withLock { $0.isLoaded } }
-    var lmHeadRaw: MTLBuffer? { state.withLock { $0.lmHeadRaw } }
-    var lmHeadCols: Int { state.withLock { $0.lmHeadCols } }
+/// Thread-safe store for pre-loaded weights. Write-once during first forward pass,
+/// then read-only on all subsequent passes. Uses OSAllocatedUnfairLock for safe init.
+/// @unchecked Sendable: MTLBuffer is thread-safe for read access after initialization.
+/// Write access (load) happens exactly once before any concurrent reads (decode calls).
+private final class PreloadedWeightsStore: @unchecked Sendable {
+    // Write-once state protected by unfair lock for initialization
+    private let lock = NSLock()
+    private(set) var layers: [LayerWeightBuffers] = []
+    private(set) var finalNorm: MTLBuffer?
+    private(set) var lmHead: MTLBuffer?
+    private(set) var isLoaded = false
+    private(set) var lmHeadRaw: MTLBuffer?
+    private(set) var lmHeadCols: Int = 0
 
     func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer,
               lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
-        state.withLock {
-            $0.layers = layers
-            $0.finalNorm = finalNorm
-            $0.lmHead = lmHead
-            $0.lmHeadRaw = lmHeadRaw
-            $0.lmHeadCols = lmHeadCols
-            $0.isLoaded = true
-        }
+        lock.lock()
+        defer { lock.unlock() }
+        self.layers = layers
+        self.finalNorm = finalNorm
+        self.lmHead = lmHead
+        self.lmHeadRaw = lmHeadRaw
+        self.lmHeadCols = lmHeadCols
+        self.isLoaded = true
     }
 }
 
@@ -1620,11 +1611,14 @@ private actor MetalBufferCacheActor {
 /// Tracks the previously processed token sequence for KV cache decode detection.
 /// When the new tokenIDs are the previous sequence plus one new token,
 /// we can skip recomputing the full sequence and only process the new token.
-private final class DecoderStateStore: Sendable {
-    private let state = Mutex<[Int]>([])
+/// @unchecked Sendable: accessed only from async logits(for:) which is called
+/// sequentially (one token at a time). Lock protects against concurrent misuse.
+private final class DecoderStateStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _previousTokenIDs: [Int] = []
 
     var previousTokenIDs: [Int] {
-        get { state.withLock { $0 } }
-        set { state.withLock { $0 = newValue } }
+        get { lock.withLock { _previousTokenIDs } }
+        set { lock.withLock { _previousTokenIDs = newValue } }
     }
 }
