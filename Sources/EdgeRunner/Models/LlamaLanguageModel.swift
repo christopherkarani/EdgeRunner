@@ -40,6 +40,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // Fused dequant+GEMV pipeline for Q8_0 weights (3.8x bandwidth reduction)
     private let fusedQ8GemvPipeline: MTLComputePipelineState
+    private let convertF32ToF16Pipeline: MTLComputePipelineState
 
     // Dequantization kernels
     private let dequantQ4_0: DequantQ4_0Kernel
@@ -92,6 +93,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let registry = try KernelRegistry(device: device)
         self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
         self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
+        self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
 
         // Initialize dequant kernels
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
@@ -106,7 +108,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             numLayers: config.layerCount,
             numKVHeads: config.kvHeadCount,
             headDim: config.headDim,
-            precision: .float32
+            precision: .float16
         )
 
         // Extract per-layer KV cache MTLBuffers for direct GPU writes
@@ -403,14 +405,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
         let ropePSO = ropeKernel.pipelineF32
-        let gqaPSO = gqaKernel.pipelineF32
+        let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
+        let convertF32ToF16PSO = convertF32ToF16Pipeline
+        let halfStride = MemoryLayout<Float16>.stride
         let rmsEps = Float(config.rmsNormEpsilon)
         let ropeTheta = Float(config.ropeFreqBase)
         let numHeads = config.headCount
         let numKVHeads = config.kvHeadCount
         let gqaBlockSize = GQAKernel.blockSize
+        let allVBuf = scratch.allV
 
         for layerIndex in 0..<config.layerCount {
             let lw = preloadedWeights.layers[layerIndex]
@@ -429,7 +434,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             // 2. Q/K/V projections (use fused Q8_0 GEMV when available for ~3.8x bandwidth reduction)
-            //    V writes directly to per-layer V cache buffer for KV cache
+            //    V writes to f32 scratch (allVBuf), then converted to f16 cache
             let useQ8Fused = lw.wqRaw != nil
             let blocksPerRowDim = dim / 32  // Q8_0: 32 elements per block
             let layerVCache = layerVCaches[layerIndex]
@@ -439,6 +444,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let tokOff = t * dim * floatStride
                 let qOff = t * qDim * floatStride
                 let kvOff = t * kvDim * floatStride
+                let cacheWriteOffF16 = t * kvDim * halfStride
 
                 if useQ8Fused {
                     // Fused Q8_0 dequant+GEMV: reads ~1.06 bytes/element vs 4 bytes for float32
@@ -451,16 +457,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBytes(&qP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                     enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-                    // K → allKBuf (will be RoPE'd to cache later)
+                    // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                     var kvP = ERDequantGEMVParams(rows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                     enc.setBuffer(lw.wkRaw!, offset: 0, index: 0)
                     enc.setBuffer(allKBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                     enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-                    // V → directly to per-layer V cache buffer
+                    // V → f32 scratch (allVBuf), then convert to f16 cache
                     enc.setBuffer(lw.wvRaw!, offset: 0, index: 0)
-                    enc.setBuffer(layerVCache, offset: kvOff, index: 2)
+                    enc.setBuffer(allVBuf, offset: kvOff, index: 2)
                     enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
                 } else {
@@ -472,20 +478,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                     enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                    // K → allKBuf (will be RoPE'd to cache later)
+                    // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                     var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
                     enc.setBuffer(lw.wk, offset: 0, index: 0)
                     enc.setBuffer(allKBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                     enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                    // V → directly to per-layer V cache buffer
+                    // V → f32 scratch (allVBuf), then convert to f16 cache
                     enc.setBuffer(lw.wv, offset: 0, index: 0)
-                    enc.setBuffer(layerVCache, offset: kvOff, index: 2)
+                    enc.setBuffer(allVBuf, offset: kvOff, index: 2)
                     enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                     enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 }
+
+                // Convert V from f32 (allVBuf) → f16 (layerVCache)
+                enc.setComputePipelineState(convertF32ToF16PSO)
+                enc.setBuffer(allVBuf, offset: kvOff, index: 0)
+                enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 1)
+                var convCount = ERElementwiseParams(elementCount: UInt32(kvDim))
+                enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
             // 3a. Per-head Q/K RMSNorm (Qwen3: applied AFTER projection, BEFORE RoPE)
@@ -529,7 +544,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let ropeQIn = hasQKNorm ? ropeQBuf : allQBuf
             let ropeQOut = hasQKNorm ? allQBuf : ropeQBuf
             let ropeKIn = hasQKNorm ? ropeKBuf : allKBuf
-            // RoPE K output writes directly to per-layer K cache buffer
+            // RoPE Q
             do {
                 var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads),
                     headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
@@ -541,16 +556,31 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: seqLen),
                     threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
-            // RoPE K → per-layer K cache buffer (stores RoPE'd K for future decode steps)
+            // RoPE K → f32 temp, then convert to f16 cache
+            // When hasQKNorm: input=ropeKBuf, output=allKBuf (allKBuf is free after norm consumed it)
+            // When no norm:   input=allKBuf,  output=ropeKBuf
+            let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
             do {
                 var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
                     headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
                 enc.setBuffer(ropeKIn, offset: 0, index: 0)
-                enc.setBuffer(layerKCache, offset: 0, index: 1)
+                enc.setBuffer(ropeKOut, offset: 0, index: 1)
                 enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                 let halfDim = headDim / 2
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: seqLen),
                     threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+            // Convert RoPE'd K from f32 → f16 (layerKCache) for each position
+            for t in 0..<seqLen {
+                let srcOff = t * kvDim * floatStride
+                let dstOff = t * kvDim * halfStride
+                enc.setComputePipelineState(convertF32ToF16PSO)
+                enc.setBuffer(ropeKOut, offset: srcOff, index: 0)
+                enc.setBuffer(layerKCache, offset: dstOff, index: 1)
+                var convCount = ERElementwiseParams(elementCount: UInt32(kvDim))
+                enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
             // 4. GQA (data is in [S,H,D] layout)
@@ -770,7 +800,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let kvDim = config.kvHeadCount * headDim
 
         let interDim = config.intermediateDim
-        let floatStride = MemoryLayout<Float>.stride
         let totalKVLen = currentPos + 1  // total positions including the new token
 
         var currentHidden = hiddenBuf
@@ -804,21 +833,24 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
         let ropePSO = ropeKernel.pipelineF32
-        let gqaPSO = gqaKernel.pipelineF32
+        let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
+        let convertF32ToF16PSO = convertF32ToF16Pipeline
+        let halfStride = MemoryLayout<Float16>.stride
         let rmsEps = Float(config.rmsNormEpsilon)
         let ropeTheta = Float(config.ropeFreqBase)
         let numHeads = config.headCount
         let numKVHeads = config.kvHeadCount
         let gqaBlockSize = GQAKernel.blockSize
+        let allVBuf = scratch.allV
 
         for layerIndex in 0..<config.layerCount {
             let lw = preloadedWeights.layers[layerIndex]
             let layerOutputBuf = (layerIndex % 2 == 0) ? outputBufA : outputBufB
             let layerKCache = layerKCaches[layerIndex]
             let layerVCache = layerVCaches[layerIndex]
-            let cacheWriteOff = currentPos * kvDim * floatStride
+            let cacheWriteOffF16 = currentPos * kvDim * halfStride
 
             // 1. RMSNorm (attention) — single token: rows=1
             do {
@@ -846,16 +878,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&qP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-                // K → allKBuf (will be RoPE'd to cache)
+                // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                 var kvP = ERDequantGEMVParams(rows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                 enc.setBuffer(lw.wkRaw!, offset: 0, index: 0)
                 enc.setBuffer(allKBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-                // V → directly to V cache at currentPos
+                // V → f32 scratch (allVBuf), then convert to f16 cache
                 enc.setBuffer(lw.wvRaw!, offset: 0, index: 0)
-                enc.setBuffer(layerVCache, offset: cacheWriteOff, index: 2)
+                enc.setBuffer(allVBuf, offset: 0, index: 2)
                 enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
             } else {
@@ -867,20 +899,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&qP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (qDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                // K → allKBuf
+                // K → allKBuf (will be RoPE'd to temp, then converted to f16 cache)
                 var kvP = ERGEMVParams(M: UInt32(kvDim), K: UInt32(dim), lda: UInt32(dim))
                 enc.setBuffer(lw.wk, offset: 0, index: 0)
                 enc.setBuffer(allKBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-                // V → directly to V cache at currentPos
+                // V → f32 scratch (allVBuf), then convert to f16 cache
                 enc.setBuffer(lw.wv, offset: 0, index: 0)
-                enc.setBuffer(layerVCache, offset: cacheWriteOff, index: 2)
+                enc.setBuffer(allVBuf, offset: 0, index: 2)
                 enc.setBytes(&kvP, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             }
+
+            // Convert V from f32 (allVBuf) → f16 (layerVCache) at currentPos
+            enc.setComputePipelineState(convertF32ToF16PSO)
+            enc.setBuffer(allVBuf, offset: 0, index: 0)
+            enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 1)
+            var vConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
+            enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+            enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
 
             // 3a. Per-head Q/K RMSNorm (single token: rows = numHeads or numKVHeads)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
@@ -928,16 +969,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
-            // RoPE K (single token) → write directly to K cache at currentPos
+            // RoPE K (single token) → f32 temp, then convert to f16 cache
+            // When hasQKNorm: input=ropeKBuf, output=allKBuf (allKBuf free after norm consumed it)
+            // When no norm:   input=allKBuf,  output=ropeKBuf
+            let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
             do {
                 var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
                     headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
                 enc.setBuffer(ropeKIn, offset: 0, index: 0)
-                enc.setBuffer(layerKCache, offset: cacheWriteOff, index: 1)
+                enc.setBuffer(ropeKOut, offset: 0, index: 1)
                 enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                 let halfDim = headDim / 2
                 enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+            // Convert RoPE'd K from f32 → f16 (layerKCache) at currentPos
+            do {
+                enc.setComputePipelineState(convertF32ToF16PSO)
+                enc.setBuffer(ropeKOut, offset: 0, index: 0)
+                enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 1)
+                var kConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
+                enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
 
             // 4. GQA: Q has seqLen=1, K/V from cache have kvSeqLen=totalKVLen

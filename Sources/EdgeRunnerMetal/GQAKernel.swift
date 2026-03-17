@@ -3,6 +3,7 @@ import EdgeRunnerSharedTypes
 
 public final class GQAKernel: Sendable {
     public let pipelineF32: MTLComputePipelineState
+    public let pipelineF16KV: MTLComputePipelineState
     private let device: MTLDevice
 
     /// Must match the stack array sizes in GQA.metal (scores[16], probs[16]).
@@ -12,6 +13,7 @@ public final class GQAKernel: Sendable {
         self.device = device
         let registry = try KernelRegistry(device: device)
         self.pipelineF32 = try registry.pipeline(for: "gqa_attention_f32")
+        self.pipelineF16KV = try registry.pipeline(for: "gqa_attention_f16kv")
     }
 
     public func execute(
