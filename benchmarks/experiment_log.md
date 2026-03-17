@@ -168,3 +168,20 @@ Reaching 300 tok/s = 3.3ms/token requires:
 1. Higher GEMV bandwidth utilization (125 → 200+ GB/s)
 2. Further dispatch count reduction
 3. Flash attention for GQA
+
+### Experiment 12: Fuse Prefill Path to Match Decode
+- **Root cause**: Profiling showed prefill step (seqLen=1) takes 14.7ms vs decode at 5.2ms. The prefill path still used separate RMSNorm, Q/K norm, RoPE dispatches.
+- **Change**: Applied all 5 kernel fusions from decode path to prefill when seqLen==1: fused RMSNorm+QKV, fused Q/K norm+RoPE, fused RMSNorm+Gate+Up+SwiGLU, fused Wo+add, fused Down+add.
+- **GPU time breakdown (before)**: prefill 14.7ms + 3× decode 5.2-6.1ms = 32ms/4 tokens
+- **GPU time breakdown (after)**: all paths ~5ms = 20ms/4 tokens  
+- **Result**: 120 → 148 tok/s median (165 peak)
+- **Commit**: (below)
+
+## Updated Performance
+
+| Mode | tok/s | ms/token |
+|------|-------|----------|
+| Release (median) | 148 | 6.8 |
+| Release (peak) | 166 | 6.0 |
+| Decode-only | ~192 | ~5.2 |
+| llama.cpp ref | 183 | 5.5 |
