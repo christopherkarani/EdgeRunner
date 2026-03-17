@@ -186,6 +186,30 @@ public final class GEMVKernel: Sendable {
         return results
     }
 
+    /// Encode a GEMV dispatch into an existing command buffer (no commit/await).
+    /// Caller manages the command buffer lifecycle.
+    public func encode(
+        commandBuffer: MTLCommandBuffer,
+        weightBuffer: MTLBuffer,
+        inputBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        M: Int, K: Int
+    ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw GEMVError.encodingFailed
+        }
+        var params = ERGEMVParams(M: UInt32(M), K: UInt32(K), lda: UInt32(K))
+        encoder.setComputePipelineState(pipelineF32)
+        encoder.setBuffer(weightBuffer, offset: 0, index: 0)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+        let gridSize = MTLSize(width: M, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: Self.threadsPerRow, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
+
     /// Execute Float16 GEMV: y[M] = A[M,K] * x[K].
     public func executeF16(
         a: [Float16], x: [Float16],

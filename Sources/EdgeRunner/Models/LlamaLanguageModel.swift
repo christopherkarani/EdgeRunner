@@ -138,11 +138,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             )
         }
 
-        // 3. Final RMS norm
-        let finalNormWeight = try await readWeight("finalNorm.weight")
-        hidden = try await rmsNormKernel.execute(
+        // 3. Final RMS norm — using cached weight buffer
+        let finalNormBuf = try await readWeightBuffer("finalNorm.weight")
+        hidden = try await rmsNormKernel.executeWithWeightBuffer(
             input: hidden,
-            weight: finalNormWeight,
+            weightBuffer: finalNormBuf,
             rows: seqLen,
             cols: dim,
             eps: Float(config.rmsNormEpsilon),
@@ -178,18 +178,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let headDim = config.headDim
         let prefix = "layers.\(layerIndex)"
 
-        // Pre-attention RMS norm
-        let attnNormWeight = try await readWeight("\(prefix).attentionNorm.weight")
-        let normed = try await rmsNormKernel.execute(
-            input: hidden,
-            weight: attnNormWeight,
-            rows: seqLen,
-            cols: dim,
-            eps: Float(config.rmsNormEpsilon),
-            commandQueue: commandQueue
-        )
-
-        // Q, K, V projections — using cached weight MTLBuffers
+        // Fused RMSNorm + Q/K/V projections — single command buffer per position
+        let attnNormBuf = try await readWeightBuffer("\(prefix).attentionNorm.weight")
         let wqBuf = try await readWeightBuffer("\(prefix).attention.wq.weight")
         let wkBuf = try await readWeightBuffer("\(prefix).attention.wk.weight")
         let wvBuf = try await readWeightBuffer("\(prefix).attention.wv.weight")
@@ -204,21 +194,51 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         allK.reserveCapacity(seqLen * kvDim)
         allV.reserveCapacity(seqLen * kvDim)
 
-        // Batch Q/K/V projections: 3 GEMVs → 1 command buffer per position
         for t in 0..<seqLen {
-            let tokenHidden = Array(normed[t * dim..<(t + 1) * dim])
+            // Create input buffer for this token's hidden state
+            let tokenStart = t * dim
+            let inputBuf = device.makeBuffer(
+                bytes: Array(hidden[tokenStart..<tokenStart + dim]),
+                length: dim * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+            )!
 
-            let qkv = try await gemvKernel.executeBatchedWithWeightBuffers(
-                weightBuffers: [wqBuf, wkBuf, wvBuf],
-                x: tokenHidden,
-                Ms: [qDim, kvDim, kvDim],
-                K: dim,
-                commandQueue: commandQueue
+            // Pre-allocate output buffers
+            let normedBuf = device.makeBuffer(length: dim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let qBuf = device.makeBuffer(length: qDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let kBuf = device.makeBuffer(length: kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let vBuf = device.makeBuffer(length: kvDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+
+            // Single command buffer: RMSNorm → Q/K/V GEMV (4 dispatches, 1 sync)
+            guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+                throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
+            }
+
+            try rmsNormKernel.encode(
+                commandBuffer: cmdBuf,
+                inputBuffer: inputBuf,
+                weightBuffer: attnNormBuf,
+                outputBuffer: normedBuf,
+                rows: 1, cols: dim,
+                eps: Float(config.rmsNormEpsilon)
             )
+            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wqBuf,
+                                   inputBuffer: normedBuf, outputBuffer: qBuf, M: qDim, K: dim)
+            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wkBuf,
+                                   inputBuffer: normedBuf, outputBuffer: kBuf, M: kvDim, K: dim)
+            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: wvBuf,
+                                   inputBuffer: normedBuf, outputBuffer: vBuf, M: kvDim, K: dim)
 
-            allQ.append(contentsOf: qkv[0])
-            allK.append(contentsOf: qkv[1])
-            allV.append(contentsOf: qkv[2])
+            cmdBuf.commit()
+            await cmdBuf.completed()
+            if let error = cmdBuf.error { throw error }
+
+            let qPtr = qBuf.contents().bindMemory(to: Float.self, capacity: qDim)
+            let kPtr = kBuf.contents().bindMemory(to: Float.self, capacity: kvDim)
+            let vPtr = vBuf.contents().bindMemory(to: Float.self, capacity: kvDim)
+            allQ.append(contentsOf: UnsafeBufferPointer(start: qPtr, count: qDim))
+            allK.append(contentsOf: UnsafeBufferPointer(start: kPtr, count: kvDim))
+            allV.append(contentsOf: UnsafeBufferPointer(start: vPtr, count: kvDim))
         }
 
         // Apply RoPE to Q and K simultaneously (1 command buffer instead of 2)
@@ -253,36 +273,53 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
         }
 
-        // Pre-FFN RMS norm
-        let ffnNormWeight = try await readWeight("\(prefix).ffnNorm.weight")
-        let ffnNormed = try await rmsNormKernel.execute(
-            input: afterAttn,
-            weight: ffnNormWeight,
-            rows: seqLen, cols: dim,
-            eps: Float(config.rmsNormEpsilon),
-            commandQueue: commandQueue
-        )
-
-        // SwiGLU FFN — using cached weight MTLBuffers
+        // Fused FFN RMSNorm + gate/up projections — single command buffer per position
+        let ffnNormBuf = try await readWeightBuffer("\(prefix).ffnNorm.weight")
         let gateBuf = try await readWeightBuffer("\(prefix).feedForward.gate.weight")
         let upBuf = try await readWeightBuffer("\(prefix).feedForward.up.weight")
         let downBuf = try await readWeightBuffer("\(prefix).feedForward.down.weight")
+        let interDim = config.intermediateDim
 
         var output = afterAttn
         for t in 0..<seqLen {
-            let tokenHidden = Array(ffnNormed[t * dim..<(t + 1) * dim])
+            let tokenStart = t * dim
+            let ffnInputBuf = device.makeBuffer(
+                bytes: Array(afterAttn[tokenStart..<tokenStart + dim]),
+                length: dim * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+            )!
+            let ffnNormedBuf = device.makeBuffer(length: dim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let gatOutBuf = device.makeBuffer(length: interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
+            let upOutBuf = device.makeBuffer(length: interDim * MemoryLayout<Float>.stride, options: .storageModeShared)!
 
-            // Batch gate+up projections: 2 GEMVs → 1 command buffer
-            let gateUp = try await gemvKernel.executeBatchedWithWeightBuffers(
-                weightBuffers: [gateBuf, upBuf],
-                x: tokenHidden,
-                Ms: [config.intermediateDim, config.intermediateDim],
-                K: dim,
-                commandQueue: commandQueue
+            // Single command buffer: FFN RMSNorm → gate + up GEMV (3 dispatches, 1 sync)
+            guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+                throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
+            }
+            try rmsNormKernel.encode(
+                commandBuffer: cmdBuf,
+                inputBuffer: ffnInputBuf,
+                weightBuffer: ffnNormBuf,
+                outputBuffer: ffnNormedBuf,
+                rows: 1, cols: dim,
+                eps: Float(config.rmsNormEpsilon)
             )
+            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: gateBuf,
+                                   inputBuffer: ffnNormedBuf, outputBuffer: gatOutBuf, M: interDim, K: dim)
+            try gemvKernel.encode(commandBuffer: cmdBuf, weightBuffer: upBuf,
+                                   inputBuffer: ffnNormedBuf, outputBuffer: upOutBuf, M: interDim, K: dim)
+
+            cmdBuf.commit()
+            await cmdBuf.completed()
+            if let error = cmdBuf.error { throw error }
+
+            let gatePtr = gatOutBuf.contents().bindMemory(to: Float.self, capacity: interDim)
+            let upPtr = upOutBuf.contents().bindMemory(to: Float.self, capacity: interDim)
+            let gateResult = Array(UnsafeBufferPointer(start: gatePtr, count: interDim))
+            let upResult = Array(UnsafeBufferPointer(start: upPtr, count: interDim))
 
             let activated = try await activationKernels.swiglu(
-                gate: gateUp[0], up: gateUp[1],
+                gate: gateResult, up: upResult,
                 commandQueue: commandQueue
             )
 
