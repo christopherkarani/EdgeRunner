@@ -40,7 +40,10 @@ package final class KernelRegistry {
         guard let function = library.rawValue.makeFunction(name: name) else {
             throw KernelRegistryError.functionNotFound(name)
         }
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let descriptor = MTLComputePipelineDescriptor()
+        descriptor.computeFunction = function
+        descriptor.supportIndirectCommandBuffers = true
+        let pipeline = try device.makeComputePipelineState(descriptor: descriptor, options: [], reflection: nil)
         cache.withLock { $0.entries[name] = MetalPipelineHandle(rawValue: pipeline) }
         return pipeline
     }
