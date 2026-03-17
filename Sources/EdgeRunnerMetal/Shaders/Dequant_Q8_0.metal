@@ -40,8 +40,8 @@ struct ERDequantQ8GEMVParams {
 };
 
 constant constexpr short NQ = 8;        // elements per thread per iteration
-constant constexpr short NR = 2;        // rows per threadgroup
-constant constexpr short NSG = 2;       // simdgroups per threadgroup (2×32=64 threads)
+constant constexpr short NR = 4;        // rows per threadgroup (4x Y-value reuse)
+constant constexpr short NSG = 4;       // simdgroups per threadgroup (4×32=128 threads)
 constant constexpr short NW = 32;       // simdwidth
 
 kernel void dequant_q8_0_gemv(
