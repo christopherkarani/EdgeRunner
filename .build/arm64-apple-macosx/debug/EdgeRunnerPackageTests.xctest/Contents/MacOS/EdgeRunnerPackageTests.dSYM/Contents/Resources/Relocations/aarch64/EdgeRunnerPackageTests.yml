@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerPackageTests.xctest/Contents/MacOS/EdgeRunnerPackageTests'
-relocations:     []
-...

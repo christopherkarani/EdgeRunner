@@ -1,3 +1,0 @@
-module EdgeRunnerIO {
-    header "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerIO.build/include/EdgeRunnerIO-Swift.h"
-}

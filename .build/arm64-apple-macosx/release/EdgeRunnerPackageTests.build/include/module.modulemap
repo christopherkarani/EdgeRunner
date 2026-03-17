@@ -1,3 +1,0 @@
-module EdgeRunnerPackageTests {
-    header "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerPackageTests.build/include/EdgeRunnerPackageTests-Swift.h"
-}

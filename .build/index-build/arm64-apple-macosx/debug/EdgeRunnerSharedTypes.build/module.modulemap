@@ -1,4 +1,0 @@
-module EdgeRunnerSharedTypes {
-    umbrella "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerSharedTypes/include"
-    export *
-}

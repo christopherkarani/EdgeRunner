@@ -1,3 +1,0 @@
-module EdgeRunnerCore {
-    header "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/release/EdgeRunnerCore.build/include/EdgeRunnerCore-Swift.h"
-}
