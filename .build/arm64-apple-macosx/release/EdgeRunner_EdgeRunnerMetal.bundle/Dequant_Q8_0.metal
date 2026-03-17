@@ -61,13 +61,9 @@ kernel void dequant_q8_0_gemv(
         float scale = float(as_type<half>(*scaleBits));
         uint colBase = blockIndex * q8_0WeightsPerBlock;
 
-        // Vectorized inner loop: process 4 elements at a time using float4
-        device const float* xBase = x + colBase;
-        for (uint j = 0; j < q8_0WeightsPerBlock; j += 4) {
-            char4 q = *(device const char4*)(block + 2 + j);
-            float4 xv = *(device const float4*)(xBase + j);
-            float4 dq = scale * float4(float(q.x), float(q.y), float(q.z), float(q.w));
-            partial += dq.x * xv.x + dq.y * xv.y + dq.z * xv.z + dq.w * xv.w;
+        for (uint j = 0; j < q8_0WeightsPerBlock; j++) {
+            char quantised = as_type<char>(block[2 + j]);
+            partial += scale * float(quantised) * x[colBase + j];
         }
     }
 

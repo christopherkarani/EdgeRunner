@@ -95,6 +95,7 @@
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightLoader.swift.o
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightLoaderError.swift.o
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.swift.o
+/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swift.o
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/DequantQ4KMTests.swift.o
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/DequantQ4_0Tests.swift.o
 /private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIOTests.build/DequantQ8_0Tests.swift.o

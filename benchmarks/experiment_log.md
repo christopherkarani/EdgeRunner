@@ -98,9 +98,30 @@
 
 **Final: 0.058 → 24.7 tok/s (426x improvement)**
 
-## Remaining Bottlenecks
+### Experiment 8: Q/K Per-Head Norm + NeoX RoPE + [S,H,D] GQA (CORRECTNESS FIX)
+- **Root cause found**: Qwen3 has per-head RMSNorm on Q/K (attn_q_norm/attn_k_norm) that was completely missing. Without it, self-attention overwhelms cross-attention, causing degenerate output with correct layout. The scrambled [H,S,D] layout accidentally worked by mixing heads.
+- **Change**: Load Q/K norm weights from GGUF, apply per-head RMSNorm after Q/K projection. Fix GQA to [S,H,D]. Add NeoX split-halves RoPE kernel.
+- **Result**: Non-degenerate output [1, 1479, 35, 5371, 1] — correct attention pipeline
+- **Status**: KEPT
+- **Commit**: daca271
 
-1. **Debug mode overhead (2.6x)**: Swift -Onone bounds checking, overflow checks on ~400+ Metal API calls per forward pass
-2. **GPU dispatch overhead**: ~420 dispatches × ~35μs = ~14.7ms per forward pass (even in release)
-3. **GQA layout mismatch**: Prevents KV cache implementation (would give additional 2-3x for decode)
-4. **Memory bandwidth**: ~446MB quantized weights read per forward pass at ~200-400 GB/s
+### Experiment 9: KV Cache for Single-Token Decode
+- **Change**: Extended GQA kernel with kvSeqLen/qOffset for asymmetric Q/KV. Direct GPU buffer writes to per-layer cache. DecoderStateStore for decode detection.
+- **Result**: KV cache working — decode processes 1 token instead of full sequence
+- **Status**: KEPT
+- **Commit**: 7e54202
+
+## Current Performance
+
+| Mode | tok/s | ms/token |
+|------|-------|----------|
+| Debug | 24.2 | 41 |
+| Release | 63 | 16 |
+| llama.cpp (reference) | 180 | 5.6 |
+
+## Remaining Path to 300 tok/s
+
+1. **GEMV kernel efficiency**: Current Q8_0 GEMV uses 32 threads per row with scalar ops. llama.cpp uses simdgroup_matrix_multiply for ~3x throughput.
+2. **Float16 intermediates**: Halves bandwidth for KV cache and scratch buffers.
+3. **Reduce dispatch count**: Kernel fusion (RMSNorm+GEMV, SwiGLU+down).
+4. **Flash attention**: Fused QKV attention instead of separate dispatches.

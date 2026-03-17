@@ -1389,6 +1389,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightPermutation.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
         },
         {
@@ -1428,7 +1432,8 @@
         "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/SafeTensorLoader.swift.o",
         "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightLoader.swift.o",
         "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightLoaderError.swift.o",
-        "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.swift.o"
+        "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.swift.o",
+        "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -1595,6 +1600,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/Modules/EdgeRunnerIO.swiftmodule"
         }
       ],
@@ -1624,7 +1633,8 @@
         "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/SafeTensorLoader.swift",
         "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoader.swift",
         "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoaderError.swift",
-        "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightMap.swift"
+        "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightMap.swift",
+        "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightPermutation.swift"
       ],
       "tempsPath" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build",
       "wholeModuleOptimization" : false
@@ -3526,6 +3536,7 @@
       "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoader.swift",
       "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightLoaderError.swift",
       "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightMap.swift",
+      "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightPermutation.swift",
       "-I",
       "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/Modules",
       "-target",
@@ -4703,6 +4714,10 @@
         {
           "kind" : "file",
           "name" : "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightMap.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightPermutation.swift"
         }
       ],
       "outputFilePath" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/sources"
@@ -5365,6 +5380,10 @@
         {
           "kind" : "file",
           "name" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swift.o"
         },
         {
           "kind" : "file",

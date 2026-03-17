@@ -176,5 +176,12 @@
     "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap~partial.swiftmodule",
     "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.swiftdeps",
     "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightMap.dia"
+  },
+  "/private/tmp/edgerunner-autoresearch/Sources/EdgeRunnerIO/WeightPermutation.swift": {
+    "dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.d",
+    "object": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swift.o",
+    "swiftmodule": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.swiftdeps",
+    "diagnostics": "/private/tmp/edgerunner-autoresearch/.build/arm64-apple-macosx/debug/EdgeRunnerIO.build/WeightPermutation.dia"
   }
 }

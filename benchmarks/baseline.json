@@ -1,17 +1,17 @@
 {
-  "best_tokens_per_sec" : 62.755557298765481,
+  "best_tokens_per_sec" : 64.673204599487164,
   "device" : "Apple Silicon",
   "generated_tokens" : [
     1,
     1479,
-    21456,
-    96793,
-    15859
+    35,
+    5371,
+    1
   ],
-  "improvement_pct" : -62.396675016979628,
+  "improvement_pct" : -91.256868211772385,
   "is_improvement" : false,
   "model" : "Qwen3-0.6B-Q8_0",
-  "ms_per_token" : 42.376156250000008,
-  "timestamp" : "2026-03-17T03:36:19Z",
-  "tokens_per_sec" : 23.598176155960342
+  "ms_per_token" : 176.8514375,
+  "timestamp" : "2026-03-17T07:16:05Z",
+  "tokens_per_sec" : 5.6544635098032492
 }
