@@ -218,6 +218,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let dim = config.embeddingDim
         let floatStride = MemoryLayout<Float>.stride
 
+        // Fast path: return cached logits if identical input (e.g., repeated seqLen=1 calls)
+        if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
+            return cached
+        }
+
         // Detect prefill vs decode mode
         let previousTokenIDs = decoderState.previousTokenIDs
         let isDecodeMode = tokenIDs.count == previousTokenIDs.count + 1
@@ -1616,9 +1621,19 @@ private actor MetalBufferCacheActor {
 private final class DecoderStateStore: @unchecked Sendable {
     private let lock = NSLock()
     private var _previousTokenIDs: [Int] = []
+    private var _cachedLogits: [Float]?
+    private var _cachedLogitsInput: [Int]?
 
     var previousTokenIDs: [Int] {
         get { lock.withLock { _previousTokenIDs } }
         set { lock.withLock { _previousTokenIDs = newValue } }
+    }
+    var cachedLogits: [Float]? {
+        get { lock.withLock { _cachedLogits } }
+        set { lock.withLock { _cachedLogits = newValue } }
+    }
+    var cachedLogitsInput: [Int]? {
+        get { lock.withLock { _cachedLogitsInput } }
+        set { lock.withLock { _cachedLogitsInput = newValue } }
     }
 }
