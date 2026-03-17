@@ -1,0 +1,17 @@
+{
+  "best_tokens_per_sec" : 0.057794355818780535,
+  "device" : "Apple Silicon",
+  "generated_tokens" : [
+    1,
+    1479,
+    21456,
+    96793,
+    15859
+  ],
+  "improvement_pct" : 0,
+  "is_improvement" : true,
+  "model" : "Qwen3-0.6B-Q8_0",
+  "ms_per_token" : 17302.727676999999,
+  "timestamp" : "2026-03-17T01:16:20Z",
+  "tokens_per_sec" : 0.057794355818780535
+}
