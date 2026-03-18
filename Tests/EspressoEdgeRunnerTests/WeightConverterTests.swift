@@ -32,18 +32,18 @@ struct WeightConverterTests {
         let buffer = device.makeBuffer(bytes: floats, length: floats.count * 4, options: .storageModeShared)!
         let tensor = TensorStorage(
             buffer: buffer, byteOffset: 0,
-            dataType: .float32, shape: [4], name: "token_embd.weight"
+            dataType: .float32, shape: [4], name: "output_norm.weight"
         )
 
         var weightMap = WeightMap()
-        weightMap["token_embd.weight"] = tensor
+        weightMap["output_norm.weight"] = tensor
 
         let count = try await converter.convert(
             weightMap: weightMap, architecture: "llama", outputDirectory: outputDir
         )
         #expect(count == 1)
 
-        let blobURL = outputDir.appendingPathComponent("weights/token_embedding.bin")
+        let blobURL = outputDir.appendingPathComponent("rms_final.bin")
         let data = try Data(contentsOf: blobURL)
         #expect(data.count == 128 + 4 * 2) // header + 4 fp16 values
         #expect(data[64] == 0xEF) // magic check
@@ -70,7 +70,7 @@ struct WeightConverterTests {
         )
 
         // Read back and verify transposed: [[1,4],[2,5],[3,6]]
-        let blobURL = outputDir.appendingPathComponent("weights/layers/0/wq.bin")
+        let blobURL = outputDir.appendingPathComponent("layers/0/wq.bin")
         let data = try Data(contentsOf: blobURL)
         let payload = data.subdata(in: 128..<data.count)
         let expected: [Float] = [1, 4, 2, 5, 3, 6]
@@ -83,13 +83,14 @@ struct WeightConverterTests {
         }
     }
 
-    @Test("No transpose for llama architecture")
-    func noTransposeForLlama() async throws {
+    @Test("Llama matrix weights are also transposed (GGML convention)")
+    func llamaAlsoTransposes() async throws {
         let device = try makeDevice()
         let converter = try WeightConverter(device: device)
         let outputDir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: outputDir) }
 
+        // 2x3 matrix: [[1,2,3],[4,5,6]] → transposed: [[1,4],[2,5],[3,6]]
         let floats: [Float] = [1, 2, 3, 4, 5, 6]
         let buffer = device.makeBuffer(bytes: floats, length: floats.count * 4, options: .storageModeShared)!
         let tensor = TensorStorage(
@@ -102,10 +103,42 @@ struct WeightConverterTests {
             architecture: "llama", outputDirectory: outputDir
         )
 
-        let blobURL = outputDir.appendingPathComponent("weights/layers/0/wq.bin")
+        let blobURL = outputDir.appendingPathComponent("layers/0/wq.bin")
         let data = try Data(contentsOf: blobURL)
         let payload = data.subdata(in: 128..<data.count)
-        let expected: [Float] = [1, 2, 3, 4, 5, 6]
+        let expected: [Float] = [1, 4, 2, 5, 3, 6]  // transposed
+        for (i, exp) in expected.enumerated() {
+            let lo = payload[i * 2]
+            let hi = payload[i * 2 + 1]
+            let bits = UInt16(lo) | (UInt16(hi) << 8)
+            let recovered = Float(Float16(bitPattern: bits))
+            #expect(abs(recovered - exp) < 1e-2, "Index \(i): \(recovered) vs \(exp)")
+        }
+    }
+
+    @Test("Llama 1D norms are NOT transposed")
+    func llamaNormsNotTransposed() async throws {
+        let device = try makeDevice()
+        let converter = try WeightConverter(device: device)
+        let outputDir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+
+        let floats: [Float] = [1, 2, 3, 4]
+        let buffer = device.makeBuffer(bytes: floats, length: floats.count * 4, options: .storageModeShared)!
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .float32, shape: [4], name: "blk.0.attn_norm.weight"
+        )
+
+        try await converter.convertTensor(
+            tensor, ggufName: "blk.0.attn_norm.weight",
+            architecture: "llama", outputDirectory: outputDir
+        )
+
+        let blobURL = outputDir.appendingPathComponent("layers/0/rms_att.bin")
+        let data = try Data(contentsOf: blobURL)
+        let payload = data.subdata(in: 128..<data.count)
+        let expected: [Float] = [1, 2, 3, 4]  // NOT transposed
         for (i, exp) in expected.enumerated() {
             let lo = payload[i * 2]
             let hi = payload[i * 2 + 1]
@@ -126,15 +159,16 @@ struct WeightConverterTests {
         let buffer = device.makeBuffer(bytes: floats, length: 4, options: .storageModeShared)!
         let tensor = TensorStorage(
             buffer: buffer, byteOffset: 0,
-            dataType: .float32, shape: [1], name: "blk.5.ffn_gate.weight"
+            dataType: .float32, shape: [1], name: "blk.5.ffn_norm.weight"
         )
 
         try await converter.convertTensor(
-            tensor, ggufName: "blk.5.ffn_gate.weight",
+            tensor, ggufName: "blk.5.ffn_norm.weight",
             architecture: "llama", outputDirectory: outputDir
         )
 
-        let layerDir = outputDir.appendingPathComponent("weights/layers/5")
+        let layerDir = outputDir.appendingPathComponent("layers/5")
+        // ffn_norm is a 1D tensor → no transpose, just written as BLOBFILE
         var isDir: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: layerDir.path, isDirectory: &isDir))
         #expect(isDir.boolValue)
@@ -155,9 +189,9 @@ struct WeightConverterTests {
             buffer: buffer, byteOffset: 0,
             dataType: .float32, shape: [1], name: "unknown.tensor.name"
         )
-        weightMap["token_embd.weight"] = TensorStorage(
+        weightMap["output_norm.weight"] = TensorStorage(
             buffer: buffer, byteOffset: 0,
-            dataType: .float32, shape: [1], name: "token_embd.weight"
+            dataType: .float32, shape: [1], name: "output_norm.weight"
         )
 
         let count = try await converter.convert(

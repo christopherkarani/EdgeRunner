@@ -7,7 +7,7 @@
 /// Reads fp16 data from an IOSurface plane into `outBuffer`.
 /// `channelOffset` is the byte offset into each row for the starting channel.
 /// `width` and `height` describe the region to read (in fp16 elements per row / rows).
-void ane_interop_io_read_fp16(
+void er_ane_interop_io_read_fp16(
     IOSurfaceRef surface,
     int32_t channelOffset,
     int32_t width,
@@ -16,7 +16,7 @@ void ane_interop_io_read_fp16(
 );
 
 /// Writes fp16 data from `inBuffer` into an IOSurface plane.
-void ane_interop_io_write_fp16(
+void er_ane_interop_io_write_fp16(
     IOSurfaceRef surface,
     int32_t channelOffset,
     int32_t width,

@@ -20,7 +20,7 @@ public struct WeightConverter: Sendable {
         var converted = 0
         for name in weightMap.tensorNames {
             guard let tensor = weightMap[name] else { continue }
-            guard EspressoTensorNameMapper.espressoPath(for: name) != nil else { continue }
+            guard EspressoTensorNameMapper.espressoPath(for: name, architecture: architecture) != nil else { continue }
             try await convertTensor(
                 tensor, ggufName: name,
                 architecture: architecture,
@@ -38,7 +38,7 @@ public struct WeightConverter: Sendable {
         architecture: String,
         outputDirectory: URL
     ) async throws {
-        guard let relativePath = EspressoTensorNameMapper.espressoPath(for: ggufName) else {
+        guard let relativePath = EspressoTensorNameMapper.espressoPath(for: ggufName, architecture: architecture) else {
             throw EspressoError.unmappedTensorName(ggufName)
         }
 
