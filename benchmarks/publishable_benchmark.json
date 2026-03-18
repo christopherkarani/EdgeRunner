@@ -1,89 +1,89 @@
 {
   "decode_throughput" : {
-    "max" : 205.86802222881207,
-    "mean" : 204.10368845556363,
-    "median" : 203.89367335382954,
-    "min" : 202.34131751407031,
-    "stddev" : 1.351477597964897
+    "max" : 221.40269675039553,
+    "mean" : 216.33421643324908,
+    "median" : 217.65127542130696,
+    "min" : 206.06348556058069,
+    "stddev" : 5.9661957924683398
   },
   "deterministic" : true,
   "device" : "Apple Silicon",
   "e2e_throughput" : {
-    "mean" : 204.53482121857081,
-    "median" : 204.34103630075086
+    "mean" : 216.61690301779404,
+    "median" : 217.94291683391941
   },
   "memory_mb" : {
-    "model_load" : 42.6875,
-    "peak_rss" : 4980.484375
+    "model_load" : 41.9375,
+    "peak_rss" : 4979.90625
   },
   "model" : "Qwen3-0.6B-Q8_0",
   "num_runs" : 5,
   "per_token_latency_ms" : {
-    "median" : 4.7023340000000005,
-    "p90" : 5.6822910000000002,
-    "p99" : 6.0480830000000001
+    "median" : 4.4042500000000002,
+    "p90" : 5.0002080000000007,
+    "p99" : 5.7855420000000004
   },
   "runs" : [
     {
-      "decode_tok_per_sec" : 202.34131751407031,
+      "decode_tok_per_sec" : 206.06348556058069,
       "decode_token_count" : 127,
-      "decode_total_ms" : 627.652333,
-      "e2e_tok_per_sec" : 202.79056194917143,
+      "decode_total_ms" : 616.31491700000004,
+      "e2e_tok_per_sec" : 206.38824006257752,
       "has_nan" : false,
       "run" : 0,
       "token_count" : 129,
-      "total_ms" : 631.193083,
-      "ttft_ms" : 3.3299170000000005
+      "total_ms" : 620.19037500000002,
+      "ttft_ms" : 3.6640830000000002
     },
     {
-      "decode_tok_per_sec" : 203.49308441490962,
+      "decode_tok_per_sec" : 217.29636272409218,
       "decode_token_count" : 127,
-      "decode_total_ms" : 624.0998330000001,
-      "e2e_tok_per_sec" : 203.90479011189461,
+      "decode_total_ms" : 584.45525000000009,
+      "e2e_tok_per_sec" : 217.53600791113197,
       "has_nan" : false,
       "run" : 1,
       "token_count" : 129,
-      "total_ms" : 627.74395800000002,
-      "ttft_ms" : 3.4209580000000002
+      "total_ms" : 588.40833400000008,
+      "ttft_ms" : 3.7394590000000001
     },
     {
-      "decode_tok_per_sec" : 204.92234476619672,
+      "decode_tok_per_sec" : 219.25726170986999,
       "decode_token_count" : 127,
-      "decode_total_ms" : 619.74695900000006,
-      "e2e_tok_per_sec" : 205.35121720827027,
+      "decode_total_ms" : 579.22825,
+      "e2e_tok_per_sec" : 219.53019848063113,
       "has_nan" : false,
       "run" : 2,
       "token_count" : 129,
-      "total_ms" : 623.32233400000007,
-      "ttft_ms" : 3.3634590000000002
+      "total_ms" : 583.06329100000005,
+      "ttft_ms" : 3.6136660000000003
     },
     {
-      "decode_tok_per_sec" : 205.86802222881207,
+      "decode_tok_per_sec" : 221.40269675039553,
       "decode_token_count" : 127,
-      "decode_total_ms" : 616.900083,
-      "e2e_tok_per_sec" : 206.28650052276703,
+      "decode_total_ms" : 573.6154160000001,
+      "e2e_tok_per_sec" : 221.68715180071018,
       "has_nan" : false,
       "run" : 3,
       "token_count" : 129,
-      "total_ms" : 620.49625000000003,
-      "ttft_ms" : 3.3859590000000002
+      "total_ms" : 577.39025000000004,
+      "ttft_ms" : 3.5645420000000003
     },
     {
-      "decode_tok_per_sec" : 203.89367335382954,
+      "decode_tok_per_sec" : 217.65127542130696,
       "decode_token_count" : 127,
-      "decode_total_ms" : 622.87366700000007,
-      "e2e_tok_per_sec" : 204.34103630075086,
+      "decode_total_ms" : 583.50220899999999,
+      "e2e_tok_per_sec" : 217.94291683391941,
       "has_nan" : false,
       "run" : 4,
       "token_count" : 129,
-      "total_ms" : 626.40379200000007,
-      "ttft_ms" : 3.3135000000000003
+      "total_ms" : 587.30975000000001,
+      "ttft_ms" : 3.5826660000000001
     }
   ],
-  "timestamp" : "2026-03-18T02:25:58Z",
+  "timestamp" : "2026-03-18T19:41:00Z",
   "tokens_per_run" : 128,
   "ttft_ms" : {
-    "mean" : 3.3627586000000003,
-    "median" : 3.3634590000000002
+    "mean" : 3.6328832000000006,
+    "median" : 3.6136660000000003
   }
 }
