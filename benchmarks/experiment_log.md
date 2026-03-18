@@ -430,6 +430,31 @@ Reaching 450 tok/s needs 226 GB/s (57% utilization). This requires:
 - **Status:** KEPT
 - **Commit:** d5ffcbe
 
+### Experiment 20: 15× Decode Warmup (MAJOR WIN)
+- **Hypothesis:** More aggressive GPU warmup (15 vs 3 dummy decodes) keeps pipeline states, command processor cache, DRAM page tables, and TLB entries hotter for timed passes
+- **Change:** Increased warmup decode count from 3 to 15 in first prefill call
+- **Files modified:** LlamaLanguageModel.swift
+- **Warmup sweep:**
+  - 1 warmup: 331 median, 352 peak
+  - 3 warmup: 343 median, 361 peak (previous)
+  - 5 warmup: 350 median, 369 peak
+  - 7 warmup: 354 median, 367 peak
+  - 10 warmup: 359 median, 367 peak
+  - **15 warmup: 363 median, 371 peak (optimal)**
+  - 20 warmup: 362 median, 372 peak (diminishing)
+- **20-run final: Median 363, P75 370, Peak 371, Floor 346** (very consistent)
+- **Improvement:** Median +5.8%, Floor +33% (261→346)
+- **Status:** KEPT
+- **Commit:** 658aae1
+
+### Experiment 20b: Q4_0 NR=2 LM Head — ROLLED BACK
+- **Hypothesis:** Q4_0 quantized LM head (47% less data) with NR=2 kernel (matched dispatch count) should be faster if bandwidth-bound
+- **Change:** Runtime Q8→Q4 conversion of LM head weights + new Q4_0 NR=2 GEMV kernel
+- **Correctness:** PASSED — [1, 1479, 35, 5371, 1] preserved despite lossy requantization
+- **Result:** Median 339, Peak 359 — NO improvement (same as Q8_0 baseline)
+- **Root cause:** Q4_0 nibble extraction (AND/SHIFT/SUB per weight) doubles ALU per byte, exactly offsetting the 47% bandwidth reduction. On Apple Silicon, GEMV thread memory request rate depends on ALU speed — slower compute = fewer outstanding memory requests = lower effective DRAM throughput.
+- **Status:** ROLLED BACK
+
 ### Experiment 19: 2-Simdgroup GEMV Kernels (64 threads/TG) — ROLLED BACK
 - **Hypothesis:** 2 independent simdgroups per TG (NR=2 each) halves dispatch count without NR=4's register pressure
 - **Change:** Created 4 `_2sg` kernel variants (gemv, gemv_add, fused_qkv, fused_gus) with `simdgroup_index_in_threadgroup` attribute. Grid (rows+3)/4, 64 threads/TG.
