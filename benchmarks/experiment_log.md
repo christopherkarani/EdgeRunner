@@ -421,3 +421,19 @@ The GPU reads 604 MB per decode step at 172 GB/s effective (43% of M3 Max 400 GB
 Reaching 450 tok/s needs 226 GB/s (57% utilization). This requires:
 - Metal Indirect Command Buffers for pre-recorded dispatch replay
 - Or fundamentally fewer dispatches (requires global threadgroup synchronization, not supported by Metal)
+
+### Experiment 18: Optimized Metal 3 Decode Path (Params Buffer)
+- **Hypothesis:** Pre-allocated params buffer eliminates setBytes overhead; Metal 3 implicit barriers are faster than Metal 4 explicit barriers on Apple Silicon
+- **Change:** Added `fusedDecodePassOpt()` with constant params written once, per-call varying params updated. Preferred over Metal 4 path.
+- **Files modified:** LlamaLanguageModel.swift
+- **Result:** Metal 4 ~340 median → Opt Metal 3 ~344 median, 356 peak (correct: [1,1479,35,5371,1])
+- **Status:** KEPT
+- **Commit:** d5ffcbe
+
+### Experiment 19: 2-Simdgroup GEMV Kernels (64 threads/TG) — ROLLED BACK
+- **Hypothesis:** 2 independent simdgroups per TG (NR=2 each) halves dispatch count without NR=4's register pressure
+- **Change:** Created 4 `_2sg` kernel variants (gemv, gemv_add, fused_qkv, fused_gus) with `simdgroup_index_in_threadgroup` attribute. Grid (rows+3)/4, 64 threads/TG.
+- **Result:** Correctness passed for all variants. Performance: 290 tok/s (−17% from 351 baseline)
+- **Root cause:** On Apple Silicon, 2 SG per TG reduces GPU occupancy from ~7 TGs/core to ~3 TGs/core. Fewer concurrent threadgroups means fewer outstanding memory requests, reducing effective DRAM bandwidth. The halved dispatch count doesn't compensate for the occupancy loss.
+- **Key learning:** Apple Silicon GEMV is strictly occupancy-limited at 1 SG (32 threads) per TG. Any increase in per-TG resource usage degrades bandwidth utilization.
+- **Status:** ROLLED BACK
