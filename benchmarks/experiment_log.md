@@ -462,3 +462,81 @@ Reaching 450 tok/s needs 226 GB/s (57% utilization). This requires:
 - **Root cause:** On Apple Silicon, 2 SG per TG reduces GPU occupancy from ~7 TGs/core to ~3 TGs/core. Fewer concurrent threadgroups means fewer outstanding memory requests, reducing effective DRAM bandwidth. The halved dispatch count doesn't compensate for the occupancy loss.
 - **Key learning:** Apple Silicon GEMV is strictly occupancy-limited at 1 SG (32 threads) per TG. Any increase in per-TG resource usage degrades bandwidth utilization.
 - **Status:** ROLLED BACK
+
+### Experiment 21: Single-Simdgroup GQA Mega-Kernel (32 threads/head, zero barriers)
+- **Hypothesis:** The fused_qk_norm_rope_gqa mega-kernel uses 64 threads (2 simdgroups) per head, requiring threadgroup_barrier inside the KV loop for cross-SG reduction. At kvSeqLen=128: 128 x 2 barriers x 28 layers = ~7168 barriers per decode. Reducing to 32 threads (1 SG) per head with 4 elements/thread eliminates ALL barriers.
+- **Change:** Rewrote mega-kernel: each thread handles 4 head dimensions instead of 2. NeoX RoPE pairs (i, i+64) and (i+32, i+96) computed per thread. simd_sum over 32 threads gives full 128-dim dot product. Zero threadgroup memory or barriers in GQA loop. Updated all 6 dispatch sites.
+- **Files modified:** RoPE.metal, LlamaLanguageModel.swift
+- **Result:** 128-token: 207.5 -> 234.8 tok/s median (+13.2%). 4-token: 362.6 -> 359.6 (noise).
+- **Status:** KEPT
+- **Commit:** 99689f7
+
+## Autoresearch Target: Beat MLX (277.8 tok/s)
+
+| Framework | 128-token Decode (tok/s) | Gap |
+|-----------|--------------------------|-----|
+| MLX (Python) | 277.8 median | target |
+| EdgeRunner | 234.8 median | -43 tok/s (-15.5%) |
+| llama.cpp | 200.3 median | beaten by 17% |
+
+### Experiment 22: f16acc GEMV Kernels — ROLLED BACK
+- **Hypothesis:** Using half-precision for inner dot product accumulation doubles ALU throughput and halves register pressure, improving GPU occupancy.
+- **Change:** Loaded f16acc pipeline states, switched decode path to use them.
+- **Result:** Correctness FAILED — NaN in logits, wrong tokens [1, 1479, 35, 5371, 0]
+- **Root cause:** Half precision (11-bit mantissa) causes overflow in the accumulation path for this model's activation magnitudes.
+- **Status:** ROLLED BACK
+
+### Experiment 23: GQA Loop Unrolling by 2 — ROLLED BACK
+- **Hypothesis:** Processing 2 KV positions per loop iteration reduces loop overhead.
+- **Change:** Unrolled inner GQA loop: precompute kvHeadOff, process 2 positions per iteration with remainder handling.
+- **Result:** Correctness FAILED — tokens [1, 1479, 1, 374, 279] instead of expected
+- **Root cause:** Race condition between K cache writes and Q cache reads across threadgroups. Unrolling changes timing of reads relative to concurrent K thread writes.
+- **Status:** ROLLED BACK
+
+### Experiment 24: Fast Math (fast::exp, fast::cos, fast::sin) — ROLLED BACK
+- **Hypothesis:** Using Metal fast math functions for exp/cos/sin in mega-kernel reduces ALU cost.
+- **Change:** Replaced exp(), cos(), sin(), pow() with fast:: variants in GQA and RoPE phases.
+- **Result:** Correctness passed. Performance: 229.9 vs 234.8 baseline — no improvement (within noise).
+- **Root cause:** Metal compiler already applies fast math optimizations. Explicit fast:: is redundant on Apple Silicon.
+- **Status:** ROLLED BACK
+
+### Experiment 25: Pre-allocated Reusable Logits Array — ROLLED BACK
+- **Hypothesis:** Eliminating per-decode 608KB array allocation by reusing a pre-allocated buffer.
+- **Change:** Added fillReusableLogits() to DecoderStateStore with COW-aware mutation.
+- **Result:** 217.4 tok/s (WORSE, -7.4% from 234.8). Higher variance (stddev 7.0 vs 1.1).
+- **Root cause:** Swift's COW semantics cause double-copy when force-unwrapping Optional array. The refcount is always >= 2 due to storage in Optional + return value.
+- **Status:** ROLLED BACK
+
+## GPU Profiling Analysis (Metal gpuStartTime/gpuEndTime)
+
+Per-decode GPU timing at various KV cache lengths:
+
+| KV Length | GPU Time | Wall Time | Overhead | Bandwidth |
+|-----------|----------|-----------|----------|-----------|
+| 2 | 3.07ms | 3.30ms | 0.23ms | 207 GB/s |
+| 4 | 3.07ms | 3.31ms | 0.24ms | 207 GB/s |
+| 33 | 3.35ms | 3.58ms | 0.23ms | 190 GB/s |
+| 65 | 3.72ms | 3.97ms | 0.25ms | 171 GB/s |
+| 97 | 4.00ms | 4.24ms | 0.24ms | 159 GB/s |
+
+Key findings:
+- CPU overhead: **0.23ms** constant (Swift async + Array copy + encode)
+- GQA cost: **9.8us per KV position** (memory-latency bound)
+- Peak bandwidth: **207 GB/s** at short sequences (69% of M3 Max theoretical)
+- At kvLen=97: GQA adds **0.93ms** (23% of GPU time)
+
+## Remaining Path: 234.8 -> 278+ tok/s
+
+Per-token analysis at 234.8 tok/s = 4.26ms/token (average):
+- Weight GEMV: ~3.07ms (635MB at ~207 GB/s)
+- GQA attention: ~0.65ms at avg kvLen=64 (memory-latency bound)
+- CPU/async overhead: ~0.23ms (array copy + async continuation)
+- Dispatch overhead: ~0.31ms (142 dispatches x ~2.2us)
+
+To reach 278 tok/s = 3.60ms/token:
+1. **Flash-Decode GQA** — parallelize KV scan across chunks (save 0.3-0.5ms)
+2. **Reduce dispatch count** — merge some dispatches (save 0.1-0.2ms)
+3. **Improve GEMV bandwidth** — target 230+ GB/s (save 0.2-0.4ms)
+- GQA attention: ~0.8ms at avg kvSeqLen=65 (128 bytes/pos x 16 heads x 28 layers)
+- Dispatch overhead: 142 dispatches x ~3us = ~0.4ms
+- Swift async: ~0.1ms

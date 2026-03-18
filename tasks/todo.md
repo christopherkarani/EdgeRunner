@@ -1,64 +1,36 @@
-# EdgeRunner M3 Execution Tracker
+# Autoresearch: Beat MLX on Qwen3-0.6B Q8_0 Decode
 
-## Status
-- Current milestone: M3
-- Current task: M3 complete
-- Baseline before execution: `swift test` passes with 177 tests in 29 suites
+## Current Status
+- MLX (Python): **277.8 tok/s** median decode (128 tokens)
+- llama.cpp: **200.3 tok/s** median decode
+- **EdgeRunner: 234.8 tok/s** median decode (128 tokens)
+- Gap to MLX: **43 tok/s (15.5%)**
+- **EdgeRunner beats llama.cpp by 17%**
 
-## Checklist
-- [x] Reconcile repo state against M3 plan and prompt constraints
-- [x] Update task tracker for M3 execution
-- [x] Task 1: EdgeRunnerWeightLoader protocol, WeightMap, ModelConfig
-- [x] Task 2: GGUF header parser
-- [x] Task 3: GGUF tensor table and memory mapping
-- [x] Task 4: Q4_0 dequantisation kernel
-- [x] Task 5: Q8_0 dequantisation kernel
-- [x] Task 6: Q4_K_M dequantisation kernel
-- [x] Task 7: SafeTensor loader
-- [x] Task 8: NPZ loader
-- [x] Task 9: Llama 3 architecture
-- [x] Task 10: Convenience load API
-- [x] Task 11: Memory pressure handler
-- [x] Task 12: End-to-end integration and verification
-- [x] Final verification: `swift build`
-- [x] Final verification: `swift test`
+## Completed Experiments
+- [x] **Exp 21: Single-Simdgroup GQA** -- 207.5 -> 234.8 tok/s (+13.2%) KEPT
+- [x] **Exp 22: f16acc GEMV Kernels** -- NaN, ROLLED BACK
+- [x] **Exp 23: GQA Loop Unrolling** -- Correctness failure, ROLLED BACK
+- [x] **Exp 24: Fast Math** -- No improvement, ROLLED BACK
+- [x] **Exp 25: Reusable Logits Array** -- Slower (COW issues), ROLLED BACK
+- [x] **GPU Profiling** -- Identified exact bottleneck split
 
-## Review
-- Added end-to-end IO verification suites under `Tests/EdgeRunnerIOTests/`.
-- `swift test --filter "EndToEndLoadTests|PerformanceBenchmarkTests|PerplexityVerificationTests"` passed with 12 tests in 3 suites.
-- `swift test` passed with 269 tests in 51 suites.
-- `swift build` succeeded after Task 12 verification.
+## Bottleneck Analysis (from GPU profiling)
+At 234.8 tok/s = 4.26ms/token average:
+- **Weight GEMV**: 3.07ms (72%) -- 207 GB/s effective, 635MB data
+- **GQA attention**: 0.65ms (15%) -- grows 9.8us per KV position
+- **Dispatch overhead**: 0.31ms (7%) -- 142 dispatches x 2.2us
+- **CPU/async overhead**: 0.23ms (5%) -- array copy + continuation
 
----
+## Next Optimizations (priority order)
+- [ ] **Flash-Decode GQA** -- Parallelize KV scan into chunks with separate threadgroups. Each chunk scans a portion of KV cache, then reduce partial results. Expected: -0.3 to -0.5ms at avg kvLen=64.
+- [ ] **Reduce dispatch count** -- Merge norm+LM head, or use ICBs. Expected: -0.1 to -0.2ms.
+- [ ] **GEMV bandwidth improvement** -- Target 230+ GB/s (currently 207). Investigate memory prefetch, cache-friendly access patterns. Expected: -0.2 to -0.4ms.
 
-# Plan Document Review
+## Autoresearch Infrastructure
+- `autoresearch/run_loop.sh` -- Automated build + correctness + benchmark script
+- `benchmarks/experiment_log.md` -- Full experiment history (Exp 0-25)
+- `benchmarks/framework_comparison.json` -- MLX vs llama.cpp vs EdgeRunner data
 
-## Checklist
-- [x] Create review task tracker
-- [x] Read all plan documents under `docs/plans/`
-- [x] Check cross-document consistency, sequencing, and test strategy
-- [x] Record review findings with severity and references
-
-## Review
-- High: M3 depends on `EdgeRunnerLanguageModel` before M4 introduces it.
-- High: M3 convenience load API returns an uninitialized model and never loads weights.
-- High: Master/M1 concurrency rules ban `@unchecked Sendable`, but multiple milestone plans require it.
-- High: M4's logits-based protocol is incompatible with the planned Foundation Models backend.
-- Medium: M2 claims GPT-2 124M validation, but the plan only validates randomly initialized reference models.
-- Medium: M5 moves speculative decoding into M4 and omits master-plan deliverables for batched inference and model download/registry work.
-- Medium: M5 LoRA training assumes gradient-bearing tensor APIs and optimizer kernels that are not introduced in prior milestones.
-
-## M1 Reconciliation
-- [x] Append reconciliation checklist and verify current baseline
-- [x] Add fail-first tests for public API boundaries and `@unchecked Sendable` usage
-- [x] Refactor Metal/Core internals so only Metal wrapper types use `@unchecked Sendable`
-- [x] Re-run `swift build`, `swift test`, and `swift package describe --type json`
-- [x] Record review notes and commit follow-up reconciliation changes
-
-## M1 Reconciliation Review
-- Narrowed `MetalBackend` to actor-safe public APIs only; raw Metal protocol types no longer appear on the public actor surface.
-- Replaced non-wrapper `@unchecked Sendable` uses with package-level Metal wrapper handles for buffers, libraries, and pipeline states.
-- Internalized subsystem support types (`BufferCache`, `KernelRegistry`, `CommandBatcher`, `ResidencyManager`, `BarrierTracker`, `GEMMKernel`) to keep the exported package surface focused on M1 user-facing APIs.
-- Added source-backed architecture tests to prevent regressions in public API boundaries and `@unchecked Sendable` scope.
-- Verification passed with `swift build`, `swift test` (74 tests), and `swift package describe --type json`.
-- Wax CLI memory integration was attempted twice; one attempt returned `Invalid TOC: memory_binding not supported in v1` and one `remember` call hung until terminated.
+## Experiment Log
+See benchmarks/experiment_log.md
