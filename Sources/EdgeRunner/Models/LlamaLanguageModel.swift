@@ -77,6 +77,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // Pre-allocated scratch buffers — eliminates per-call buffer allocations
     private let scratch: ScratchBuffers
 
+    // Metal 4 state — argument table dispatch with minimal per-dispatch overhead
+    private let metal4State: Metal4State?
+
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -182,6 +185,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             logits: allocBuffer(config.vocabSize * fs),
             decodeHidden: allocBuffer(dim * fs)
         )
+
+        // Initialize Metal 4 state if available (macOS 26+)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.metal4State = try? Metal4State(device: device)
+        } else {
+            self.metal4State = nil
+        }
     }
 
     // MARK: - EdgeRunnerLanguageModel conformance
@@ -251,10 +261,19 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
             }
 
-            let logitsBuf = try await fusedDecodePass(
-                hiddenBuf: hiddenBuf,
-                currentPos: currentPos
-            )
+            let logitsBuf: MTLBuffer
+            if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
+                logitsBuf = try await fusedDecodePassMetal4(
+                    hiddenBuf: hiddenBuf,
+                    currentPos: currentPos,
+                    state: m4
+                )
+            } else {
+                logitsBuf = try await fusedDecodePass(
+                    hiddenBuf: hiddenBuf,
+                    currentPos: currentPos
+                )
+            }
 
             // Update decoder state
             decoderState.previousTokenIDs = tokenIDs
@@ -311,7 +330,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 for warmupIdx in 0..<3 {
                     let warmupPos = seqLen + warmupIdx
                     kvCache.setPosition(warmupPos)  // Set position so mega-kernel uses correct kvSeqLen
-                    _ = try await fusedDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
+                    if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
+                        _ = try await fusedDecodePassMetal4(hiddenBuf: warmupHidden, currentPos: warmupPos, state: m4)
+                    } else {
+                        _ = try await fusedDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
+                    }
                 }
                 // Zero ALL KV cache buffers to remove stale warmup data
                 for i in 0..<config.layerCount {
@@ -451,6 +474,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 lmHeadRaw: lmHeadRawBuf,
                 lmHeadCols: lmHeadCols
             )
+
+            // Populate Metal 4 residency set now that all weight buffers are available
+            if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
+                m4.populateResidencySet(
+                    scratch: scratch,
+                    layerKCaches: layerKCaches,
+                    layerVCaches: layerVCaches,
+                    preloadedWeights: preloadedWeights
+                )
+            }
         }
 
         // === SINGLE ENCODER for the ENTIRE forward pass ===
@@ -1263,6 +1296,328 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return logitsBuf
     }
 
+    // MARK: - Metal 4 Fused Decode Pass (Argument Table Dispatch)
+
+    /// Metal 4 decode pass using argument table binding for minimal per-dispatch overhead.
+    ///
+    /// Key optimizations over the Metal 3 path:
+    /// - `setArgumentTable` called ONCE; Metal snapshots at dispatch time
+    /// - Only CHANGED buffer addresses updated between dispatches via `setAddress`
+    /// - Execution-only barriers (`MTL4VisibilityOptionNone`) — no cache flushes on unified memory
+    /// - Pre-allocated params buffer with 256-byte aligned slots — no `setBytes` copies
+    /// - Single MTL4ComputeCommandEncoder for entire forward pass
+    @available(macOS 26.0, iOS 26.0, *)
+    private func fusedDecodePassMetal4(
+        hiddenBuf: MTLBuffer,
+        currentPos: Int,
+        state: Metal4State
+    ) async throws -> MTLBuffer {
+        let dim = config.embeddingDim
+        let headDim = config.headDim
+        let qDim = config.headCount * headDim
+        let kvDim = config.kvHeadCount * headDim
+        let interDim = config.intermediateDim
+        let totalKVLen = currentPos + 1
+        let halfStride = MemoryLayout<Float16>.stride
+        let numHeads = config.headCount
+        let numKVHeads = config.kvHeadCount
+        let rmsEps = Float(config.rmsNormEpsilon)
+        let ropeTheta = Float(config.ropeFreqBase)
+        let blocksPerRowDim = dim / 32
+        let layerCount = config.layerCount
+
+        var currentHidden = hiddenBuf
+
+        // Scratch buffers (same as Metal 3)
+        let afterAttnBuf = scratch.afterAttn
+        let outputBufA = scratch.outputA
+        let outputBufB = scratch.outputB
+        let allQBuf = scratch.allQ
+        let allKBuf = scratch.allK
+        let attnOutBuf = scratch.attnOut
+        let activBuf = scratch.activ
+
+        // Pipeline states
+        let fusedQKVPSO = fusedQKVPipeline
+        let megaPSO = fusedNormRoPEGQAPipeline
+        let gemvAddPSO = gemvAddPipeline
+        let fusedGUSPSO = fusedGateUpSiluPipeline
+        let rmsNormPSO = rmsNormKernel.pipeline
+        let fusedQ8PSO = fusedQ8GemvPipeline
+        let gemvPSO = gemvKernel.f32Pipeline
+
+        // MTL4 command buffer setup
+        let m4Queue = state.commandQueue
+        let m4CmdBuf = state.commandBuffer
+        let allocator = state.allocator
+        let argTable = state.argumentTable
+        let paramsBuffer = state.paramsBuffer
+
+        allocator.reset()
+        m4CmdBuf.beginCommandBuffer(allocator: allocator)
+        m4CmdBuf.useResidencySet(state.residencySet)
+
+        guard let enc = m4CmdBuf.makeComputeCommandEncoder() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTL4 compute encoder")
+        }
+
+        // Set argument table ONCE — Metal snapshots at each dispatch
+        enc.setArgumentTable(argTable)
+
+        // Pre-populate CONSTANT scratch buffer addresses (never change between layers)
+        // Index 4 in QKV = allQ, Index 5 in QKV = allK
+        let allQAddr = allQBuf.gpuAddress
+        let allKAddr = allKBuf.gpuAddress
+        let attnOutAddr = attnOutBuf.gpuAddress
+        let afterAttnAddr = afterAttnBuf.gpuAddress
+        let activAddr = activBuf.gpuAddress
+
+        let paramsBase = paramsBuffer.contents()
+        let paramsGPUBase = paramsBuffer.gpuAddress
+
+        // === PRE-WRITE ALL PARAMS INTO RING BUFFER (slots 0-6) ===
+        // Written ONCE per decode pass — zero memcpy inside the layer loop.
+
+        // Slot 0: QKV params
+        var qkvP = FusedQKVParams(
+            qRows: UInt32(qDim), kvRows: UInt32(kvDim),
+            cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps
+        )
+        let qkvParamsAddr = paramsGPUBase
+        memcpy(paramsBase, &qkvP, MemoryLayout<FusedQKVParams>.stride)
+
+        // Slot 1: Mega-kernel params
+        var megaP = (
+            UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim),
+            UInt32(currentPos), ropeTheta, Float(1.0), rmsEps,
+            UInt32(totalKVLen), 1.0 / sqrt(Float(headDim))
+        )
+        let megaParamsAddr = paramsGPUBase + 256
+        memcpy(paramsBase + 256, &megaP, 9 * 4)
+
+        // Slot 2: Wo+add params
+        let blocksPerRowQDim = qDim / 32
+        var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
+        let woParamsAddr = paramsGPUBase + 512
+        memcpy(paramsBase + 512, &woP, MemoryLayout<ERDequantGEMVParams>.stride)
+
+        // Slot 3: Gate+Up+SiLU params
+        var gusP = FusedGateUpSiluParams(
+            rows: UInt32(interDim), cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps
+        )
+        let gusParamsAddr = paramsGPUBase + 768
+        memcpy(paramsBase + 768, &gusP, MemoryLayout<FusedGateUpSiluParams>.stride)
+
+        // Slot 4: Down+add params
+        let blocksPerRowInterDim = interDim / 32
+        var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
+        let downParamsAddr = paramsGPUBase + 1024
+        memcpy(paramsBase + 1024, &downP, MemoryLayout<ERDequantGEMVParams>.stride)
+
+        // Slot 5: Final RMSNorm params
+        var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
+        let normParamsAddr = paramsGPUBase + 1280
+        memcpy(paramsBase + 1280, &normP, MemoryLayout<ERRMSNormParams>.stride)
+
+        // Slot 6: LM head params
+        let lmParamsAddr = paramsGPUBase + 1536
+        if preloadedWeights.lmHeadRaw != nil {
+            let blocksPerRow = preloadedWeights.lmHeadCols / 32
+            var lmP = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
+            memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERDequantGEMVParams>.stride)
+        } else {
+            var lmP = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
+            memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERGEMVParams>.stride)
+        }
+
+        // === PRE-COMPUTE DISPATCH SIZES (hoisted out of layer loop) ===
+        let qkvGridWidth = (qDim + kvDim + kvDim + 1) / 2
+        let megaHalfDim = headDim / 2
+        let megaTotalHeads = numHeads + numKVHeads
+        let megaTGWidth = min(megaHalfDim, megaPSO.maxTotalThreadsPerThreadgroup)
+        let dimGridWidth = (dim + 1) / 2
+        let interDimGridWidth = (interDim + 1) / 2
+        let cacheWriteOffF16 = currentPos * kvDim * halfStride
+
+        // === LAYER LOOP — MINIMAL setAddress PER DISPATCH ===
+        // Strategy: argument table state persists between dispatches.
+        // Each dispatch sets ONLY the indices whose values differ from
+        // what the table currently holds. Constant scratch/param addresses
+        // are still re-set because different pipeline dispatches reuse
+        // the same slot indices for different purposes.
+
+        for layerIndex in 0..<layerCount {
+            let lw = preloadedWeights.layers[layerIndex]
+            let layerOutputBuf = (layerIndex % 2 == 0) ? outputBufA : outputBufB
+            let layerKCache = layerKCaches[layerIndex]
+            let layerVCache = layerVCaches[layerIndex]
+
+            let useQ8Fused = lw.wqRaw != nil
+            let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
+
+            // ---- DISPATCH 1: Fused QKV (indices 0-8) ----
+            if useQ8Fused {
+                enc.setComputePipelineState(fusedQKVPSO)
+                argTable.setAddress(lw.wqRaw!.gpuAddress, index: 0)
+                argTable.setAddress(lw.wkRaw!.gpuAddress, index: 1)
+                argTable.setAddress(lw.wvRaw!.gpuAddress, index: 2)
+                argTable.setAddress(currentHidden.gpuAddress, index: 3)
+                argTable.setAddress(allQAddr, index: 4)
+                argTable.setAddress(allKAddr, index: 5)
+                argTable.setAddress(layerVCache.gpuAddress + UInt64(cacheWriteOffF16), index: 6)
+                argTable.setAddress(qkvParamsAddr, index: 7)
+                argTable.setAddress(lw.attnNorm.gpuAddress, index: 8)
+
+                enc.dispatchThreadgroups(
+                    threadgroupsPerGrid: MTLSize(width: qkvGridWidth, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+
+            // ---- BARRIER (execution-only — no cache flush on unified memory) ----
+            enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+            // ---- DISPATCH 2: Mega-kernel Q/K norm + RoPE + GQA (indices 0-7) ----
+            if hasQKNorm {
+                enc.setComputePipelineState(megaPSO)
+                argTable.setAddress(allQAddr, index: 0)
+                argTable.setAddress(allKAddr, index: 1)
+                argTable.setAddress(lw.qNorm!.gpuAddress, index: 2)
+                argTable.setAddress(lw.kNorm!.gpuAddress, index: 3)
+                argTable.setAddress(attnOutAddr, index: 4)
+                argTable.setAddress(layerKCache.gpuAddress, index: 5)
+                argTable.setAddress(layerVCache.gpuAddress, index: 6)
+                argTable.setAddress(megaParamsAddr, index: 7)
+
+                enc.dispatchThreads(
+                    threadsPerGrid: MTLSize(width: megaHalfDim, height: megaTotalHeads, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1)
+                )
+            }
+
+            // ---- BARRIER ----
+            enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+            // ---- DISPATCH 3: Wo + residual add (indices 0-4) ----
+            if useQ8Fused, let woRaw = lw.woRaw {
+                enc.setComputePipelineState(gemvAddPSO)
+                argTable.setAddress(woRaw.gpuAddress, index: 0)
+                argTable.setAddress(attnOutAddr, index: 1)
+                argTable.setAddress(currentHidden.gpuAddress, index: 2)
+                argTable.setAddress(afterAttnAddr, index: 3)
+                argTable.setAddress(woParamsAddr, index: 4)
+
+                enc.dispatchThreadgroups(
+                    threadgroupsPerGrid: MTLSize(width: dimGridWidth, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+
+            // ---- BARRIER ----
+            enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+            // ---- DISPATCH 4: Gate + Up + SiLU (indices 0-5) ----
+            if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
+                enc.setComputePipelineState(fusedGUSPSO)
+                argTable.setAddress(gateRaw.gpuAddress, index: 0)
+                argTable.setAddress(upRaw.gpuAddress, index: 1)
+                argTable.setAddress(afterAttnAddr, index: 2)
+                argTable.setAddress(activAddr, index: 3)
+                argTable.setAddress(gusParamsAddr, index: 4)
+                argTable.setAddress(lw.ffnNorm.gpuAddress, index: 5)
+
+                enc.dispatchThreadgroups(
+                    threadgroupsPerGrid: MTLSize(width: interDimGridWidth, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+
+            // ---- BARRIER ----
+            enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+            // ---- DISPATCH 5: Down + residual add (indices 0-4) ----
+            // Note: index 2 (afterAttnAddr) unchanged from GUS dispatch — skip setAddress
+            if useQ8Fused, let downRaw = lw.downRaw {
+                enc.setComputePipelineState(gemvAddPSO)
+                argTable.setAddress(downRaw.gpuAddress, index: 0)
+                argTable.setAddress(activAddr, index: 1)
+                // index 2 = afterAttnAddr — already set by GUS dispatch
+                argTable.setAddress(layerOutputBuf.gpuAddress, index: 3)
+                argTable.setAddress(downParamsAddr, index: 4)
+
+                enc.dispatchThreadgroups(
+                    threadgroupsPerGrid: MTLSize(width: dimGridWidth, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+
+            // ---- BARRIER (before next layer or final norm) ----
+            enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+            currentHidden = layerOutputBuf
+        }
+
+        // === FINAL NORM (single token) — params pre-written in slot 5 ===
+        let finalOutputBuf = scratch.finalOut
+        do {
+            enc.setComputePipelineState(rmsNormPSO)
+            argTable.setAddress(currentHidden.gpuAddress, index: 0)
+            argTable.setAddress(preloadedWeights.finalNorm!.gpuAddress, index: 1)
+            argTable.setAddress(finalOutputBuf.gpuAddress, index: 2)
+            argTable.setAddress(normParamsAddr, index: 3)
+
+            enc.dispatchThreads(
+                threadsPerGrid: MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
+        }
+
+        // ---- BARRIER before LM head ----
+        enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: [])
+
+        // === LM HEAD (single token) — params pre-written in slot 6 ===
+        let logitsBuf = scratch.logits
+        if let lmRaw = preloadedWeights.lmHeadRaw {
+            enc.setComputePipelineState(fusedQ8PSO)
+            argTable.setAddress(lmRaw.gpuAddress, index: 0)
+            argTable.setAddress(finalOutputBuf.gpuAddress, index: 1)
+            argTable.setAddress(logitsBuf.gpuAddress, index: 2)
+            argTable.setAddress(lmParamsAddr, index: 3)
+
+            enc.dispatchThreadgroups(
+                threadgroupsPerGrid: MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+            )
+        } else {
+            let lmHeadBuf = preloadedWeights.lmHead!
+            enc.setComputePipelineState(gemvPSO)
+            argTable.setAddress(lmHeadBuf.gpuAddress, index: 0)
+            argTable.setAddress(finalOutputBuf.gpuAddress, index: 1)
+            argTable.setAddress(logitsBuf.gpuAddress, index: 2)
+            argTable.setAddress(lmParamsAddr, index: 3)
+
+            enc.dispatchThreadgroups(
+                threadgroupsPerGrid: MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+            )
+        }
+
+        enc.endEncoding()
+        m4CmdBuf.endCommandBuffer()
+
+        // Commit with feedback handler for async completion notification
+        let commitOptions = MTL4CommitOptions()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            commitOptions.addFeedbackHandler { _ in
+                continuation.resume()
+            }
+            m4Queue.commit([m4CmdBuf], options: commitOptions)
+        }
+
+        return logitsBuf
+    }
+
     // MARK: - GPU Pipeline Helpers
 
     /// Encode a GEMV dispatch with buffer offsets for per-token slicing.
@@ -1519,6 +1874,121 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             break
         }
         return logits
+    }
+}
+
+// MARK: - Metal 4 State
+
+/// Holds all Metal 4-specific objects: command queue, allocator, argument table,
+/// residency set, params buffer, and shared event for completion signaling.
+/// Created once at init; reused across all decode passes.
+/// @unchecked Sendable: MTL4 objects are thread-safe for the usage pattern here
+/// (single-writer during encode, no concurrent encode).
+@available(macOS 26.0, iOS 26.0, *)
+private final class Metal4State: @unchecked Sendable {
+    let commandQueue: any MTL4CommandQueue
+    let commandBuffer: any MTL4CommandBuffer
+    let allocator: any MTL4CommandAllocator
+    let argumentTable: any MTL4ArgumentTable
+    let residencySet: any MTLResidencySet
+    let paramsBuffer: MTLBuffer
+
+    init(device: MTLDevice) throws {
+        // Command queue
+        guard let queue = device.makeMTL4CommandQueue() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTL4 command queue")
+        }
+        self.commandQueue = queue
+
+        // Command allocator
+        guard let alloc = device.makeCommandAllocator() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTL4 command allocator")
+        }
+        self.allocator = alloc
+
+        // Command buffer — created from device, not queue
+        guard let cmdBuf: (any MTL4CommandBuffer) = device.makeCommandBuffer() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTL4 command buffer")
+        }
+        self.commandBuffer = cmdBuf
+
+        // Argument table — max 11 buffer slots (highest index used is 8 in QKV)
+        let argDesc = MTL4ArgumentTableDescriptor()
+        argDesc.maxBufferBindCount = 11
+        argDesc.initializeBindings = true
+        self.argumentTable = try device.makeArgumentTable(descriptor: argDesc)
+
+        // Params buffer: 7 slots (QKV, Mega, Wo, GUS, Down, FinalNorm, LMHead)
+        // Each 256-byte aligned. Params are constant across layers, written once per decode pass.
+        let paramsSize = 7 * 256
+        guard let paramsBuf = device.makeBuffer(length: paramsSize, options: .storageModeShared) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create Metal 4 params buffer")
+        }
+        self.paramsBuffer = paramsBuf
+
+        // Residency set
+        let resDesc = MTLResidencySetDescriptor()
+        resDesc.label = "EdgeRunner Metal4 Decode"
+        resDesc.initialCapacity = 256
+        self.residencySet = try device.makeResidencySet(descriptor: resDesc)
+
+    }
+
+    /// Populate the residency set with all buffers used during decode.
+    /// Must be called after weights are preloaded.
+    func populateResidencySet(
+        scratch: ScratchBuffers,
+        layerKCaches: [MTLBuffer],
+        layerVCaches: [MTLBuffer],
+        preloadedWeights: PreloadedWeightsStore
+    ) {
+        // Add scratch buffers
+        let scratchBuffers: [MTLBuffer] = [
+            scratch.normed, scratch.afterAttn, scratch.ffnNormed,
+            scratch.outputA, scratch.outputB, scratch.allQ, scratch.allK,
+            scratch.allV, scratch.ropeQ, scratch.attnOut, scratch.proj,
+            scratch.gateOut, scratch.upOut, scratch.activ, scratch.downOut,
+            scratch.finalOut, scratch.logits, scratch.decodeHidden
+        ]
+        for buf in scratchBuffers {
+            residencySet.addAllocation(buf)
+        }
+
+        // Add KV caches
+        for buf in layerKCaches { residencySet.addAllocation(buf) }
+        for buf in layerVCaches { residencySet.addAllocation(buf) }
+
+        // Add params buffer
+        residencySet.addAllocation(paramsBuffer)
+
+        // Add weight buffers
+        for lw in preloadedWeights.layers {
+            residencySet.addAllocation(lw.attnNorm)
+            residencySet.addAllocation(lw.wq)
+            residencySet.addAllocation(lw.wk)
+            residencySet.addAllocation(lw.wv)
+            residencySet.addAllocation(lw.wo)
+            if let q = lw.qNorm { residencySet.addAllocation(q) }
+            if let k = lw.kNorm { residencySet.addAllocation(k) }
+            residencySet.addAllocation(lw.ffnNorm)
+            residencySet.addAllocation(lw.gate)
+            residencySet.addAllocation(lw.up)
+            residencySet.addAllocation(lw.down)
+            if let b = lw.wqRaw { residencySet.addAllocation(b) }
+            if let b = lw.wkRaw { residencySet.addAllocation(b) }
+            if let b = lw.wvRaw { residencySet.addAllocation(b) }
+            if let b = lw.woRaw { residencySet.addAllocation(b) }
+            if let b = lw.gateRaw { residencySet.addAllocation(b) }
+            if let b = lw.upRaw { residencySet.addAllocation(b) }
+            if let b = lw.downRaw { residencySet.addAllocation(b) }
+        }
+
+        if let fn = preloadedWeights.finalNorm { residencySet.addAllocation(fn) }
+        if let lm = preloadedWeights.lmHead { residencySet.addAllocation(lm) }
+        if let lmRaw = preloadedWeights.lmHeadRaw { residencySet.addAllocation(lmRaw) }
+
+        residencySet.commit()
+        residencySet.requestResidency()
     }
 }
 
