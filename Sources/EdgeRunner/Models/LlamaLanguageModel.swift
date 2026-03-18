@@ -339,10 +339,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let warmupHidden = scratch.decodeHidden
                 let dummyPtr = warmupHidden.contents().bindMemory(to: Float.self, capacity: dim)
                 memset(dummyPtr, 0, dim * floatStride)
-                // Run 15 dummy decodes to aggressively warm GPU pipeline, command processor
-                // cache, DRAM page tables, and TLB entries for all weight buffers.
-                // Empirically optimal: 3→15 warmups = +6% median throughput (343→364 tok/s).
-                for warmupIdx in 0..<15 {
+                // Run 5 dummy decodes to warm GPU pipeline for decode-specific kernel variants.
+                // 5 is the sweet spot: eliminates JIT cold-start penalty without excessive
+                // first-call latency (~18ms warmup vs ~55ms for 15).
+                for warmupIdx in 0..<5 {
                     let warmupPos = seqLen + warmupIdx
                     kvCache.setPosition(warmupPos)  // Set position so mega-kernel uses correct kvSeqLen
                     if let paramsBuf = decodeParamsBuffer, preloadedWeights.layers.first?.wqRaw != nil {
