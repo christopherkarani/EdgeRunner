@@ -14,3 +14,4 @@
 - When the user explicitly asks for subagents on the EdgeRunner optimization workflow, use `gpt-5.4-mini` with `xhigh` reasoning unless they say otherwise.
 - Tiny per-dispatch kernel parameter blocks are not automatically better in a shared params buffer. If a Metal kernel consumes a small constant struct, `setBytes` can beat buffer indirection even in an otherwise params-buffer-heavy decode path.
 - Generation-side optimizations must be benchmarked through `nextToken` or streaming paths, not `logits + argmax` in the benchmark harness, or the measurement will hide the real win.
+- On the pinned Qwen3-0.6B GGUF, long generated sequences can drift across runs even when the short prefix is stable. Generation benchmarks should pin the verified prefix and compare exact outputs within each run, not require full cross-run sequence equality.

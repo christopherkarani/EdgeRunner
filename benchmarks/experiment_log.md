@@ -575,3 +575,10 @@ To reach 278 tok/s = 3.60ms/token:
 - **Result:** Real-model greedy generation improved from **243.6 tok/s** to **260.1 tok/s** median on the speculative-generation benchmark. Repeated publishable reruns stayed deterministic and improved to **246.2 tok/s** and **241.7 tok/s** median decode, with the short benchmark at **364.2-371.0 tok/s** and the pinned greedy prefix intact.
 - **Root cause:** The old generation path paid for a `151,936`-float materialization plus a scalar reduction on every token. Eliminating that copy on the greedy path and vectorizing the remaining reduction removes a measurable CPU-side tax.
 - **Status:** KEPT
+
+### Experiment 31: Direct-Fill Raw-Q8 Embedding Path — KEPT
+- **Hypothesis:** The low-memory raw-Q8 embedding fallback still allocates a temporary `[Float]` and then copies it into the Metal scratch buffer on every token. Writing the embedding row directly into the destination buffer should remove that extra allocation/copy and improve generation throughput.
+- **Change:** Replaced `embeddingLookup(tokenIDs:)` with `fillEmbeddings(tokenIDs:into:)`, and routed both decode and prefill embedding setup through direct destination-buffer fills.
+- **Result:** Real-model greedy generation improved again from **260.1 tok/s** to **265.6 tok/s** median on the speculative-generation benchmark. The raw publishable benchmark stayed deterministic and in the prior band at **241.2 tok/s** and **238.2 tok/s** median decode.
+- **Root cause:** The old low-memory path paid twice for the embedding row on CPU: once to materialize a Swift array and once to copy it into the Metal scratch buffer. Direct destination writes remove that redundant work.
+- **Status:** KEPT

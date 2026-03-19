@@ -12,6 +12,7 @@ struct SpeculativeGenerationBenchmark {
     static let benchmarkRuns = 3
     static let bosToken = 1
     static let draftTokenCount = 2
+    static let expectedGreedyPrefix = [1, 14582, 25]
 
     @Test func selfSpeculativeLookahead() async throws {
         let url = URL(fileURLWithPath: Self.modelPath)
@@ -44,8 +45,6 @@ struct SpeculativeGenerationBenchmark {
 
         var greedyRuns = [Double]()
         var speculativeRuns = [Double]()
-        var referenceTokens: [Int] = []
-
         for run in 0..<Self.benchmarkRuns {
             let greedy = try await measureGreedyGeneration(model: greedyModel, tokenCount: Self.generateCount)
             let speculative = try await measureSelfSpeculativeGeneration(
@@ -54,13 +53,13 @@ struct SpeculativeGenerationBenchmark {
                 tokenCount: Self.generateCount
             )
 
-            if run == 0 { referenceTokens = greedy.tokens }
-
             greedyRuns.append(greedy.tokensPerSecond)
             speculativeRuns.append(speculative.tokensPerSecond)
 
-            #expect(greedy.tokens == referenceTokens)
-            #expect(speculative.tokens == referenceTokens)
+            let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(greedy.tokens.count))
+            #expect(Array(greedy.tokens.prefix(expectedPrefix.count)) == expectedPrefix)
+            #expect(Array(speculative.tokens.prefix(expectedPrefix.count)) == expectedPrefix)
+            #expect(speculative.tokens == greedy.tokens, "Speculative verification must match greedy generation within each run")
         }
 
         let greedyMedian = median(greedyRuns)

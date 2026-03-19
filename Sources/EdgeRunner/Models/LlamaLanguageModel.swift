@@ -281,11 +281,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let clampedID = min(max(newTokenID, 0), config.vocabSize - 1)
                 memcpy(dstPtr, embPtr + clampedID * dim, dim * floatStride)
             } else {
-                let embeddingFloats = try await embeddingLookup(tokenIDs: [newTokenID])
                 let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
-                _ = embeddingFloats.withUnsafeBufferPointer { src in
-                    memcpy(dstPtr, src.baseAddress!, min(embeddingFloats.count, dim) * floatStride)
-                }
+                try fillEmbeddings(tokenIDs: [newTokenID], into: dstPtr)
             }
 
             let logitsBuf: MTLBuffer
@@ -332,12 +329,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     memcpy(dstPtr + i * dim, embPtr + clampedID * dim, dim * floatStride)
                 }
             } else {
-                let embeddingFloats = try await embeddingLookup(tokenIDs: tokenIDs)
-                hiddenBuf = device.makeBuffer(
-                    bytes: embeddingFloats,
-                    length: embeddingFloats.count * floatStride,
-                    options: .storageModeShared
-                )!
+                guard let hBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared) else {
+                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for prefill embedding")
+                }
+                hiddenBuf = hBuf
+                let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
+                try fillEmbeddings(tokenIDs: tokenIDs, into: dstPtr)
             }
 
             var logitsBuf = try await fusedPrefillPass(
@@ -1994,8 +1991,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return try await readWeightBuffer(name)
     }
 
-    /// Embedding lookup — dequantizes only the needed rows, not the full table.
-    private func embeddingLookup(tokenIDs: [Int]) async throws -> [Float] {
+    /// Fills embedding rows directly into the destination buffer, avoiding an intermediate array.
+    private func fillEmbeddings(
+        tokenIDs: [Int],
+        into destination: UnsafeMutablePointer<Float>
+    ) throws {
         let dim = config.embeddingDim
 
         let weightName = tiedEmbeddingWeightName
@@ -2003,8 +2003,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.modelLoadFailed(reason: "Missing \(weightName)")
         }
 
-        var result = [Float](repeating: 0, count: tokenIDs.count * dim)
         let basePtr = storage.buffer.contents() + storage.byteOffset
+        let floatStride = MemoryLayout<Float>.stride
 
         switch storage.dataType {
         case .float32:
@@ -2013,9 +2013,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
                 let srcOffset = clampedID * dim
                 let dstOffset = i * dim
-                for d in 0..<dim {
-                    result[dstOffset + d] = ptr[srcOffset + d]
-                }
+                memcpy(destination + dstOffset, ptr + srcOffset, dim * floatStride)
             }
 
         case .float16:
@@ -2025,7 +2023,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let srcOffset = clampedID * dim
                 let dstOffset = i * dim
                 for d in 0..<dim {
-                    result[dstOffset + d] = Float(ptr[srcOffset + d])
+                    destination[dstOffset + d] = Float(ptr[srcOffset + d])
                 }
             }
 
@@ -2046,7 +2044,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     let scale = Float(Float16(bitPattern: scaleBits))
                     for j in 0..<elementsPerBlock {
                         let qval = Int8(bitPattern: rawPtr[blockStart + 2 + j])
-                        result[dstOffset + block * elementsPerBlock + j] = scale * Float(qval)
+                        destination[dstOffset + block * elementsPerBlock + j] = scale * Float(qval)
                     }
                 }
             }
@@ -2070,8 +2068,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         let byte = rawPtr[blockStart + 2 + j]
                         let lo = Int(byte & 0x0F) - 8
                         let hi = Int(byte >> 4) - 8
-                        result[dstOffset + block * elementsPerBlock + j * 2] = scale * Float(lo)
-                        result[dstOffset + block * elementsPerBlock + j * 2 + 1] = scale * Float(hi)
+                        destination[dstOffset + block * elementsPerBlock + j * 2] = scale * Float(lo)
+                        destination[dstOffset + block * elementsPerBlock + j * 2 + 1] = scale * Float(hi)
                     }
                 }
             }
@@ -2081,8 +2079,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 reason: "Unsupported embedding data type: \(storage.dataType)"
             )
         }
-
-        return result
     }
 
     /// Compute LM head logits using tied embedding weights (CPU fallback).

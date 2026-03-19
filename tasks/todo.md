@@ -19,7 +19,7 @@
 - [x] Rank 2: Reduce decode dispatch overhead with further hot-path fusion and replay-friendly command encoding.
 - [ ] Rank 3: Prototype mixed-bit PTQ and KV-cache quantization paths that do not require any model retraining.
 - [ ] Rank 4: Add prompt-lookup speculation with exact verification and keep it only if common prompts benefit.
-- [ ] Rank 5: Refine the low-memory raw-Q8 embedding / LM-head path for deterministic speed and memory wins.
+- [x] Rank 5: Refine the low-memory raw-Q8 embedding / LM-head path for deterministic speed and memory wins.
 - [ ] Rank 6: Investigate bounded ANE / heterogeneous execution paths and keep only anything measurable on this machine.
 - [ ] Rank 7: Try `LLM-in-a-Flash` style memory-layout / streaming changes where they fit the current kernels.
 - [ ] Log all kept and rejected branches in `benchmarks/experiment_log.md`.
@@ -35,6 +35,7 @@
 - Rank 1 bounded result: a real-model speculative generation benchmark now exists, and the minimal exact self-speculative prototype was rejected immediately. Using a full-size Qwen draft model plus exact prefix verification landed at **33.2 tok/s** versus **243.6 tok/s** for plain greedy generation, so current EdgeRunner cannot afford no-training speculative draft work unless the drafter is much cheaper or verification becomes genuinely parallel.
 - Rank 2 bounded result: no extra low-risk dispatch-count win emerged inside the current Metal 3 `fusedDecodePassOpt` path. A micro-experiment that moved the final raw-Q8 LM-head params from `setBytes` into the shared params buffer regressed badly and was dropped.
 - The kept rank 2 win is CPU-side instead: `LlamaLanguageModel` now specializes greedy `nextToken` so generation can stay on the logits buffer and skip full vocab array materialization, and the greedy argmax path now uses Accelerate (`vDSP_maxvi`) instead of a scalar scan. Real-model greedy generation improved from **243.6 tok/s** to **260.1 tok/s** on the speculative-generation benchmark, while repeated publishable reruns stayed deterministic and landed at **246.2 tok/s** and **241.7 tok/s** with **268-269 MB** peak RSS.
+- Rank 5 bounded result: the low-memory raw-Q8 embedding fallback now writes rows directly into the destination buffer instead of allocating a temporary `[Float]` and copying it again into Metal scratch. On the real-model generation benchmark, greedy generation improved again from **260.1 tok/s** to **265.6 tok/s**. The raw publishable benchmark stayed deterministic and roughly flat in the existing band at **241.2 tok/s** and **238.2 tok/s**, so this is a generation-path cleanup, not a decode-throughput breakthrough.
 
 # Flash-Decode GQA + Q8 GEMV Bandwidth
 
