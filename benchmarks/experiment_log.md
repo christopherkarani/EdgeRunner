@@ -554,3 +554,10 @@ To reach 278 tok/s = 3.60ms/token:
 - **Result:** Stable repeated publishable runs at **239.6 tok/s** and **238.0 tok/s** median decode, both deterministic `YES`, with **268-269 MB** peak RSS. Short benchmark refreshed to **374.9 tok/s** with greedy prefix `[1, 14582, 25, 16246, 264]`.
 - **Root cause:** The previous low-memory fallback was silently reading from `embedding.weight` while the original path used tied `lmHead.weight`, creating long-run instability. Once the tied source was fixed, the low-memory path became reproducible and could safely benefit from one fewer LM-head dispatch.
 - **Status:** KEPT
+
+### Experiment 28: Real-Model Self-Speculative Lookahead Harness — ROLLED BACK
+- **Hypothesis:** A bounded no-training speculative generation prototype would show whether exact prefix verification can beat plain greedy generation on the current decode path before investing in deeper tree-attention work.
+- **Change:** Added a real-model speculative generation benchmark using existing `SpeculativeDecoder` infrastructure and benchmarked a full-size Qwen draft model against a full-size Qwen verification model with `draftTokenCount = 2`.
+- **Result:** Massive regression. Plain greedy generation measured **243.6 tok/s** median, while the exact self-speculative path measured **33.2 tok/s** median (**-86.4%**).
+- **Root cause:** The current engine pays nearly the full decode cost for the draft model and then pays again for verification. Without a materially cheaper drafter or genuinely parallel verification, no-training speculation is a losing tradeoff on this stack.
+- **Status:** ROLLED BACK

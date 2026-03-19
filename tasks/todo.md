@@ -15,7 +15,7 @@
 
 ## Ranked Plan
 - [x] Reconfirm the current best kept publishable benchmark and record it as the revert point for this program.
-- [ ] Rank 1: Prototype `Lookahead + Sequoia` style inference-time tree verification on the deterministic decode path.
+- [x] Rank 1: Prototype `Lookahead + Sequoia` style inference-time tree verification on the deterministic decode path.
 - [ ] Rank 2: Reduce decode dispatch overhead with further hot-path fusion and replay-friendly command encoding.
 - [ ] Rank 3: Prototype mixed-bit PTQ and KV-cache quantization paths that do not require any model retraining.
 - [ ] Rank 4: Add prompt-lookup speculation with exact verification and keep it only if common prompts benefit.
@@ -32,6 +32,7 @@
   - publishable rerun 1: **234.4 tok/s** median decode, **269 MB** peak RSS, determinism failed
   - publishable rerun 2: **236.0 tok/s** median decode, **271 MB** peak RSS, deterministic `YES`
 - The working rule for this program is therefore: only keep a new optimization if it beats the best kept state after repeated publishable reruns, not just a single fast sample.
+- Rank 1 bounded result: a real-model speculative generation benchmark now exists, and the minimal exact self-speculative prototype was rejected immediately. Using a full-size Qwen draft model plus exact prefix verification landed at **33.2 tok/s** versus **243.6 tok/s** for plain greedy generation, so current EdgeRunner cannot afford no-training speculative draft work unless the drafter is much cheaper or verification becomes genuinely parallel.
 
 # Flash-Decode GQA + Q8 GEMV Bandwidth
 
