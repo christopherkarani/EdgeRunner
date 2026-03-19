@@ -582,3 +582,10 @@ To reach 278 tok/s = 3.60ms/token:
 - **Result:** Real-model greedy generation improved again from **260.1 tok/s** to **265.6 tok/s** median on the speculative-generation benchmark. The raw publishable benchmark stayed deterministic and in the prior band at **241.2 tok/s** and **238.2 tok/s** median decode.
 - **Root cause:** The old low-memory path paid twice for the embedding row on CPU: once to materialize a Swift array and once to copy it into the Metal scratch buffer. Direct destination writes remove that redundant work.
 - **Status:** KEPT
+
+### Experiment 32: Prompt-Lookup Speculation — ROLLED BACK
+- **Hypothesis:** A cheap prompt-lookup drafter might recover some speculative-decoding gain without paying for a second model, especially once repeated phrases appear in the generated sequence.
+- **Change:** Added a prompt-lookup drafting prototype on top of the generation fast path and benchmarked it against plain greedy generation using exact verifier calls from the main model.
+- **Result:** Essentially flat to slightly negative. Across repeated runs the prompt-lookup path hovered around parity with greedy generation (`+0.2%` on one run, `-0.1%` on another) and did not justify extra code. The branch was removed.
+- **Root cause:** On this benchmark surface the heuristic rarely finds high-value drafts early enough, and exact verification still costs nearly the same as plain generation. Without a stronger drafting signal, prompt lookup is noise.
+- **Status:** ROLLED BACK
