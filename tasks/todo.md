@@ -1,3 +1,64 @@
+# Model Quality Comparison: Qwen3 0.6B vs 1.7B vs 4B
+
+## Goal
+- Add a separate, manual long-form quality harness that compares the official `Qwen3` `0.6B`, `1.7B`, and `4B` `Q8_0` GGUFs.
+- Use proper pre-tokenized prompts and GGUF vocabulary decoding so the comparison does not depend on EdgeRunner's current byte-tokenized string API.
+
+## Plan
+- [x] Reuse the existing coherence-test tokenizer/vocabulary helpers instead of routing through `GenerationSession`.
+- [x] Add a manual, env-gated quality comparison test that generates a long story for each model sequentially.
+- [x] Run the comparison harness and capture full outputs plus basic timing and word-count metrics.
+- [x] Summarize the observed quality differences and any limitations of the current decode path.
+
+## Review
+- Added [`QwenQualityComparisonTest.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenQualityComparisonTest.swift), a manual harness gated by `EDGERUNNER_RUN_QUALITY_COMPARISON=1` so normal test runs stay fast.
+- The harness reuses the pre-tokenized prompt approach and GGUF vocabulary decoding strategy from [`CoherenceTest.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/CoherenceTest.swift) instead of the public string-tokenization path, which is still byte-based in [`LlamaLanguageModel.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift).
+- On the story prompt `"Write a literary short story about a lighthouse keeper who discovers the sea can remember names.\n\nStory:\n"` with `384` greedy-generated tokens, the observed outputs were:
+  - `0.6B Q8_0`: **125.9 tok/s**, `347` words, but it collapsed into bullet-point prompt restatement and repetitive "the story should..." instructions.
+  - `1.7B Q8_0`: **57.3 tok/s**, `317` words, and produced the best long-form output of the three: a coherent named setting, character, and narrative progression.
+  - `4B Q8_0`: **28.5 tok/s**, `378` words, but produced pathological repetition (`"the sea the sea..."`) rather than a better story.
+- A follow-up vocabulary sanity check showed that the pre-tokenized prompt IDs map to the same token pieces across the `0.6B`, `1.7B`, and `4B` GGUFs, so the bad `4B` story output is not caused by a tokenizer mismatch. That makes the `4B` result a runtime/model-behavior issue worth sanity-checking separately before treating it as a reliable quality comparison.
+
+# Model Download: Qwen3 Larger-Model Quality Comparison
+
+## Goal
+- Download the nearest official larger Qwen3 GGUF checkpoints for quality comparison against the pinned `0.6B` baseline.
+- Keep the first comparison on `Q8_0` so model-size effects are not conflated with more aggressive quantization loss.
+
+## Plan
+- [x] Verify the exact official Qwen3 GGUF variants that exist for this comparison.
+- [x] Download `Qwen3-1.7B-Q8_0.gguf` into `/tmp/edgerunner-models`.
+- [x] Download `Qwen3-4B-Q8_0.gguf` into `/tmp/edgerunner-models`.
+- [x] Record the exact local paths, sizes, and checksums for both files.
+
+## Review
+- Official Qwen3 GGUF releases for this family exist at `1.7B` and `4B`, not exact `1B` and `3B`, so this comparison uses the nearest official larger checkpoints.
+- The downloaded local artifacts are:
+  - `/tmp/edgerunner-models/Qwen3-1.7B-Q8_0.gguf` — `1,834,426,016` bytes — SHA-256 `061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a`
+  - `/tmp/edgerunner-models/Qwen3-4B-Q8_0.gguf` — `4,280,404,704` bytes — SHA-256 `8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300`
+- A failed fallback transfer briefly created an extra partial file during the 1.7B download, but it was cleaned up after verification so the pinned artifact set is now just the two official Q8 files above.
+
+# Qwen GGUF -> Espresso Bridge
+
+## Goal
+- Preserve Qwen-family explicit head dimension metadata through the Espresso bridge.
+- Export per-layer Q/K RMSNorm tensors for llama/qwen-family GGUF models without regressing existing llama/gpt2 behavior.
+
+## Plan
+- [x] Verify `EspressoModelConfig` keeps explicit `attention.key_length` as `headDim`.
+- [x] Verify the llama-family tensor mapper exports `attn_q_norm.weight` and `attn_k_norm.weight` to stable artifact paths.
+- [x] Add converter regressions proving Q/K norm blobs are emitted when present and tied embeddings remain optional.
+- [x] Run the smallest focused Espresso bridge test set and record the outcome.
+
+## Review
+- `EspressoModelConfigTests` now covers both prefixed and unprefixed Qwen-style `attention.key_length` metadata and confirms `headDim` stays explicit instead of falling back to `embedding_length / attention.head_count`.
+- The mapper regression suite now proves `attn_q_norm.weight` and `attn_k_norm.weight` export to `layers/<n>/q_norm.bin` and `layers/<n>/k_norm.bin` for both `llama` and `qwen3`, while GPT-2 and existing llama mappings remain unchanged.
+- The converter regression suite now proves Q/K norm blobs are emitted when present and that conversion still succeeds with tied embeddings when `output.weight` is absent.
+- Focused verification passed with:
+  - `swift test --filter EspressoModelConfigTests`
+  - `swift test --filter EspressoTensorNameMapperTests`
+  - `swift test --filter WeightConverterTests`
+
 # No-Training Breakthrough Program
 
 ## Goal
@@ -24,6 +85,13 @@
 - [ ] Rank 7: Try `LLM-in-a-Flash` style memory-layout / streaming changes where they fit the current kernels.
 - [ ] Log all kept and rejected branches in `benchmarks/experiment_log.md`.
 - [ ] Summarize results and new branches in the review section below.
+
+## Current Iteration
+- [ ] Roll back the unfinished prefill scratch-buffer reuse experiment and restore the last deterministic publishable state.
+- [ ] Parallelize remaining exploration with `gpt-5.4-mini` `xhigh` subagents for rank 3 feasibility, rank 6 ANE/Espresso feasibility, and micro-optimization opportunities around touched decode paths.
+- [ ] Attempt a bounded rank 3 implementation only if the quantization path fits the current GGUF/runtime architecture without retraining.
+- [ ] Attempt a bounded rank 6 implementation only if the existing Espresso/ANE bridge can execute a measurable decode subgraph on this machine.
+- [ ] Attempt the next rank 7 memory-layout experiment only after the publishable baseline is deterministic again.
 
 ## Review
 - Revert point for this program remains commit `452455e` (`perf: fix tied Q8 embedding path and fuse LM head — 226.3 -> 239.6 tok/s (+5.9%)`), which is still the best kept publishable state in repo history.
