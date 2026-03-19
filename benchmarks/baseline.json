@@ -8,12 +8,12 @@
     16246,
     264
   ],
-  "improvement_pct" : -3.3328609649507497,
+  "improvement_pct" : -6.1534485567400852,
   "is_improvement" : false,
   "model" : "Qwen3-0.6B-Q8_0",
   "model_file_size_bytes" : 639447744,
   "model_path" : "\/tmp\/edgerunner-models\/Qwen3-0.6B-Q8_0.gguf",
-  "ms_per_token" : 2.7591459999999999,
-  "timestamp" : "2026-03-19T03:58:57Z",
-  "tokens_per_sec" : 362.43098407985656
+  "ms_per_token" : 2.8420730000000001,
+  "timestamp" : "2026-03-19T04:16:21Z",
+  "tokens_per_sec" : 351.85584606728963
 }

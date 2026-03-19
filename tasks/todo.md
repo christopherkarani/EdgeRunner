@@ -57,6 +57,54 @@
   - `llama.cpp` on the same 4B prompt/settings: **45.85 tok/s**
 - Conclusion: `4B` correctness is restored, but the current safe path is far slower than `llama.cpp`. The next optimization work for `4B` should target a new large-shape attention path that preserves correctness without falling all the way back to the unfused base decode implementation.
 
+# 4B Parity Harness
+
+## Goal
+- Build a bounded `4B` decode parity harness that compares the current path switches in one test process.
+- Localize the first token-level divergence before writing a new large-shape attention path.
+
+## Plan
+- [x] Add programmatic decode overrides to `ModelConfiguration` so tests can instantiate multiple `LlamaLanguageModel` variants without relying on process env.
+- [x] Add an env-gated `Qwen4BParity` test that runs a small prompt set across `optimized`, `forced-base`, and `mega-disabled` decode modes.
+- [x] Record per-step argmax token, top-5 logits, and pairwise first-divergence / max-logit-delta summaries to a JSON artifact.
+- [x] Verify the harness compiles and runs on the `4B` model without regressing the `0.6B` benchmark path.
+
+## Review
+- Added per-instance decode overrides to [`ModelConfiguration.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/ModelConfiguration.swift) and threaded them through [`LlamaLanguageModel.load`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift). Tests can now instantiate multiple decode variants in one process without relying on global environment variables.
+- Added [`Qwen4BParityHarnessTest.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/Qwen4BParityHarnessTest.swift), an env-gated parity harness controlled by:
+  - `EDGERUNNER_RUN_4B_PARITY=1`
+  - `EDGERUNNER_PARITY_MAX_STEPS`
+  - `EDGERUNNER_PARITY_PROMPT_FILTER`
+  - `EDGERUNNER_PARITY_MODE_FILTER`
+  - `EDGERUNNER_PARITY_OUTPUT_PATH`
+- The harness compares four decode variants:
+  - `optimized_mega`
+  - `base_mega`
+  - `base_no_mega`
+  - `base_no_mega_no_fused_final`
+- It writes a compact JSON artifact to `/tmp/qwen_4b_parity.json` by default, including per-step argmax/top-5 plus pairwise first-divergence and max-absolute-logit-delta summaries.
+- Live `4B` smoke run on the story prompt (`4` generated steps) already localized the failure:
+  - every mega-enabled path diverged from the `base_no_mega` safe path at **step 1**
+  - `base_no_mega` and `base_no_mega_no_fused_final` matched exactly for argmax, with only floating-point noise in logits
+- Full default run (`8` steps across story, completion, and chat prompts) sharpened that:
+  - `story`: all mega-enabled paths diverge at **step 1**
+  - `capital_of_france`: mega vs no-mega stays aligned longer, then diverges at **step 5**
+  - `chat_2_plus_2`: no argmax divergence within `8` steps despite large logit deltas
+  - `base_no_mega` vs `base_no_mega_no_fused_final`: **no argmax divergence anywhere** in the run, with effectively zero logit delta
+- That makes the current evidence much tighter:
+  - the large-shape mega attention path is the primary live suspect
+  - the fused final norm + LM-head path is not the first failure on the tested prompts
+- Verification passed with:
+  - `swift test -c release --filter "Qwen4BParityHarnessTest"`
+  - `EDGERUNNER_RUN_4B_PARITY=1 EDGERUNNER_PARITY_PROMPT_FILTER=story EDGERUNNER_PARITY_MAX_STEPS=4 swift test -c release --filter "Qwen4BParityHarnessTest/parityHarness"`
+  - `EDGERUNNER_RUN_4B_PARITY=1 swift test -c release --filter "Qwen4BParityHarnessTest/parityHarness"`
+  - `swift test -c release --filter "QwenBenchmark/decodeBenchmark"`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Current post-harness benchmark state remains healthy:
+  - `0.6B` short benchmark: **351.9 tok/s**, pinned prefix preserved
+  - `0.6B` publishable benchmark: **236.7 tok/s** median decode, **3.2 ms** TTFT, deterministic `YES`
+- Best next move after this harness is now narrower than before: build a shape-correct large-model decode attention path and use this parity suite as the regression gate.
+
 # Model Download: Qwen3 Larger-Model Quality Comparison
 
 ## Goal

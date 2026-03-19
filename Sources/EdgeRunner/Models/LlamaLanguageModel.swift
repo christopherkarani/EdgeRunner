@@ -90,6 +90,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let decodeDebugOptions: DecodeDebugOptions
 
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
+        try self.init(model: model, maxSeqLen: maxSeqLen, decodeDebugOptions: nil)
+    }
+
+    fileprivate init(
+        model: LlamaModel,
+        maxSeqLen: Int = 4096,
+        decodeDebugOptions: DecodeDebugOptions?
+    ) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
         }
@@ -101,9 +109,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.weights = model.loadedWeights
         self.device = device
         self.commandQueue = queue
-        self.decodeDebugOptions = DecodeDebugOptions(
+        self.decodeDebugOptions = decodeDebugOptions ?? DecodeDebugOptions(
             environment: ProcessInfo.processInfo.environment,
-            config: model.config
+            config: model.config,
+            overrides: nil
         )
 
         // Initialize Metal kernels
@@ -225,7 +234,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         try model.loadWeights(from: weightMap)
         return try LlamaLanguageModel(
             model: model,
-            maxSeqLen: configuration.contextWindowSize
+            maxSeqLen: configuration.contextWindowSize,
+            decodeDebugOptions: DecodeDebugOptions(
+                environment: ProcessInfo.processInfo.environment,
+                config: ggufConfig,
+                overrides: configuration.llamaDecodeOverrides
+            )
         )
     }
 
@@ -2343,11 +2357,21 @@ private struct DecodeDebugOptions: Sendable {
         forceBaseDecodePath || disableMegaKernel
     }
 
-    init(environment: [String: String], config: LlamaConfig) {
+    init(
+        environment: [String: String],
+        config: LlamaConfig,
+        overrides: LlamaDecodeOverrides?
+    ) {
         let autoDisableMegaKernel = config.headCount + config.kvHeadCount > 24
-        self.forceBaseDecodePath = Self.isEnabled(environment["EDGERUNNER_DECODE_FORCE_BASE"])
-        self.disableMegaKernel = autoDisableMegaKernel || Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_MEGA_GQA"])
-        self.disableFusedFinalNormLMHead = Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
+        self.forceBaseDecodePath =
+            overrides?.forceBaseDecodePath
+            ?? Self.isEnabled(environment["EDGERUNNER_DECODE_FORCE_BASE"])
+        self.disableMegaKernel =
+            overrides?.disableMegaKernel
+            ?? (autoDisableMegaKernel || Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_MEGA_GQA"]))
+        self.disableFusedFinalNormLMHead =
+            overrides?.disableFusedFinalNormLMHead
+            ?? Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
     }
 
     private static func isEnabled(_ value: String?) -> Bool {
