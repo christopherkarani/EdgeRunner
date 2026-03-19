@@ -19,6 +19,44 @@
   - `4B Q8_0`: **28.5 tok/s**, `378` words, but produced pathological repetition (`"the sea the sea..."`) rather than a better story.
 - A follow-up vocabulary sanity check showed that the pre-tokenized prompt IDs map to the same token pieces across the `0.6B`, `1.7B`, and `4B` GGUFs, so the bad `4B` story output is not caused by a tokenizer mismatch. That makes the `4B` result a runtime/model-behavior issue worth sanity-checking separately before treating it as a reliable quality comparison.
 
+# 4B Correctness Recovery
+
+## Goal
+- Restore coherent `Qwen3-4B-Q8_0` generation in EdgeRunner before any more large-model optimization work.
+- Isolate whether the first correctness break comes from the optimized Metal 3 decode path, the mega fused Q/K norm + RoPE + GQA kernel, or the fused final norm + LM-head kernel.
+
+## Plan
+- [x] Add a bounded decode safe-mode switch that can force `4B` off `fusedDecodePassOpt` and onto the more debuggable base decode path.
+- [x] Add targeted env toggles to disable the mega fused attention kernel and the fused final norm + LM-head kernel independently.
+- [x] Extend the manual quality harness so it can run a single selected model per invocation.
+- [x] Run the `4B` story harness across the fallback combinations until the first coherent path appears.
+- [x] Once coherence is restored, add a regression harness for early-token sanity and measure the recovered path against `llama.cpp`.
+
+## Review
+- The optimized Metal 3 decode path had a real correctness bug: `fusedDecodePassOpt` only rebound the QKV input hidden-state buffer on layer `0`, so later layers kept reading the original token embedding. Rebinding `currentHidden` on every layer fixed that issue without hurting the `0.6B` benchmark path.
+- `Qwen3-4B-Q8_0` was still broken after that fix until the mega fused Q/K norm + RoPE + GQA kernel was disabled. The working isolation matrix on the 160-token story harness was:
+  - optimized path (after `currentHidden` fix): **26.2 tok/s**, still incoherent (`"The sea was ro..."`)
+  - base decode path with mega kernel still enabled: **36.9 tok/s**, still incoherent (`"The- Title: The..."`)
+  - base decode path with mega kernel disabled: **10.6 tok/s**, coherent story output beginning `"The lighthouse keeper, Elias, had been alone for years."`
+- The first correctness break is therefore the mega fused decode attention kernel, not the fused final norm + LM-head path. The recovered default now automatically routes large decode shapes (`headCount + kvHeadCount > 24`) away from that mega kernel and onto the debuggable base decode path.
+- Added env controls for further bisects:
+  - `EDGERUNNER_DECODE_FORCE_BASE=1`
+  - `EDGERUNNER_DECODE_DISABLE_MEGA_GQA=1`
+  - `EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD=1`
+- Added `EDGERUNNER_QUALITY_MODEL_FILTER` to the long-form quality harness and a new env-gated regression `recovered4BStoryPrefix` guarded by `EDGERUNNER_RUN_4B_RECOVERY_CHECK=1`.
+- Verification passed with:
+  - `swift test -c release --filter "QwenQualityComparisonTest"`
+  - `EDGERUNNER_RUN_4B_RECOVERY_CHECK=1 swift test -c release --filter "QwenQualityComparisonTest/recovered4BStoryPrefix"`
+  - `EDGERUNNER_RUN_QUALITY_COMPARISON=1 EDGERUNNER_QUALITY_MODEL_FILTER=4B EDGERUNNER_QUALITY_MAX_TOKENS=160 swift test -c release --filter "QwenQualityComparisonTest/storyComparison"`
+  - `swift test -c release --filter "QwenBenchmark/decodeBenchmark"`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Current stable results:
+  - `0.6B` short benchmark: **362.4 tok/s**, pinned prefix `[1, 14582, 25, 16246, 264]`
+  - `0.6B` publishable benchmark: **234.8 tok/s** median decode, **3.2 ms** TTFT, deterministic `YES`
+  - `4B` recovered long-form story path: **10.7 tok/s**
+  - `llama.cpp` on the same 4B prompt/settings: **45.85 tok/s**
+- Conclusion: `4B` correctness is restored, but the current safe path is far slower than `llama.cpp`. The next optimization work for `4B` should target a new large-shape attention path that preserves correctness without falling all the way back to the unfused base decode implementation.
+
 # Model Download: Qwen3 Larger-Model Quality Comparison
 
 ## Goal

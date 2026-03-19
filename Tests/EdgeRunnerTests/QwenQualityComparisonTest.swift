@@ -20,6 +20,8 @@ struct QwenQualityComparisonTest {
 
     static let runEnvKey = "EDGERUNNER_RUN_QUALITY_COMPARISON"
     static let maxTokensEnvKey = "EDGERUNNER_QUALITY_MAX_TOKENS"
+    static let modelFilterEnvKey = "EDGERUNNER_QUALITY_MODEL_FILTER"
+    static let recoveryCheckEnvKey = "EDGERUNNER_RUN_4B_RECOVERY_CHECK"
     static let defaultGenerateCount = 384
     static let modelCases = [
         ModelCase(label: "Qwen3 0.6B Q8_0", path: "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"),
@@ -47,6 +49,9 @@ struct QwenQualityComparisonTest {
         }
 
         let generateCount = Int(ProcessInfo.processInfo.environment[Self.maxTokensEnvKey] ?? "") ?? Self.defaultGenerateCount
+        let requestedModelFilter = ProcessInfo.processInfo.environment[Self.modelFilterEnvKey]
+        let selectedModels = Self.modelCases(matching: requestedModelFilter)
+        #expect(!selectedModels.isEmpty, "No model matches \(requestedModelFilter ?? "<nil>")")
         Swift.print("")
         Swift.print(String(repeating: "=", count: 72))
         Swift.print("  QWEN3 LONG-FORM QUALITY COMPARISON")
@@ -54,13 +59,40 @@ struct QwenQualityComparisonTest {
         Swift.print("  Prompt: \(Self.storyPromptText.debugDescription)")
         Swift.print("  Prompt token count: \(Self.storyPrompt.count)")
         Swift.print("  Max generated tokens per model: \(generateCount)")
+        if let requestedModelFilter, !requestedModelFilter.isEmpty {
+            Swift.print("  Model filter: \(requestedModelFilter)")
+        }
         Swift.print(String(repeating: "=", count: 72))
         Swift.print("")
 
-        for modelCase in Self.modelCases {
+        for modelCase in selectedModels {
             #expect(FileManager.default.fileExists(atPath: modelCase.path), "Missing model file at \(modelCase.path)")
             let sample = try await Self.generateStory(for: modelCase, generateCount: generateCount)
             Self.printSample(sample)
+        }
+    }
+
+    @Test
+    func recovered4BStoryPrefix() async throws {
+        guard ProcessInfo.processInfo.environment[Self.recoveryCheckEnvKey] == "1" else {
+            Swift.print("SKIP: Set \(Self.recoveryCheckEnvKey)=1 to run the recovered 4B story regression.")
+            return
+        }
+
+        let modelCase = try #require(Self.modelCases.first(where: { $0.label.contains("4B") }))
+        let sample = try await Self.generateStory(for: modelCase, generateCount: 64)
+
+        #expect(
+            sample.text.hasPrefix("The lighthouse keeper, Elias, had been alone for years."),
+            "Recovered 4B path should start with the coherent story prefix"
+        )
+    }
+
+    private static func modelCases(matching filter: String?) -> [ModelCase] {
+        guard let filter, !filter.isEmpty else { return Self.modelCases }
+        let normalized = filter.lowercased()
+        return Self.modelCases.filter { modelCase in
+            modelCase.label.lowercased().contains(normalized) || modelCase.path.lowercased().contains(normalized)
         }
     }
 

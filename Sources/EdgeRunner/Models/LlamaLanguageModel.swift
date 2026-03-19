@@ -87,6 +87,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // Params buffer for optimized Metal 3 decode path
     private let decodeParamsBuffer: MTLBuffer?
+    private let decodeDebugOptions: DecodeDebugOptions
 
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -100,6 +101,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.weights = model.loadedWeights
         self.device = device
         self.commandQueue = queue
+        self.decodeDebugOptions = DecodeDebugOptions(
+            environment: ProcessInfo.processInfo.environment,
+            config: model.config
+        )
 
         // Initialize Metal kernels
         self.rmsNormKernel = try RMSNormKernel(device: device)
@@ -285,25 +290,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 try fillEmbeddings(tokenIDs: [newTokenID], into: dstPtr)
             }
 
-            let logitsBuf: MTLBuffer
-            if let paramsBuf = decodeParamsBuffer, preloadedWeights.layers.first?.wqRaw != nil {
-                logitsBuf = try await fusedDecodePassOpt(
-                    hiddenBuf: hiddenBuf,
-                    currentPos: currentPos,
-                    paramsBuffer: paramsBuf
-                )
-            } else if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
-                logitsBuf = try await fusedDecodePassMetal4(
-                    hiddenBuf: hiddenBuf,
-                    currentPos: currentPos,
-                    state: m4
-                )
-            } else {
-                logitsBuf = try await fusedDecodePass(
-                    hiddenBuf: hiddenBuf,
-                    currentPos: currentPos
-                )
-            }
+            let logitsBuf = try await runDecodePass(hiddenBuf: hiddenBuf, currentPos: currentPos)
 
             // Update decoder state
             decoderState.previousTokenIDs = tokenIDs
@@ -356,13 +343,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 for warmupIdx in 0..<5 {
                     let warmupPos = seqLen + warmupIdx
                     kvCache.setPosition(warmupPos)  // Set position so mega-kernel uses correct kvSeqLen
-                    if let paramsBuf = decodeParamsBuffer, preloadedWeights.layers.first?.wqRaw != nil {
-                        _ = try await fusedDecodePassOpt(hiddenBuf: warmupHidden, currentPos: warmupPos, paramsBuffer: paramsBuf)
-                    } else if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
-                        _ = try await fusedDecodePassMetal4(hiddenBuf: warmupHidden, currentPos: warmupPos, state: m4)
-                    } else {
-                        _ = try await fusedDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
-                    }
+                    _ = try await runDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
                 }
                 // Zero ALL KV cache buffers to remove stale warmup data
                 for i in 0..<config.layerCount {
@@ -379,6 +360,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             kvCache.setPosition(seqLen)
             return logitsBuf
         }
+    }
+
+    private func runDecodePass(hiddenBuf: MTLBuffer, currentPos: Int) async throws -> MTLBuffer {
+        if !decodeDebugOptions.requiresBaseDecodePath,
+           let paramsBuf = decodeParamsBuffer,
+           preloadedWeights.layers.first?.wqRaw != nil {
+            return try await fusedDecodePassOpt(
+                hiddenBuf: hiddenBuf,
+                currentPos: currentPos,
+                paramsBuffer: paramsBuf
+            )
+        }
+
+        if !decodeDebugOptions.requiresBaseDecodePath,
+           #available(macOS 26.0, iOS 26.0, *),
+           let m4 = metal4State {
+            return try await fusedDecodePassMetal4(
+                hiddenBuf: hiddenBuf,
+                currentPos: currentPos,
+                state: m4
+            )
+        }
+
+        return try await fusedDecodePass(
+            hiddenBuf: hiddenBuf,
+            currentPos: currentPos
+        )
     }
 
     private func materializeLogits(from logitsBuf: MTLBuffer, count: Int) -> [Float] {
@@ -1022,6 +1030,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let rmsNormPSO = rmsNormKernel.pipeline
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
+        let fusedQ8PSO = fusedQ8GemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -1105,7 +1114,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // 3+4. MEGA-FUSED: Q/K norm + RoPE + GQA in SINGLE dispatch (saves 1 dispatch/layer)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
-            if hasQKNorm {
+            let useMegaKernel = hasQKNorm && !decodeDebugOptions.disableMegaKernel
+            if useMegaKernel {
                 let megaPSO = fusedNormRoPEGQAPipeline
                 enc.setComputePipelineState(megaPSO)
                 enc.setBuffer(allQBuf, offset: 0, index: 0)        // Q input
@@ -1124,14 +1134,42 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.dispatchThreads(MTLSize(width: 32, height: totalHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(32, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             } else {
-                // Fallback: separate RoPE + GQA (for models without Q/K norm)
+                // Fallback path used for models without Q/K norm, or when the mega decode
+                // kernel is explicitly disabled during correctness bisects.
                 let activeRopePSO = ropeKernel.pipelineNeoX
+                let ropeKBuf = scratch.ropeK
+                if hasQKNorm {
+                    do {
+                        var p = ERRMSNormParams(rows: UInt32(numHeads), cols: UInt32(headDim), eps: rmsEps)
+                        enc.setComputePipelineState(rmsNormPSO)
+                        enc.setBuffer(allQBuf, offset: 0, index: 0)
+                        enc.setBuffer(lw.qNorm!, offset: 0, index: 1)
+                        enc.setBuffer(ropeQBuf, offset: 0, index: 2)
+                        enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                        enc.dispatchThreads(MTLSize(width: numHeads, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(numHeads, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    }
+                    do {
+                        var p = ERRMSNormParams(rows: UInt32(numKVHeads), cols: UInt32(headDim), eps: rmsEps)
+                        enc.setComputePipelineState(rmsNormPSO)
+                        enc.setBuffer(allKBuf, offset: 0, index: 0)
+                        enc.setBuffer(lw.kNorm!, offset: 0, index: 1)
+                        enc.setBuffer(ropeKBuf, offset: 0, index: 2)
+                        enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                        enc.dispatchThreads(MTLSize(width: numKVHeads, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(numKVHeads, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    }
+                }
+
+                let ropeQInput = hasQKNorm ? ropeQBuf : allQBuf
+                let ropeQOutput = hasQKNorm ? allQBuf : ropeQBuf
+                let ropeKInput = hasQKNorm ? ropeKBuf : allKBuf
                 do {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
                         headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
                     enc.setComputePipelineState(activeRopePSO)
-                    enc.setBuffer(allQBuf, offset: 0, index: 0)
-                    enc.setBuffer(ropeQBuf, offset: 0, index: 1)
+                    enc.setBuffer(ropeQInput, offset: 0, index: 0)
+                    enc.setBuffer(ropeQOutput, offset: 0, index: 1)
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                     let halfDim = headDim / 2
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
@@ -1141,13 +1179,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
                         headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
                     enc.setComputePipelineState(ropeNeoXF16OutPipeline)
-                    enc.setBuffer(allKBuf, offset: 0, index: 0)
+                    enc.setBuffer(ropeKInput, offset: 0, index: 0)
                     enc.setBuffer(layerKCache, offset: cacheWriteOffF16, index: 1)
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                     let halfDim = headDim / 2
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
+                enc.memoryBarrier(scope: .buffers)
                 do {
                     let groupSize = numHeads / numKVHeads
                     var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
@@ -1156,7 +1195,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
                         kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
                     enc.setComputePipelineState(gqaPSO)
-                    enc.setBuffer(ropeQBuf, offset: 0, index: 0)
+                    enc.setBuffer(ropeQOutput, offset: 0, index: 0)
                     enc.setBuffer(layerKCache, offset: 0, index: 1)
                     enc.setBuffer(layerVCache, offset: 0, index: 2)
                     enc.setBuffer(attnOutBuf, offset: 0, index: 3)
@@ -1277,7 +1316,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let logitsBuf = scratch.logits
-        if let lmRaw = preloadedWeights.lmHeadRaw {
+        if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
             let blocksPerRow = preloadedWeights.lmHeadCols / 32
             var p = FusedGateUpSiluParams(
                 rows: UInt32(config.vocabSize),
@@ -1304,15 +1343,27 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
 
-            let lmHeadBuf = preloadedWeights.lmHead!
-            enc.setComputePipelineState(gemvPSO)
-            var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
-            enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
-            enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
-            enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            if let lmRaw = preloadedWeights.lmHeadRaw {
+                let blocksPerRow = preloadedWeights.lmHeadCols / 32
+                var p = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
+                enc.setComputePipelineState(fusedQ8PSO)
+                enc.setBuffer(lmRaw, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            } else {
+                let lmHeadBuf = preloadedWeights.lmHead!
+                enc.setComputePipelineState(gemvPSO)
+                var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
+                enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
         }
 
         enc.endEncoding()
@@ -1423,7 +1474,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
             enc.setBuffer(lw.wkRaw!, offset: 0, index: 1)
             enc.setBuffer(lw.wvRaw!, offset: 0, index: 2)
-            if layerIndex == 0 { enc.setBuffer(currentHidden, offset: 0, index: 3) }
+            enc.setBuffer(currentHidden, offset: 0, index: 3)
             enc.setBuffer(allQBuf, offset: 0, index: 4)
             enc.setBuffer(allKBuf, offset: 0, index: 5)
             enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 6)
@@ -1478,7 +1529,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let logitsBuf = scratch.logits
-        if let lmRaw = preloadedWeights.lmHeadRaw {
+        if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
             let blocksPerRow = preloadedWeights.lmHeadCols / 32
             var p = FusedGateUpSiluParams(
                 rows: UInt32(config.vocabSize),
@@ -1502,12 +1553,21 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(paramsBuffer, offset: 1280, index: 3)
             enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
 
-            enc.setComputePipelineState(gemvPSO)
-            enc.setBuffer(preloadedWeights.lmHead!, offset: 0, index: 0)
-            enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
-            enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            if let lmRaw = preloadedWeights.lmHeadRaw {
+                enc.setComputePipelineState(fusedQ8GemvPipeline)
+                enc.setBuffer(lmRaw, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            } else {
+                enc.setComputePipelineState(gemvPSO)
+                enc.setBuffer(preloadedWeights.lmHead!, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
         }
 
         enc.endEncoding()
@@ -2272,6 +2332,33 @@ private struct ScratchBuffers: @unchecked Sendable {
     let finalOut: MTLBuffer
     let logits: MTLBuffer
     let decodeHidden: MTLBuffer  // Pre-allocated embedding buffer for decode (dim × float)
+}
+
+private struct DecodeDebugOptions: Sendable {
+    let forceBaseDecodePath: Bool
+    let disableMegaKernel: Bool
+    let disableFusedFinalNormLMHead: Bool
+
+    var requiresBaseDecodePath: Bool {
+        forceBaseDecodePath || disableMegaKernel
+    }
+
+    init(environment: [String: String], config: LlamaConfig) {
+        let autoDisableMegaKernel = config.headCount + config.kvHeadCount > 24
+        self.forceBaseDecodePath = Self.isEnabled(environment["EDGERUNNER_DECODE_FORCE_BASE"])
+        self.disableMegaKernel = autoDisableMegaKernel || Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_MEGA_GQA"])
+        self.disableFusedFinalNormLMHead = Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
+    }
+
+    private static func isEnabled(_ value: String?) -> Bool {
+        guard let value else { return false }
+        switch value.lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - Fused QKV Params (matches Metal ERFusedQKVParams layout)
