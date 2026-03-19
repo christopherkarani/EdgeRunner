@@ -220,6 +220,73 @@ struct ERFusedGateUpSiluParams {
     float rmsEps;
 };
 
+kernel void dequant_q8_0_fused_final_norm_gemv(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    device const float* normWeight [[buffer(3)]],
+    constant ERFusedGateUpSiluParams& params [[buffer(4)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = x + ib * 32;
+        float xl[32];
+        for (short i = 0; i < 32; i++) {
+            xl[i] = xb[i] * rmsScale * normWeight[ib * 32 + i];
+        }
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+
+            float sumq = 0.f;
+            for (short i = 0; i < 32; i++) sumq += float(qs[i]) * xl[i];
+            sumf[row] += sumq * scale;
+        }
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row];
+        }
+    }
+}
+
 kernel void dequant_q8_0_fused_gate_up_silu(
     device const uchar* wGate [[buffer(0)]],
     device const uchar* wUp [[buffer(1)]],

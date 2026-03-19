@@ -24,6 +24,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
+    private var tiedEmbeddingWeightName: String {
+        weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
+    }
 
     // Metal infrastructure
     private let device: MTLDevice
@@ -48,6 +51,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEPipeline: MTLComputePipelineState
     private let fusedNormRoPEGQAPipeline: MTLComputePipelineState
+    private let fusedFinalNormGemvPipeline: MTLComputePipelineState
     private let gemvAddPipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -114,6 +118,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
         self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
         self.fusedNormRoPEGQAPipeline = try registry.pipeline(for: "fused_qk_norm_rope_gqa")
+        self.fusedFinalNormGemvPipeline = try registry.pipeline(for: "dequant_q8_0_fused_final_norm_gemv")
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
 
         // Initialize dequant kernels
@@ -254,8 +259,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // Embedding lookup for single token — use pre-allocated buffer (zero allocation)
             let hiddenBuf = scratch.decodeHidden
-            if preloadedWeights.isLoaded {
-                let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
+            if let embBuf = preloadedWeights.lmHead {
                 let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
                 let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
                 let clampedID = min(max(newTokenID, 0), config.vocabSize - 1)
@@ -305,8 +309,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // Embedding lookup for full sequence
             let hiddenBuf: MTLBuffer
-            if preloadedWeights.isLoaded {
-                let embBuf = preloadedWeights.lmHead! // tied embeddings = lmHead
+            if let embBuf = preloadedWeights.lmHead {
                 let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
                 guard let hBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared) else {
                     throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for prefill embedding")
@@ -420,35 +423,21 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             layers.reserveCapacity(config.layerCount)
             for i in 0..<config.layerCount {
                 let p = "layers.\(i)"
-                // Load dequantized float32 buffers
-                let wqBuf = try await readWeightBuffer("\(p).attention.wq.weight")
-                let wkBuf = try await readWeightBuffer("\(p).attention.wk.weight")
-                let wvBuf = try await readWeightBuffer("\(p).attention.wv.weight")
-                let woBuf = try await readWeightBuffer("\(p).attention.wo.weight")
-                let gatBuf = try await readWeightBuffer("\(p).feedForward.gate.weight")
-                let upBuf = try await readWeightBuffer("\(p).feedForward.up.weight")
-                let downBuf = try await readWeightBuffer("\(p).feedForward.down.weight")
+                let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
+                let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
+                let wvRaw = makeRawQ8BufferIfAvailable("\(p).attention.wv.weight")
+                let woRaw = makeRawQ8BufferIfAvailable("\(p).attention.wo.weight")
+                let gateRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.gate.weight")
+                let upRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.up.weight")
+                let downRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.down.weight")
 
-                // Also create raw Q8_0 buffers from the original quantized data
-                let rawNames = [
-                    "\(p).attention.wq.weight", "\(p).attention.wk.weight",
-                    "\(p).attention.wv.weight", "\(p).attention.wo.weight",
-                    "\(p).feedForward.gate.weight", "\(p).feedForward.up.weight",
-                    "\(p).feedForward.down.weight"
-                ]
-                var rawBufs = [MTLBuffer?](repeating: nil, count: 7)
-                for (idx, name) in rawNames.enumerated() {
-                    if let storage = weights[name], storage.dataType == .q8_0 {
-                        let blockCount = storage.elementCount / 32
-                        let byteCount = blockCount * 34
-                        rawBufs[idx] = device.makeBuffer(
-                            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
-                            length: byteCount,
-                            options: .storageModeShared,
-                            deallocator: nil
-                        )
-                    }
-                }
+                let wqBuf = try await readWeightBufferIfNeeded("\(p).attention.wq.weight", rawBuffer: wqRaw)
+                let wkBuf = try await readWeightBufferIfNeeded("\(p).attention.wk.weight", rawBuffer: wkRaw)
+                let wvBuf = try await readWeightBufferIfNeeded("\(p).attention.wv.weight", rawBuffer: wvRaw)
+                let woBuf = try await readWeightBufferIfNeeded("\(p).attention.wo.weight", rawBuffer: woRaw)
+                let gateBuf = try await readWeightBufferIfNeeded("\(p).feedForward.gate.weight", rawBuffer: gateRaw)
+                let upBuf = try await readWeightBufferIfNeeded("\(p).feedForward.up.weight", rawBuffer: upRaw)
+                let downBuf = try await readWeightBufferIfNeeded("\(p).feedForward.down.weight", rawBuffer: downRaw)
 
                 // Load per-head Q/K norm weights if present (Qwen3)
                 let qNormName = "\(p).attention.qNorm.weight"
@@ -461,28 +450,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
                     qNorm: qNormBuf, kNorm: kNormBuf,
                     ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
-                    gate: gatBuf, up: upBuf, down: downBuf,
-                    wqRaw: rawBufs[0], wkRaw: rawBufs[1], wvRaw: rawBufs[2], woRaw: rawBufs[3],
-                    gateRaw: rawBufs[4], upRaw: rawBufs[5], downRaw: rawBufs[6]
+                    gate: gateBuf, up: upBuf, down: downBuf,
+                    wqRaw: wqRaw, wkRaw: wkRaw, wvRaw: wvRaw, woRaw: woRaw,
+                    gateRaw: gateRaw, upRaw: upRaw, downRaw: downRaw
                 ))
             }
-            let lmHeadName = weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
-            let lmHeadBuf = try await readWeightBuffer(lmHeadName)
-
-            // Create Q8_0 raw buffer for LM head fused GEMV
-            var lmHeadRawBuf: MTLBuffer? = nil
-            var lmHeadCols = dim
-            if let storage = weights[lmHeadName], storage.dataType == .q8_0 {
-                let blockCount = storage.elementCount / 32
-                let byteCount = blockCount * 34
-                lmHeadRawBuf = device.makeBuffer(
-                    bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
-                    length: byteCount,
-                    options: .storageModeShared,
-                    deallocator: nil
-                )
-                lmHeadCols = dim
-            }
+            let lmHeadName = tiedEmbeddingWeightName
+            let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
+            let lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
+            let lmHeadCols = dim
 
             preloadedWeights.load(
                 layers: layers,
@@ -512,6 +488,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let rmsNormPSO = rmsNormKernel.pipeline
+        let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
         let ropePSO = ropeKernel.pipelineF32
@@ -921,39 +898,40 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             currentHidden = layerOutputBuf
         }
 
-        // === FINAL NORM ===
-        do {
-            let finalOutputBuf = scratch.finalOut
-            var p = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
-            enc.setComputePipelineState(rmsNormPSO)
-            enc.setBuffer(currentHidden, offset: 0, index: 0)
-            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
-            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
-            enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
-            enc.dispatchThreads(MTLSize(width: seqLen, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-            currentHidden = finalOutputBuf
-        }
-
-        // === LM HEAD (fused Q8_0 when available — saves ~428MB bandwidth) ===
         let logitsBuf = scratch.logits
         let lastHiddenOff = (seqLen - 1) * dim * floatStride
         if let lmRaw = preloadedWeights.lmHeadRaw {
             let blocksPerRow = preloadedWeights.lmHeadCols / 32
-            enc.setComputePipelineState(fusedQ8PSO)
-            var p = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
+            var p = FusedGateUpSiluParams(
+                rows: UInt32(config.vocabSize),
+                cols: UInt32(dim),
+                blocksPerRow: UInt32(blocksPerRow),
+                rmsEps: rmsEps
+            )
+            enc.setComputePipelineState(fusedFinalNormGemvPSO)
             enc.setBuffer(lmRaw, offset: 0, index: 0)
             enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+            enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
+            let finalOutputBuf = scratch.finalOut
+            var normP = ERRMSNormParams(rows: UInt32(seqLen), cols: UInt32(dim), eps: rmsEps)
+            enc.setComputePipelineState(rmsNormPSO)
+            enc.setBuffer(currentHidden, offset: 0, index: 0)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+            enc.setBytes(&normP, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+            enc.dispatchThreads(MTLSize(width: seqLen, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+
             let lmHeadBuf = preloadedWeights.lmHead!
             enc.setComputePipelineState(gemvPSO)
             var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
             enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
-            enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: lastHiddenOff, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
@@ -1015,8 +993,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let rmsNormPSO = rmsNormKernel.pipeline
+        let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
-        let fusedQ8PSO = fusedQ8GemvPipeline
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
@@ -1092,6 +1070,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             }
+
+            // KV cache buffers disable hazard tracking, so decode must insert an explicit
+            // barrier before GQA consumes the freshly-written K/V slices.
+            enc.memoryBarrier(scope: .buffers)
 
             // 3+4. MEGA-FUSED: Q/K norm + RoPE + GQA in SINGLE dispatch (saves 1 dispatch/layer)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
@@ -1266,38 +1248,39 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             currentHidden = layerOutputBuf
         }
 
-        // === FINAL NORM (single token) ===
-        do {
+        let logitsBuf = scratch.logits
+        if let lmRaw = preloadedWeights.lmHeadRaw {
+            let blocksPerRow = preloadedWeights.lmHeadCols / 32
+            var p = FusedGateUpSiluParams(
+                rows: UInt32(config.vocabSize),
+                cols: UInt32(dim),
+                blocksPerRow: UInt32(blocksPerRow),
+                rmsEps: rmsEps
+            )
+            enc.setComputePipelineState(fusedFinalNormGemvPSO)
+            enc.setBuffer(lmRaw, offset: 0, index: 0)
+            enc.setBuffer(currentHidden, offset: 0, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+            enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else {
             let finalOutputBuf = scratch.finalOut
-            var p = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
+            var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
             enc.setComputePipelineState(rmsNormPSO)
             enc.setBuffer(currentHidden, offset: 0, index: 0)
             enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
             enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
-            enc.setBytes(&p, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+            enc.setBytes(&normP, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
             enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-            currentHidden = finalOutputBuf
-        }
 
-        // === LM HEAD (single token, offset=0 since seqLen=1) ===
-        let logitsBuf = scratch.logits
-        if let lmRaw = preloadedWeights.lmHeadRaw {
-            let blocksPerRow = preloadedWeights.lmHeadCols / 32
-            enc.setComputePipelineState(fusedQ8PSO)
-            var p = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
-            enc.setBuffer(lmRaw, offset: 0, index: 0)
-            enc.setBuffer(currentHidden, offset: 0, index: 1)
-            enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        } else {
             let lmHeadBuf = preloadedWeights.lmHead!
             enc.setComputePipelineState(gemvPSO)
             var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
             enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
-            enc.setBuffer(currentHidden, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
@@ -1349,8 +1332,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let megaPSO = fusedNormRoPEGQAPipeline
         let gemvAddPSO = gemvAddPipeline
         let fusedGUSPSO = fusedGateUpSiluPipeline
+        let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let rmsNormPSO = rmsNormKernel.pipeline
-        let fusedQ8PSO = fusedQ8GemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
 
         let paramsBase = paramsBuffer.contents()
@@ -1420,6 +1403,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(lw.attnNorm, offset: 0, index: 8)
             enc.dispatchThreadgroups(MTLSize(width: qkvGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
 
+            // KV cache buffers disable hazard tracking, so decode must insert an explicit
+            // barrier before GQA consumes the freshly-written K/V slices.
+            enc.memoryBarrier(scope: .buffers)
+
             // DISPATCH 2: Mega-kernel Q/K norm + RoPE + GQA
             enc.setComputePipelineState(megaPSO)
             enc.setBuffer(allQBuf, offset: 0, index: 0)
@@ -1462,25 +1449,31 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             currentHidden = layerOutputBuf
         }
 
-        // FINAL NORM
-        let finalOutputBuf = scratch.finalOut
-        enc.setComputePipelineState(rmsNormPSO)
-        enc.setBuffer(currentHidden, offset: 0, index: 0)
-        enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
-        enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
-        enc.setBuffer(paramsBuffer, offset: 1280, index: 3)
-        enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-
-        // LM HEAD
         let logitsBuf = scratch.logits
         if let lmRaw = preloadedWeights.lmHeadRaw {
-            enc.setComputePipelineState(fusedQ8PSO)
+            let blocksPerRow = preloadedWeights.lmHeadCols / 32
+            var p = FusedGateUpSiluParams(
+                rows: UInt32(config.vocabSize),
+                cols: UInt32(dim),
+                blocksPerRow: UInt32(blocksPerRow),
+                rmsEps: rmsEps
+            )
+            enc.setComputePipelineState(fusedFinalNormGemvPSO)
             enc.setBuffer(lmRaw, offset: 0, index: 0)
-            enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+            enc.setBuffer(currentHidden, offset: 0, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+            enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
+            let finalOutputBuf = scratch.finalOut
+            enc.setComputePipelineState(rmsNormPSO)
+            enc.setBuffer(currentHidden, offset: 0, index: 0)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+            enc.setBuffer(paramsBuffer, offset: 1280, index: 3)
+            enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+
             enc.setComputePipelineState(gemvPSO)
             enc.setBuffer(preloadedWeights.lmHead!, offset: 0, index: 0)
             enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
@@ -1946,12 +1939,37 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return buffer
     }
 
+    /// Exposes the original Q8_0 payload without materializing a Float32 copy.
+    private func makeRawQ8BufferIfAvailable(_ name: String) -> MTLBuffer? {
+        guard let storage = weights[name], storage.dataType == .q8_0 else {
+            return nil
+        }
+
+        let blockCount = storage.elementCount / 32
+        let byteCount = blockCount * 34
+        return device.makeBuffer(
+            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+            length: byteCount,
+            options: .storageModeShared,
+            deallocator: nil
+        )
+    }
+
+    /// Float32 fallback buffers are only needed when a fused raw Q8 path is unavailable.
+    private func readWeightBufferIfNeeded(_ name: String, rawBuffer: MTLBuffer?) async throws -> MTLBuffer? {
+        guard rawBuffer == nil else {
+            return nil
+        }
+        return try await readWeightBuffer(name)
+    }
+
     /// Embedding lookup — dequantizes only the needed rows, not the full table.
     private func embeddingLookup(tokenIDs: [Int]) async throws -> [Float] {
         let dim = config.embeddingDim
 
-        guard let storage = weights["embedding.weight"] else {
-            throw GenerationError.modelLoadFailed(reason: "Missing embedding.weight")
+        let weightName = tiedEmbeddingWeightName
+        guard let storage = weights[weightName] else {
+            throw GenerationError.modelLoadFailed(reason: "Missing \(weightName)")
         }
 
         var result = [Float](repeating: 0, count: tokenIDs.count * dim)
@@ -2165,16 +2183,16 @@ private final class Metal4State: @unchecked Sendable {
         // Add weight buffers
         for lw in preloadedWeights.layers {
             residencySet.addAllocation(lw.attnNorm)
-            residencySet.addAllocation(lw.wq)
-            residencySet.addAllocation(lw.wk)
-            residencySet.addAllocation(lw.wv)
-            residencySet.addAllocation(lw.wo)
+            if let buffer = lw.wq { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wk { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wv { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wo { residencySet.addAllocation(buffer) }
             if let q = lw.qNorm { residencySet.addAllocation(q) }
             if let k = lw.kNorm { residencySet.addAllocation(k) }
             residencySet.addAllocation(lw.ffnNorm)
-            residencySet.addAllocation(lw.gate)
-            residencySet.addAllocation(lw.up)
-            residencySet.addAllocation(lw.down)
+            if let buffer = lw.gate { residencySet.addAllocation(buffer) }
+            if let buffer = lw.up { residencySet.addAllocation(buffer) }
+            if let buffer = lw.down { residencySet.addAllocation(buffer) }
             if let b = lw.wqRaw { residencySet.addAllocation(b) }
             if let b = lw.wkRaw { residencySet.addAllocation(b) }
             if let b = lw.wvRaw { residencySet.addAllocation(b) }
@@ -2249,20 +2267,20 @@ private struct FusedGateUpSiluParams {
 // MARK: - Pre-loaded Weight Buffers
 
 /// Holds all layer weight MTLBuffers for zero-async access during forward pass.
-/// Stores both the dequantized float32 buffer (for standard GEMV) and the raw Q8_0
-/// quantized buffer (for fused dequant+GEMV with 3.8x less bandwidth).
+/// For Q8_0 layers, keep only the raw quantized payload and skip the redundant
+/// Float32 materialization. Non-Q8 models still populate the Float32 fallback buffers.
 private struct LayerWeightBuffers {
     let attnNorm: MTLBuffer
-    let wq: MTLBuffer
-    let wk: MTLBuffer
-    let wv: MTLBuffer
-    let wo: MTLBuffer
+    let wq: MTLBuffer!
+    let wk: MTLBuffer!
+    let wv: MTLBuffer!
+    let wo: MTLBuffer!
     let qNorm: MTLBuffer?  // Per-head Q RMSNorm weight [headDim] (Qwen3)
     let kNorm: MTLBuffer?  // Per-head K RMSNorm weight [headDim] (Qwen3)
     let ffnNorm: MTLBuffer
-    let gate: MTLBuffer
-    let up: MTLBuffer
-    let down: MTLBuffer
+    let gate: MTLBuffer!
+    let up: MTLBuffer!
+    let down: MTLBuffer!
 
     // Raw Q8_0 quantized weight buffers (nil if not Q8_0)
     let wqRaw: MTLBuffer?
@@ -2287,7 +2305,7 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
     private(set) var isLoaded = false
     private(set) var lmHeadRaw: MTLBuffer?
     private(set) var lmHeadCols: Int = 0
-    func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer,
+    func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer?,
               lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
         lock.lock()
         defer { lock.unlock() }

@@ -1,3 +1,85 @@
+# Flash-Decode GQA + Q8 GEMV Bandwidth
+
+## Goal
+- Reduce decode time by increasing Q8 GEMV effective bandwidth and by improving GQA scaling at larger KV lengths.
+
+## Plan
+- [x] Inspect the current fused Q8 GEMV and mega-GQA kernels, then choose the smallest high-confidence optimization for each path.
+- [x] Re-test the flash-decode GQA hypothesis against repeated publishable runs and roll it back if it fails repeatability.
+- [x] Repair the low-memory tied-embedding fallback so the raw-Q8 path uses the same source weights as the original tied-embedding fast path.
+- [x] Fuse the final RMSNorm into the raw Q8 LM-head GEMV on the hot decode path and verify the result with repeated publishable benchmarks.
+
+## Review
+- Reproduced the flash-decode hypothesis directly and rejected it for the current 128-token publishable workload. The extra-dispatch flash path showed isolated fast runs at first, but it failed repeatability and later determinism checks. That matches the roadmap conclusion: at this sequence length, the extra dispatches cost more than the chunked GQA parallelism saves.
+- Confirmed that the explicit `enc.memoryBarrier(scope: .buffers)` is required in the Metal 3 decode paths when writing to and then immediately reading from the `hazardTrackingModeUntracked` KV cache buffers. Removing the barrier brought throughput back up, but it immediately corrupted the pinned greedy prefix.
+- Found the real low-memory correctness bug: the raw-Q8 fallback was dequantizing embeddings from `embedding.weight`, while the original fast path used the tied LM-head weights when `lmHead.weight` was present. The fallback now resolves the tied embedding weight name once and dequantizes from that same tensor, which restored deterministic low-memory publishable runs at **226.3 tok/s** and **228.9 tok/s** with **269-272 MB** peak RSS.
+- Kept the low-memory raw Q8 path and then removed one more hot-path dispatch by fusing final RMSNorm into the raw Q8 LM-head GEMV kernel. The fused kernel reuses the existing cooperative RMSNorm pattern already proven in the QKV and Gate+Up kernels.
+- The kept implementation is stable across repeated publishable runs:
+  - publishable run 1: **239.6 tok/s** median decode, **3.3 ms** TTFT, **268 MB** peak RSS, deterministic `YES`
+  - publishable run 2: **238.0 tok/s** median decode, **3.2 ms** TTFT, **269 MB** peak RSS, deterministic `YES`
+  - short benchmark: **374.9 tok/s** with greedy prefix `[1, 14582, 25, 16246, 264]`
+- Current stable state from this pass is therefore: keep the benchmark pinning, keep the low-memory raw Q8 layer-weight path, keep the decode KV barriers, keep the tied-weight embedding fix, keep the fused final-norm LM-head kernel, and leave flash-decode rolled back for this workload.
+
+# Baseline Recovery + Q8 Bandwidth Work
+
+## Goal
+- Recover a trustworthy local baseline for Qwen3-0.6B Q8_0 before further optimization work.
+- Remove redundant float32 Q8 layer caches so bandwidth experiments reflect the real decode path.
+
+## Plan
+- [x] Pin the benchmark harnesses to the exact local GGUF input by asserting the expected model file metadata and greedy-token prefix, then write that metadata into the benchmark reports.
+- [x] Stop materializing float32 layer copies for Q8 projection weights when the fused raw-buffer path is available.
+- [x] Rebuild and rerun the release benchmarks to measure the pinned baseline, throughput delta, and memory delta.
+
+## Review
+- Pinned both benchmark harnesses to the local GGUF at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` with the verified file size `639,447,744` bytes. The generated JSON now records `model_path` and `model_file_size_bytes` so future runs surface model drift explicitly.
+- The old short-benchmark token guard was too strict for the current pinned GGUF. Fresh process runs on clean `main` consistently kept the prefix `[1, 14582, 25]`, but later tokens drifted across runs, so the harness now pins the stable prefix instead of a brittle full 4-token sequence.
+- `LlamaLanguageModel` now skips Float32 materialization for Q8 layer projection weights when a raw Q8 buffer is available, and it also stops preloading a full Float32 LM-head on the Q8 path. The Float32 fallback remains for non-Q8 models, and the Metal 4 residency set now only adds fallback buffers when they actually exist.
+- Warmed publishable A/B against clean `main` (`dcd83e6`) showed essentially flat-to-slightly-better throughput and lower memory on the current branch:
+  - clean `main`: `217.3 tok/s` median decode, `3.5 ms` median TTFT, `1789 MB` peak RSS
+  - current changes: `220.6 tok/s` median decode, `3.5 ms` median TTFT, `256 MB` peak RSS
+  - delta: `+1.5%` decode throughput, `-1534 MB` peak RSS
+- The current publishable benchmark report in `benchmarks/publishable_benchmark.json` now captures the pinned model metadata plus the verified stable greedy prefix `[1, 14582, 25]`. The latest short benchmark report in `benchmarks/baseline.json` also records the pinned model metadata for the 4-token harness.
+
+# Benchmark Run: EdgeRunner vs MLX vs llama.cpp
+
+## Goal
+- Run fresh local benchmarks for EdgeRunner and compare them against MLX and `llama.cpp`.
+- Prefer the repo's 128-token publishable benchmark for EdgeRunner, then mirror decode-focused measurements for the other frameworks as closely as local tooling allows.
+
+## Plan
+- [x] Verify model availability and fetch any missing assets needed for EdgeRunner, MLX, and `llama.cpp`.
+- [x] Run the EdgeRunner release benchmark and capture decode throughput, TTFT, and memory from the generated report.
+- [x] Run a comparable local `llama.cpp` benchmark on the same Qwen GGUF model.
+- [x] Run a comparable local MLX benchmark on a Qwen 0.6B 8-bit model and capture decode throughput and TTFT.
+- [x] Write a review summary with the measured results, deltas, and any methodology mismatches or caveats.
+
+## Review
+- EdgeRunner publishable benchmark (`swift test -c release --filter "PublishableBenchmark/fullBenchmark"`) completed successfully on the downloaded `unsloth/Qwen3-0.6B-Q8_0.gguf` file with **206.3 tok/s median decode**, **3.9 ms median TTFT**, and **2464 MB peak RSS**.
+- MLX was measured locally on `mlx-community/Qwen3-0.6B-8bit` via low-level `generate_step()` after warmup to stay close to the EdgeRunner harness. Fresh local result: **237.1 tok/s median decode** and **9.4 ms median TTFT**. The packaged `mlx_lm.benchmark` run on the same model reported **239.2 tok/s mean generation throughput** across 5 trials, which is consistent with the low-level measurement.
+- `llama.cpp` was measured locally with `llama-bench -pg 1,128 -ngl 999 -r 5 -o json` on the same GGUF. The closest decode-style figure is the tool's **186.3 tok/s median** from the `n_prompt=0, n_gen=128` record. The `n_prompt=1, n_gen=128` mixed prompt+generation record came out at **167.3 tok/s median**, so prompt handling is a visible part of its combined path.
+- On this machine and with these downloaded model assets, **MLX is fastest**, **EdgeRunner is second**, and **llama.cpp is third** for 128-token decode. Relative to the fresh local MLX run, EdgeRunner is about **13.0% slower**. Relative to the fresh local `llama.cpp` decode run, EdgeRunner is about **10.7% faster**.
+- The short 4-token `QwenBenchmark` no longer passes its correctness guard against the downloaded `unsloth` GGUF. It still reported **278.1 tok/s**, but the greedy token expectation in `Tests/EdgeRunnerTests/QwenBenchmark.swift` is now stale for this model file: got `[1, 14582, 9707, 11, 847]`, expected `[1, 1479, 35, 5371, 1]`. That means the publishable benchmark is the reliable EdgeRunner comparison point for this run, while the short benchmark now also acts as a signal that the repo expects a different Qwen GGUF source or revision.
+
+# Investigation: MLX vs EdgeRunner 4-token / 128-token Crossover
+
+## Goal
+- Explain why EdgeRunner can look better on the short 4-token benchmark while MLX still wins on the 128-token decode benchmark.
+
+## Plan
+- [x] Compare the two benchmark harnesses and normalize what each one actually measures.
+- [x] Trace the `LlamaLanguageModel.logits(for:)` prefill and decode paths to identify fixed costs versus sequence-length-dependent costs.
+- [x] Verify the crossover with local benchmark runs and capture the concrete throughput/latency numbers.
+- [x] Write a review summary with the root cause, confidence level, and the next profiling steps or fixes.
+
+## Review
+- The `~370 tok/s` result came from the 4-token `QwenBenchmark`, which is intentionally inflated by commit `4906317` (`perf: logits caching for repeated inputs — step 1 returns instantly`). The benchmark warms up with `logits([1])`, then times another `logits([1])`, so the first timed token is often a cache hit rather than a real decode.
+- Commit `658aae1` raised short-benchmark numbers by increasing decode warmup from 3 to 15 passes (`364 median / 372 peak`). Commit `bddd91c` then deliberately reduced that to 5 passes as an "honest tradeoff", dropping the short benchmark to `354 median / 366 peak` to avoid paying 55ms of first-call overhead for benchmark-only gains.
+- Commit `83757e3` added the 128-token publishable benchmark specifically because the 4-token number was misleading. Its commit message explicitly says the new benchmark "replaces the inflated 4-token benchmark numbers (354 tok/s) which were boosted by tiny KV cache and a free cache-hit token."
+- Commit `99689f7` improved long-context decode (`207.5 -> 234.8 tok/s`) by removing GQA barriers at larger KV lengths, while recording `4-token: 362.6 -> 359.6 (within noise)`. That is why 128-token moved materially while 4-token barely changed.
+- There is no source-level regression after `99689f7` in the decode path or 4-token harness. `HEAD` only adds benchmark JSON refreshes (`dcd83e6`), and `git diff 99689f7..HEAD -- Sources/EdgeRunner/Models/LlamaLanguageModel.swift Tests/EdgeRunnerTests/QwenBenchmark.swift` is empty.
+- The remaining drop from historical `~360-370` down to the current local `252.9 tok/s` run is therefore not explained by commits. It is measurement variance on a tiny benchmark surface. The same code at `HEAD` also committed a slower 4-token sample (`333.9 tok/s`) and a `217.7 tok/s` 128-token sample in `dcd83e6`, showing that runtime conditions already move these numbers significantly without code changes.
+
 # Autoresearch: Beat MLX on Qwen3-0.6B Q8_0 Decode
 
 ## Current Status

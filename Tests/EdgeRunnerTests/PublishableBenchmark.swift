@@ -21,6 +21,8 @@ struct PublishableBenchmark {
     static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
     static let generateCount = 128
     static let benchmarkRuns = 5
+    static let expectedModelFileSizeBytes: Int64 = 639_447_744
+    static let expectedGreedyPrefix = [1, 14582, 25]
 
     // MARK: - Primary Publishable Benchmark
 
@@ -30,6 +32,7 @@ struct PublishableBenchmark {
             print("SKIP: Model not found at \(Self.modelPath)")
             return
         }
+        let modelFileSize = try pinnedModelFileSize(at: url)
 
         // Track peak memory
         let memBefore = currentRSS()
@@ -70,6 +73,8 @@ struct PublishableBenchmark {
         // Determinism check: all runs should produce identical tokens
         let referenceTokens = runResults[0].tokens
         let allDeterministic = runResults.allSatisfy { $0.tokens == referenceTokens }
+        let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(referenceTokens.count))
+        let actualPrefix = Array(referenceTokens.prefix(expectedPrefix.count))
 
         // Print human-readable report
         printReport(
@@ -88,11 +93,21 @@ struct PublishableBenchmark {
             runs: runResults,
             memLoadMB: Double(memAfterLoad - memBefore) / 1_048_576,
             memPeakMB: Double(memPeak - memBefore) / 1_048_576,
-            deterministic: allDeterministic
+            deterministic: allDeterministic,
+            modelPath: url.path,
+            modelFileSize: modelFileSize,
+            tokenPrefix: actualPrefix
         )
 
         // Assertions
         #expect(allDeterministic, "Non-deterministic output across runs — optimization broke reproducibility")
+        #expect(
+            actualPrefix == expectedPrefix,
+            """
+            Benchmark input or decode path drifted: expected greedy prefix \(expectedPrefix), \
+            got \(actualPrefix). Re-pin the GGUF before comparing publishable results.
+            """
+        )
         #expect(stats.decodeMedian > 0, "Decode throughput must be positive")
         for run in runResults {
             #expect(!run.hasNaN, "Run \(run.runIndex) produced NaN/Inf logits")
@@ -286,7 +301,10 @@ struct PublishableBenchmark {
         runs: [RunResult],
         memLoadMB: Double,
         memPeakMB: Double,
-        deterministic: Bool
+        deterministic: Bool,
+        modelPath: String,
+        modelFileSize: Int64,
+        tokenPrefix: [Int]
     ) throws {
         let runData: [[String: Any]] = runs.map { run in
             [
@@ -305,6 +323,9 @@ struct PublishableBenchmark {
         let json: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "model": "Qwen3-0.6B-Q8_0",
+            "model_path": modelPath,
+            "model_file_size_bytes": modelFileSize,
+            "greedy_prefix": tokenPrefix,
             "device": deviceDescription(),
             "tokens_per_run": Self.generateCount,
             "num_runs": Self.benchmarkRuns,
@@ -394,6 +415,23 @@ struct PublishableBenchmark {
         sysctlbyname("machdw.model", &modelChars, &size, nil, 0)
         let modelStr = size > 1 ? String(decoding: modelChars.prefix(size - 1).map { UInt8($0) }, as: UTF8.self) : ""
         return modelStr.isEmpty ? "Apple Silicon" : modelStr
+    }
+
+    private func pinnedModelFileSize(at url: URL) throws -> Int64 {
+        let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let fileSize = resourceValues.fileSize else {
+            throw GenerationError.modelLoadFailed(reason: "Could not read file size for \(url.path)")
+        }
+
+        #expect(
+            Int64(fileSize) == Self.expectedModelFileSizeBytes,
+            """
+            Benchmark input drifted: expected \(Self.expectedModelFileSizeBytes) bytes at \(Self.modelPath), \
+            got \(fileSize) bytes. Download the pinned GGUF before comparing publishable results.
+            """
+        )
+
+        return Int64(fileSize)
     }
 }
 

@@ -540,3 +540,17 @@ To reach 278 tok/s = 3.60ms/token:
 - GQA attention: ~0.8ms at avg kvSeqLen=65 (128 bytes/pos x 16 heads x 28 layers)
 - Dispatch overhead: 142 dispatches x ~3us = ~0.4ms
 - Swift async: ~0.1ms
+
+### Experiment 26: Flash-Decode GQA (extra dispatches) — ROLLED BACK
+- **Hypothesis:** Splitting decode attention into chunked partials plus a reduction kernel would cut the KV-scan cost enough to beat the extra dispatch overhead at 128 tokens.
+- **Change:** Added a thresholded flash-decode path with `flash_decode_gqa_partials` and `flash_decode_gqa_reduce`, fed by a separate fused Q/K norm + RoPE pass.
+- **Result:** Initial publishable runs looked fast in isolation, but repeated runs failed determinism and later regressed badly. The extra-dispatch flash path was not repeatable at the pinned 128-token workload.
+- **Root cause:** At this sequence length, the added dispatches and synchronization overhead outweighed the saved GQA work. This matches the roadmap conclusion that flash-decode is the wrong tradeoff here.
+- **Status:** ROLLED BACK
+
+### Experiment 27: Tied-Weight Raw Embedding Fix + Fused Final-Norm LM Head — KEPT
+- **Hypothesis:** The low-memory raw-Q8 path can stay deterministic if the embedding fallback dequantizes from the same tied weight tensor as the original LM-head fast path, and fusing the final RMSNorm into the raw Q8 LM-head GEMV should remove one more hot-path dispatch.
+- **Change:** Resolved a single `tiedEmbeddingWeightName` (`lmHead.weight` when present, else `embedding.weight`) and used it for the raw embedding fallback. Added `dequant_q8_0_fused_final_norm_gemv` and routed prefill plus both Metal 3 decode paths through the fused final-norm + LM-head kernel for raw Q8 models.
+- **Result:** Stable repeated publishable runs at **239.6 tok/s** and **238.0 tok/s** median decode, both deterministic `YES`, with **268-269 MB** peak RSS. Short benchmark refreshed to **374.9 tok/s** with greedy prefix `[1, 14582, 25, 16246, 264]`.
+- **Root cause:** The previous low-memory fallback was silently reading from `embedding.weight` while the original path used tied `lmHead.weight`, creating long-run instability. Once the tied source was fixed, the low-memory path became reproducible and could safely benefit from one fewer LM-head dispatch.
+- **Status:** KEPT
