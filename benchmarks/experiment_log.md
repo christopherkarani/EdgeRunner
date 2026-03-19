@@ -561,3 +561,17 @@ To reach 278 tok/s = 3.60ms/token:
 - **Result:** Massive regression. Plain greedy generation measured **243.6 tok/s** median, while the exact self-speculative path measured **33.2 tok/s** median (**-86.4%**).
 - **Root cause:** The current engine pays nearly the full decode cost for the draft model and then pays again for verification. Without a materially cheaper drafter or genuinely parallel verification, no-training speculation is a losing tradeoff on this stack.
 - **Status:** ROLLED BACK
+
+### Experiment 29: Final LM-Head Params Bufferization — ROLLED BACK
+- **Hypothesis:** The optimized Metal 3 decode path could save a tiny amount of CPU-side overhead by moving the final raw-Q8 LM-head params from per-token `setBytes` into the preallocated params buffer.
+- **Change:** Wrote the fused final-norm LM-head params into the decode params buffer and rebound slot `4` with `setBuffer` instead of `setBytes`.
+- **Result:** Immediate regression. Short benchmark fell to **322.2 tok/s**, and the 128-token publishable benchmark dropped to **221.6 tok/s** median decode.
+- **Root cause:** The tiny LM-head parameter block is better consumed as inline constant data. Replacing it with another buffer indirection increased overhead enough to swamp any notional CPU-side savings.
+- **Status:** ROLLED BACK
+
+### Experiment 30: Greedy `nextToken` Fast Path + Vectorized Argmax — KEPT
+- **Hypothesis:** Generation is still paying avoidable CPU overhead by materializing the full vocab logits array on every token and scanning it with a scalar argmax. Specializing greedy `nextToken` to stay on the logits buffer and using Accelerate for argmax should improve real generation throughput without changing the raw publishable benchmark semantics.
+- **Change:** Refactored `LlamaLanguageModel` so `logits(for:)` and `nextToken(for:sampling:)` share a `forwardLogitsBuffer` path. `nextToken` now computes the greedy token directly from the logits buffer, and both greedy argmax helpers use `vDSP_maxvi`.
+- **Result:** Real-model greedy generation improved from **243.6 tok/s** to **260.1 tok/s** median on the speculative-generation benchmark. Repeated publishable reruns stayed deterministic and improved to **246.2 tok/s** and **241.7 tok/s** median decode, with the short benchmark at **364.2-371.0 tok/s** and the pinned greedy prefix intact.
+- **Root cause:** The old generation path paid for a `151,936`-float materialization plus a scalar reduction on every token. Eliminating that copy on the greedy path and vectorizing the remaining reduction removes a measurable CPU-side tax.
+- **Status:** KEPT

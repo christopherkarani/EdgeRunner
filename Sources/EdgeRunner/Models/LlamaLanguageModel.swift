@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import Synchronization
+import Accelerate
 import EdgeRunnerCore
 import EdgeRunnerIO
 import EdgeRunnerMetal
@@ -237,14 +238,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // MARK: - LogitsModel: forward pass
 
-    public func logits(for tokenIDs: [Int]) async throws -> [Float] {
-        let dim = config.embeddingDim
-        let floatStride = MemoryLayout<Float>.stride
+    public func nextToken(for tokenIDs: [Int], sampling: SamplingConfiguration) async throws -> Int {
+        if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
+            return greedyArgmax(cached)
+        }
 
-        // Fast path: return cached logits if identical input (e.g., repeated seqLen=1 calls)
+        let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs)
+        return greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
+    }
+
+    public func logits(for tokenIDs: [Int]) async throws -> [Float] {
         if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
             return cached
         }
+        let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs)
+        let result = materializeLogits(from: logitsBuf, count: config.vocabSize)
+        decoderState.cachedLogits = result
+        decoderState.cachedLogitsInput = tokenIDs
+        return result
+    }
+
+    private func forwardLogitsBuffer(for tokenIDs: [Int]) async throws -> MTLBuffer {
+        let dim = config.embeddingDim
+        let floatStride = MemoryLayout<Float>.stride
 
         // Detect prefill vs decode mode
         let previousTokenIDs = decoderState.previousTokenIDs
@@ -294,12 +310,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // Update decoder state
             decoderState.previousTokenIDs = tokenIDs
-
-            let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
-            let result = Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
-            decoderState.cachedLogits = result
-            decoderState.cachedLogitsInput = tokenIDs
-            return result
+            return logitsBuf
         } else {
             // PREFILL MODE: process full sequence, populate KV cache
             let seqLen = tokenIDs.count
@@ -369,13 +380,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             // Update decoder state and KV cache position
             decoderState.previousTokenIDs = tokenIDs
             kvCache.setPosition(seqLen)
-
-            let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
-            let result = Array(UnsafeBufferPointer(start: ptr, count: config.vocabSize))
-            decoderState.cachedLogits = result
-            decoderState.cachedLogitsInput = tokenIDs
-            return result
+            return logitsBuf
         }
+    }
+
+    private func materializeLogits(from logitsBuf: MTLBuffer, count: Int) -> [Float] {
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: ptr, count: count))
+    }
+
+    private func greedyArgmax(_ logits: [Float]) -> Int {
+        logits.withUnsafeBufferPointer { ptr in
+            guard let base = ptr.baseAddress else { return 0 }
+            return greedyArgmax(base, count: ptr.count)
+        }
+    }
+
+    private func greedyArgmax(logitsBuf: MTLBuffer, count: Int) -> Int {
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: count)
+        return greedyArgmax(ptr, count: count)
+    }
+
+    private func greedyArgmax(_ ptr: UnsafePointer<Float>, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        var maxValue: Float = 0
+        var maxIndex: vDSP_Length = 0
+        vDSP_maxvi(ptr, 1, &maxValue, &maxIndex, vDSP_Length(count))
+        return Int(maxIndex)
     }
 
     // MARK: - Fully Fused Prefill Pass

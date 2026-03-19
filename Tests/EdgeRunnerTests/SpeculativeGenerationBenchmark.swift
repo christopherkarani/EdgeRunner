@@ -137,21 +137,11 @@ struct SpeculativeGenerationBenchmark {
     ) async throws -> [Int] {
         var tokenIDs = [Self.bosToken]
         while tokenIDs.count - 1 < tokenCount {
-            let logits = try await model.logits(for: tokenIDs)
-            tokenIDs.append(argmax(logits))
+            let token = try await model.nextToken(for: tokenIDs, sampling: SamplingConfiguration())
+            tokenIDs.append(token)
             if tokenIDs.last == 151645 { break }
         }
         return tokenIDs
-    }
-
-    private func argmax(_ logits: [Float]) -> Int {
-        var bestIndex = 0
-        var bestValue: Float = -.infinity
-        for (index, value) in logits.enumerated() where value > bestValue {
-            bestValue = value
-            bestIndex = index
-        }
-        return bestIndex
     }
 
     private func durationMs(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
