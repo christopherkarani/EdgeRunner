@@ -1,3 +1,38 @@
+# No-Training Breakthrough Program
+
+## Goal
+- Evaluate the ranked no-training research directions in order, keeping only deterministic improvements on the 128-token publishable benchmark.
+- Maintain a known-good publishable benchmark at all times so every experiment can be reverted to the best proven state.
+
+## Benchmark Protocol
+- Use `swift test -c release --filter "QwenBenchmark/decodeBenchmark"` as the fast correctness/perf smoke test.
+- Use `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` as the publishable benchmark gate.
+- Keep a change only if:
+  - the short benchmark preserves the pinned greedy prefix,
+  - at least two publishable reruns remain deterministic, and
+  - the publishable decode throughput stays above the current best kept state.
+- Drop any implementation that regresses throughput, breaks determinism, or complicates the code without measurable win.
+
+## Ranked Plan
+- [x] Reconfirm the current best kept publishable benchmark and record it as the revert point for this program.
+- [ ] Rank 1: Prototype `Lookahead + Sequoia` style inference-time tree verification on the deterministic decode path.
+- [ ] Rank 2: Reduce decode dispatch overhead with further hot-path fusion and replay-friendly command encoding.
+- [ ] Rank 3: Prototype mixed-bit PTQ and KV-cache quantization paths that do not require any model retraining.
+- [ ] Rank 4: Add prompt-lookup speculation with exact verification and keep it only if common prompts benefit.
+- [ ] Rank 5: Refine the low-memory raw-Q8 embedding / LM-head path for deterministic speed and memory wins.
+- [ ] Rank 6: Investigate bounded ANE / heterogeneous execution paths and keep only anything measurable on this machine.
+- [ ] Rank 7: Try `LLM-in-a-Flash` style memory-layout / streaming changes where they fit the current kernels.
+- [ ] Log all kept and rejected branches in `benchmarks/experiment_log.md`.
+- [ ] Summarize results and new branches in the review section below.
+
+## Review
+- Revert point for this program remains commit `452455e` (`perf: fix tied Q8 embedding path and fuse LM head — 226.3 -> 239.6 tok/s (+5.9%)`), which is still the best kept publishable state in repo history.
+- Fresh revalidation on the same code showed the expected variance band:
+  - short benchmark: **362.8 tok/s** with greedy prefix `[1, 14582, 25, 16246, 264]`
+  - publishable rerun 1: **234.4 tok/s** median decode, **269 MB** peak RSS, determinism failed
+  - publishable rerun 2: **236.0 tok/s** median decode, **271 MB** peak RSS, deterministic `YES`
+- The working rule for this program is therefore: only keep a new optimization if it beats the best kept state after repeated publishable reruns, not just a single fast sample.
+
 # Flash-Decode GQA + Q8 GEMV Bandwidth
 
 ## Goal
