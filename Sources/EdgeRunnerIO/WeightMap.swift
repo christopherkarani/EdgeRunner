@@ -58,6 +58,12 @@ public enum MetadataValue: Sendable, Equatable,
         guard case .array(let value) = self else { return nil }
         return value
     }
+
+    public var floatArrayValue: [Float]? {
+        guard let values = arrayValue else { return nil }
+        let floats = values.compactMap(\.floatValue)
+        return floats.count == values.count ? floats : nil
+    }
 }
 
 public enum TensorDataType: UInt32, Sendable, Equatable {
