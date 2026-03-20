@@ -244,6 +244,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     ) async throws -> LlamaLanguageModel {
         let loader = try GGUFLoader(url: url)
         let weightMap = try await loader.load(from: url)
+
+        // Validate quantization types before proceeding
+        try validateQuantizationTypes(weightMap)
+
         let ggufConfig = try LlamaConfig(fromGGUFMetadata: loader.modelConfig.metadata)
         var model = LlamaModel(config: ggufConfig)
         try model.loadWeights(from: weightMap)
@@ -306,6 +310,51 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             messages: messages,
             addGenerationPrompt: addGenerationPrompt
         )
+    }
+
+    // MARK: - Validation
+
+    /// Validates that all tensors in the weight map use supported quantization types.
+    /// Throws at load time instead of crashing at dequantization time.
+    private static func validateQuantizationTypes(_ weightMap: WeightMap) throws {
+        let supportedTypes: Set<TensorDataType> = [.float32, .float16, .q4_0, .q8_0, .q4_K]
+
+        var unsupportedTypes = Set<TensorDataType>()
+        var unsupportedTensors = [String]()
+
+        for name in weightMap.tensorNames {
+            guard let tensor = weightMap[name] else { continue }
+            if !supportedTypes.contains(tensor.dataType) {
+                unsupportedTypes.insert(tensor.dataType)
+                if unsupportedTensors.count < 3 {
+                    unsupportedTensors.append("\(name) (\(tensor.dataType))")
+                }
+            }
+        }
+
+        guard unsupportedTypes.isEmpty else {
+            let typeNames = unsupportedTypes.map { type -> String in
+                switch type {
+                case .q4_1: return "Q4_1"
+                case .q5_0: return "Q5_0"
+                case .q5_1: return "Q5_1"
+                case .q8_1: return "Q8_1"
+                case .q2_K: return "Q2_K"
+                case .q3_K: return "Q3_K"
+                case .q5_K: return "Q5_K"
+                case .q6_K: return "Q6_K"
+                case .q8_K: return "Q8_K"
+                default: return "type(\(type.rawValue))"
+                }
+            }.sorted().joined(separator: ", ")
+
+            let examples = unsupportedTensors.joined(separator: ", ")
+            throw GenerationError.modelLoadFailed(
+                reason: "Model uses unsupported quantization: \(typeNames). "
+                    + "Supported: Q4_0, Q8_0, Q4_K_M, F16, F32. "
+                    + "Examples: \(examples)"
+            )
+        }
     }
 
     // MARK: - LogitsModel: forward pass
