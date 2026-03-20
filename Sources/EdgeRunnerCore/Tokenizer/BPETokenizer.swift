@@ -65,6 +65,14 @@ public struct BPETokenizer: Tokenizer, Sendable {
 
     // MARK: - Chat Template
 
+    /// Protocol conformance shim — forwards to the full overload with tools.
+    public func applyChatTemplate(
+        messages: [ChatMessage],
+        addGenerationPrompt: Bool
+    ) throws -> String? {
+        try applyChatTemplate(messages: messages, addGenerationPrompt: addGenerationPrompt, tools: nil)
+    }
+
     /// Apply the chat template to format conversation messages.
     /// Returns nil if no chat template is available.
     public func applyChatTemplate(

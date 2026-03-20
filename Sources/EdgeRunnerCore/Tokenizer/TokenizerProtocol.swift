@@ -8,6 +8,8 @@ public protocol Tokenizer: Sendable {
     var eosTokenID: Int { get }
     var bosTokenID: Int? { get }
     var padTokenID: Int? { get }
+    var shouldAddBOS: Bool { get }
+    func applyChatTemplate(messages: [ChatMessage], addGenerationPrompt: Bool) throws -> String?
 }
 
 extension Tokenizer {
@@ -18,4 +20,8 @@ extension Tokenizer {
     public func decode(_ ids: [Int]) -> String {
         decode(ids, skipSpecialTokens: false)
     }
+
+    public var shouldAddBOS: Bool { false }
+
+    public func applyChatTemplate(messages: [ChatMessage], addGenerationPrompt: Bool = true) throws -> String? { nil }
 }
