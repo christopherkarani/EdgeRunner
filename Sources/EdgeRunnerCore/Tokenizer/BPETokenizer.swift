@@ -1,14 +1,18 @@
 import Foundation
 
-/// Byte-Pair Encoding tokenizer compatible with Llama/GPT tokenizer formats.
+/// Byte-Pair Encoding tokenizer with full production pipeline:
+/// special-token scan -> pre-tokenize -> byte-encode -> BPE merge -> vocab lookup.
 public struct BPETokenizer: Tokenizer, Sendable {
     private let vocabulary: TokenizerVocabulary
     private let specialTokens: SpecialTokens
     private let mergeRanks: [String: Int]
     private let mergeResults: [String: String]
+    private let preTokenizer: PreTokenizer
+    private let shouldAddBOS: Bool
+    private let byteFallbackTable: [UInt8: Int]
 
     public var vocabularySize: Int {
-        vocabulary.count + specialTokens.specialTokenIDs.count
+        vocabulary.count
     }
 
     public var eosTokenID: Int { specialTokens.eosTokenID! }
@@ -18,10 +22,14 @@ public struct BPETokenizer: Tokenizer, Sendable {
     public init(
         vocabulary: TokenizerVocabulary,
         specialTokens: SpecialTokens,
-        merges: [(String, String)]
+        merges: [(String, String)],
+        preTokenizer: PreTokenizer,
+        shouldAddBOS: Bool = false
     ) {
         self.vocabulary = vocabulary
         self.specialTokens = specialTokens
+        self.preTokenizer = preTokenizer
+        self.shouldAddBOS = shouldAddBOS
         var ranks = [String: Int](minimumCapacity: merges.count)
         var results = [String: String](minimumCapacity: merges.count)
         for (index, merge) in merges.enumerated() {
@@ -31,41 +39,143 @@ public struct BPETokenizer: Tokenizer, Sendable {
         }
         self.mergeRanks = ranks
         self.mergeResults = results
+
+        // Build byte fallback table: map each byte value to its vocab ID
+        // if the byte-encoded character exists in the vocabulary.
+        var fallback = [UInt8: Int]()
+        for b in UInt8.min...UInt8.max {
+            let encoded = String(ByteEncoder.encode(b))
+            if let id = vocabulary.tokenToID(encoded) {
+                fallback[b] = id
+            }
+        }
+        self.byteFallbackTable = fallback
     }
 
     public func encode(_ text: String, addBOS: Bool = false) -> [Int] {
         guard !text.isEmpty else { return [] }
         var ids = [Int]()
-        if addBOS, let bosID = specialTokens.bosTokenID {
+
+        let useBOS = addBOS || shouldAddBOS
+        if useBOS, let bosID = specialTokens.bosTokenID {
             ids.append(bosID)
         }
-        var tokens = text.map { String($0) }
-        tokens = applyMerges(tokens)
-        for token in tokens {
-            if let id = vocabulary.tokenToID(token) {
-                ids.append(id)
-            } else if let id = specialTokens.specialTokenMap[token] {
-                ids.append(id)
+
+        let segments = splitAroundSpecialTokens(text)
+
+        for segment in segments {
+            if let specialID = specialTokens.specialTokenMap[segment] {
+                ids.append(specialID)
+                continue
+            }
+
+            // Pre-tokenize the segment into words/chunks.
+            let chunks = preTokenizer.split(segment)
+
+            for chunk in chunks {
+                // Byte-encode the chunk using GPT-2 byte-to-unicode mapping.
+                let byteEncoded = ByteEncoder.encodeString(chunk)
+
+                // Split into individual characters, then apply BPE merges.
+                var tokens = byteEncoded.map { String($0) }
+                tokens = applyMerges(tokens)
+
+                // Look up each merged token in the vocabulary.
+                for token in tokens {
+                    if let id = vocabulary.tokenToID(token) {
+                        ids.append(id)
+                    } else {
+                        // Byte fallback: encode each UTF-8 byte of the token individually.
+                        appendByteFallback(token, to: &ids)
+                    }
+                }
             }
         }
+
         return ids
     }
 
     public func decode(_ ids: [Int], skipSpecialTokens: Bool = false) -> String {
-        var result = ""
+        var encoded = ""
         for id in ids {
-            if skipSpecialTokens && specialTokens.specialTokenIDs.contains(id) {
+            if specialTokens.specialTokenIDs.contains(id) {
+                if !skipSpecialTokens {
+                    if let token = specialTokenStringForID(id) {
+                        encoded += token
+                    }
+                }
                 continue
             }
             if let token = vocabulary.idToToken(id) {
-                result += token
-            } else if let token = specialTokenStringForID(id) {
-                if !skipSpecialTokens {
-                    result += token
-                }
+                encoded += token
+            } else {
+                // Unknown token ID: produce Unicode replacement character.
+                encoded += "\u{FFFD}"
             }
         }
-        return result
+        // Decode byte-encoded string back to UTF-8.
+        return ByteEncoder.decodeString(encoded) ?? encoded
+    }
+
+    // MARK: - Private
+
+    /// Splits text around special tokens, preserving them as separate segments.
+    /// Returns an array alternating between normal text and special token strings.
+    private func splitAroundSpecialTokens(_ text: String) -> [String] {
+        guard !specialTokens.specialTokenMap.isEmpty else { return [text] }
+
+        // Sort special tokens by length (longest first) for greedy matching.
+        let sortedSpecials = specialTokens.specialTokenMap.keys
+            .sorted { $0.count > $1.count }
+
+        var segments = [String]()
+        var remaining = text
+
+        while !remaining.isEmpty {
+            // Find the earliest occurrence of any special token.
+            var earliestRange: Range<String.Index>?
+            var earliestToken: String?
+
+            for special in sortedSpecials {
+                if let range = remaining.range(of: special) {
+                    if earliestRange == nil || range.lowerBound < earliestRange!.lowerBound {
+                        earliestRange = range
+                        earliestToken = special
+                    }
+                }
+            }
+
+            guard let range = earliestRange, let token = earliestToken else {
+                // No more special tokens found; emit the rest as normal text.
+                segments.append(remaining)
+                break
+            }
+
+            // Emit text before the special token.
+            let prefix = String(remaining[remaining.startIndex..<range.lowerBound])
+            if !prefix.isEmpty {
+                segments.append(prefix)
+            }
+
+            // Emit the special token itself.
+            segments.append(token)
+
+            // Advance past the special token.
+            remaining = String(remaining[range.upperBound...])
+        }
+
+        return segments
+    }
+
+    /// Byte fallback: for tokens not in the vocabulary, encode each byte
+    /// of the token's UTF-8 representation and look them up individually.
+    private func appendByteFallback(_ token: String, to ids: inout [Int]) {
+        for byte in Array(token.utf8) {
+            if let id = byteFallbackTable[byte] {
+                ids.append(id)
+            }
+            // If even the byte is not in vocab, we silently skip it.
+        }
     }
 
     private func applyMerges(_ initialTokens: [String]) -> [String] {
@@ -103,6 +213,10 @@ public struct BPETokenizer: Tokenizer, Sendable {
         if id == specialTokens.bosTokenID { return specialTokens.bosTokenString }
         if id == specialTokens.eosTokenID { return specialTokens.eosTokenString }
         if id == specialTokens.padTokenID { return specialTokens.padTokenString }
+        // Check additional special tokens.
+        for (token, tokenID) in specialTokens.specialTokenMap {
+            if tokenID == id { return token }
+        }
         return nil
     }
 }

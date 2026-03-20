@@ -1,13 +1,22 @@
 import Testing
 @testable import EdgeRunnerCore
 
+struct PassthroughPreTokenizer: PreTokenizer {
+    func split(_ text: String) -> [String] { [text] }
+}
+
 @Suite("Tokenizer Protocol")
 struct TokenizerProtocolTests {
     @Test func protocolConformance() {
-        let vocab = TokenizerVocabulary(tokens: ["h", "e", "l", "lo", "hello", " ", "world"])
+        let vocab = TokenizerVocabulary(tokens: ["h", "e", "l", "lo", "hello", "\u{0120}", "world"])
         let special = SpecialTokens(bosToken: ("<s>", 7), eosToken: ("</s>", 8), padToken: ("<pad>", 9))
-        let tokenizer = BPETokenizer(vocabulary: vocab, specialTokens: special, merges: [])
-        #expect(tokenizer.vocabularySize == 10)
+        let tokenizer = BPETokenizer(
+            vocabulary: vocab,
+            specialTokens: special,
+            merges: [],
+            preTokenizer: PassthroughPreTokenizer()
+        )
+        #expect(tokenizer.vocabularySize == 7)
         #expect(tokenizer.eosTokenID == 8)
         #expect(tokenizer.bosTokenID == 7)
         #expect(tokenizer.padTokenID == 9)
@@ -98,7 +107,7 @@ struct TokenizerVocabularyTests {
 struct BPETokenizerTests {
     private func makeTestTokenizer() -> BPETokenizer {
         let tokens = [
-            "h", "e", "l", "o", " ", "w", "r", "d",
+            "h", "e", "l", "o", "\u{0120}", "w", "r", "d",
             "he", "ll", "lo",
             "hel", "llo",
             "hello",
@@ -111,7 +120,12 @@ struct BPETokenizerTests {
             ("wo", "r"), ("wor", "l"), ("worl", "d"),
         ]
         let special = SpecialTokens(bosToken: ("<s>", 18), eosToken: ("</s>", 19), padToken: nil)
-        return BPETokenizer(vocabulary: vocab, specialTokens: special, merges: merges)
+        return BPETokenizer(
+            vocabulary: vocab,
+            specialTokens: special,
+            merges: merges,
+            preTokenizer: PassthroughPreTokenizer()
+        )
     }
 
     @Test func encodeSimpleWord() {
@@ -166,8 +180,92 @@ struct BPETokenizerTests {
         #expect(text == "hello")
     }
 
-    @Test func vocabularySizeIncludesSpecial() {
+    @Test func vocabularySizeIsVocabCount() {
         let tokenizer = makeTestTokenizer()
-        #expect(tokenizer.vocabularySize == 20)
+        #expect(tokenizer.vocabularySize == 18)
+    }
+}
+
+@Suite("BPETokenizer Pipeline")
+struct BPETokenizerPipelineTests {
+    private func makeByteEncodedTokenizer() -> BPETokenizer {
+        let tokens = [
+            "H", "e", "l", "o", "\u{0120}", "w", "r", "d",
+            "he", "ll", "lo",
+            "hel", "llo",
+            "hello",
+            "\u{0120}w", "\u{0120}wo", "\u{0120}wor",
+            "\u{0120}worl", "\u{0120}world",
+            "<|im_start|>", "<|im_end|>",
+        ]
+        let vocab = TokenizerVocabulary(tokens: tokens)
+        let merges: [(String, String)] = [
+            ("h", "e"), ("l", "l"), ("ll", "o"),
+            ("he", "llo"),
+            ("\u{0120}", "w"), ("\u{0120}w", "o"), ("\u{0120}wo", "r"),
+            ("\u{0120}wor", "l"), ("\u{0120}worl", "d"),
+        ]
+        let special = SpecialTokens(
+            bosToken: nil,
+            eosToken: ("</s>", 21),
+            padToken: nil,
+            additionalSpecialTokens: ["<|im_start|>": 19, "<|im_end|>": 20]
+        )
+        let preTokenizer = PreTokenizerPattern.resolve("gpt-2")
+        return BPETokenizer(
+            vocabulary: vocab,
+            specialTokens: special,
+            merges: merges,
+            preTokenizer: preTokenizer
+        )
+    }
+
+    @Test func encodeSimpleWordThroughPipeline() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let ids = tokenizer.encode("hello")
+        #expect(ids == [13])
+    }
+
+    @Test func encodeWithLeadingSpace() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let ids = tokenizer.encode(" world")
+        #expect(ids == [18])
+    }
+
+    @Test func encodeTwoWords() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let ids = tokenizer.encode("hello world")
+        #expect(ids == [13, 18])
+    }
+
+    @Test func roundTripEncodeDecode() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let decoded = tokenizer.decode(tokenizer.encode("hello world"))
+        #expect(decoded == "hello world")
+    }
+
+    @Test func specialTokensPreservedDuringEncode() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let ids = tokenizer.encode("<|im_start|>hello world<|im_end|>")
+        #expect(ids.first == 19)
+        #expect(ids.last == 20)
+        #expect(ids.contains(13))
+    }
+
+    @Test func decodeSkipsSpecialTokens() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let decoded = tokenizer.decode([19, 13, 20], skipSpecialTokens: true)
+        #expect(decoded == "hello")
+    }
+
+    @Test func unknownTokenIDProducesReplacementChar() {
+        let tokenizer = makeByteEncodedTokenizer()
+        let decoded = tokenizer.decode([99999])
+        #expect(decoded == "\u{FFFD}")
+    }
+
+    @Test func vocabularySizeIsTokenCount() {
+        let tokenizer = makeByteEncodedTokenizer()
+        #expect(tokenizer.vocabularySize == 21)
     }
 }
