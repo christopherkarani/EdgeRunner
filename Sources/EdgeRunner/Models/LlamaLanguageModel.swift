@@ -421,11 +421,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let dim = config.embeddingDim
         let floatStride = MemoryLayout<Float>.stride
 
-        // Detect prefill vs decode mode
+        // Detect decode / prefix-reuse / full-prefill mode
         let previousTokenIDs = decoderState.previousTokenIDs
-        let isDecodeMode = tokenIDs.count == previousTokenIDs.count + 1
+
+        // Count how many tokens at the start match between previous and current sequences
+        let commonPrefixLen: Int = {
+            let minLen = min(tokenIDs.count, previousTokenIDs.count)
+            var i = 0
+            while i < minLen && tokenIDs[i] == previousTokenIDs[i] { i += 1 }
+            return i
+        }()
+
+        let isDecodeMode = commonPrefixLen == previousTokenIDs.count
+            && tokenIDs.count == commonPrefixLen + 1
             && tokenIDs.count > 1
-            && tokenIDs.dropLast().elementsEqual(previousTokenIDs)
 
         if isDecodeMode, let newTokenID = tokenIDs.last {
             // DECODE MODE: process only the single new token using KV cache
@@ -448,8 +457,51 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             // Update decoder state
             decoderState.previousTokenIDs = tokenIDs
             return logitsBuf
+        } else if commonPrefixLen > 0
+            && commonPrefixLen == previousTokenIDs.count
+            && tokenIDs.count > commonPrefixLen + 1 {
+            // PREFIX REUSE MODE: the new sequence strictly extends the cached sequence by
+            // multiple tokens. KV cache positions 0..<commonPrefixLen are already valid.
+            // Only prefill the suffix tokens with correct RoPE positions and causal masking.
+            let suffixTokens = Array(tokenIDs[commonPrefixLen...])
+            let suffixLen = suffixTokens.count
+
+            // Embedding lookup for suffix tokens only
+            let hiddenBuf: MTLBuffer
+            if let embBuf = preloadedWeights.lmHead {
+                let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
+                guard let hBuf = device.makeBuffer(length: suffixLen * dim * floatStride, options: .storageModeShared) else {
+                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for prefix-reuse embedding")
+                }
+                hiddenBuf = hBuf
+                let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: suffixLen * dim)
+                for (i, tokenID) in suffixTokens.enumerated() {
+                    let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
+                    memcpy(dstPtr + i * dim, embPtr + clampedID * dim, dim * floatStride)
+                }
+            } else {
+                guard let hBuf = device.makeBuffer(length: suffixLen * dim * floatStride, options: .storageModeShared) else {
+                    throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for prefix-reuse embedding")
+                }
+                hiddenBuf = hBuf
+                let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: suffixLen * dim)
+                try fillEmbeddings(tokenIDs: suffixTokens, into: dstPtr)
+            }
+
+            // Run prefill on suffix only — RoPE positions offset by commonPrefixLen,
+            // GQA attends over full KV cache (prefix + suffix), causal mask offset accordingly
+            let logitsBuf = try await fusedPrefillPass(
+                hiddenBuf: hiddenBuf,
+                seqLen: suffixLen,
+                startPosition: commonPrefixLen
+            )
+
+            // Update decoder state and KV cache position
+            decoderState.previousTokenIDs = tokenIDs
+            kvCache.setPosition(tokenIDs.count)
+            return logitsBuf
         } else {
-            // PREFILL MODE: process full sequence, populate KV cache
+            // FULL PREFILL MODE: no useful prefix match — reset and recompute everything
             let seqLen = tokenIDs.count
 
             // Reset KV cache for new sequence
@@ -574,7 +626,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// Returns MTLBuffer containing vocab-sized logits. ONE GPU sync for the entire forward pass.
     private func fusedPrefillPass(
         hiddenBuf: MTLBuffer,
-        seqLen: Int
+        seqLen: Int,
+        startPosition: Int = 0
     ) async throws -> MTLBuffer {
         let dim = config.embeddingDim
         let headDim = config.headDim
@@ -705,7 +758,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             if useQ8Fused && seqLen == 1 {
                 // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
-                let cacheWriteOffF16 = 0 * kvDim * halfStride
+                let cacheWriteOffF16 = startPosition * kvDim * halfStride
                 let fusedQKVPSO = fusedQKVPipeline
                 enc.setComputePipelineState(fusedQKVPSO)
                 enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
@@ -741,7 +794,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     let tokOff = t * dim * floatStride
                     let qOff = t * qDim * floatStride
                     let kvOff = t * kvDim * floatStride
-                    let cacheWriteOffF16 = t * kvDim * halfStride
+                    let cacheWriteOffF16 = (t + startPosition) * kvDim * halfStride
 
                     if useQ8Fused {
                         enc.setComputePipelineState(fusedQ8PSO)
@@ -812,8 +865,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(layerKCache, offset: 0, index: 5)
                 enc.setBuffer(layerVCache, offset: 0, index: 6)
                 var p = (UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim),
-                         UInt32(0), ropeTheta, Float(1.0), rmsEps,
-                         UInt32(1), 1.0 / sqrt(Float(headDim)))  // kvSeqLen=1 for first prefill
+                         UInt32(startPosition), ropeTheta, Float(1.0), rmsEps,
+                         UInt32(1 + startPosition), 1.0 / sqrt(Float(headDim)))  // kvSeqLen includes cached prefix
                 enc.setBytes(&p, length: 9 * 4, index: 7)
                 let totalHeads = numHeads + numKVHeads
                 // 32 threads per head (single simdgroup) — eliminates all threadgroup barriers
@@ -857,7 +910,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // RoPE Q
                 do {
                     var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads),
-                        headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
+                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1)
                     enc.setComputePipelineState(activeRopePSO)
                     enc.setBuffer(ropeQIn, offset: 0, index: 0)
                     enc.setBuffer(ropeQOutLocal, offset: 0, index: 1)
@@ -870,7 +923,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
                 do {
                     var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
-                        headDim: UInt32(headDim), startPos: 0, theta: ropeTheta, scalingFactor: 1)
+                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1)
                     enc.setBuffer(ropeKIn, offset: 0, index: 0)
                     enc.setBuffer(ropeKOut, offset: 0, index: 1)
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
@@ -881,7 +934,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // Convert RoPE'd K from f32 → f16 (layerKCache) for each position
                 for t in 0..<seqLen {
                     let srcOff = t * kvDim * floatStride
-                    let dstOff = t * kvDim * halfStride
+                    let dstOff = (t + startPosition) * kvDim * halfStride
                     enc.setComputePipelineState(convertF32ToF16PSO)
                     enc.setBuffer(ropeKOut, offset: srcOff, index: 0)
                     enc.setBuffer(layerKCache, offset: dstOff, index: 1)
@@ -898,11 +951,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let megaKernelUsed = hasQKNorm && seqLen == 1
             if !megaKernelUsed {
                 let groupSize = numHeads / numKVHeads
+                let totalKVSeqLen = seqLen + startPosition
                 var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
                     numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
                     groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
                     causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
-                    kvSeqLen: 0, qOffset: 0)
+                    kvSeqLen: UInt32(totalKVSeqLen), qOffset: UInt32(startPosition))
                 enc.setComputePipelineState(gqaPSO)
                 enc.setBuffer(ropeQOut, offset: 0, index: 0)
                 enc.setBuffer(layerKCache, offset: 0, index: 1)
