@@ -24,7 +24,8 @@ public struct SpecialTokens: Sendable {
     public init(
         bosToken: (String, Int)?,
         eosToken: (String, Int)?,
-        padToken: (String, Int)?
+        padToken: (String, Int)?,
+        additionalSpecialTokens: [String: Int] = [:]
     ) {
         self._bosString = bosToken?.0
         self._bosID = bosToken?.1
@@ -38,6 +39,10 @@ public struct SpecialTokens: Sendable {
         if let bos = bosToken { ids.insert(bos.1); map[bos.0] = bos.1 }
         if let eos = eosToken { ids.insert(eos.1); map[eos.0] = eos.1 }
         if let pad = padToken { ids.insert(pad.1); map[pad.0] = pad.1 }
+        for (token, id) in additionalSpecialTokens {
+            ids.insert(id)
+            map[token] = id
+        }
         self.specialTokenIDs = ids
         self.specialTokenMap = map
     }

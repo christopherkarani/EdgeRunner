@@ -30,6 +30,36 @@ struct SpecialTokensTests {
         #expect(special.padTokenID == nil)
         #expect(special.eosTokenID == 1)
     }
+
+    @Test func additionalSpecialTokensAreMerged() {
+        let additional: [String: Int] = [
+            "<|im_start|>": 100,
+            "<|im_end|>": 101,
+            "<|endoftext|>": 102,
+        ]
+        let special = SpecialTokens(
+            bosToken: ("<s>", 0),
+            eosToken: ("</s>", 1),
+            padToken: nil,
+            additionalSpecialTokens: additional
+        )
+        #expect(special.specialTokenIDs.count == 5)
+        #expect(special.specialTokenMap["<|im_start|>"] == 100)
+        #expect(special.specialTokenMap["<|im_end|>"] == 101)
+        #expect(special.specialTokenMap["<s>"] == 0)
+        #expect(special.specialTokenIDs.contains(100))
+        #expect(special.specialTokenIDs.contains(101))
+    }
+
+    @Test func emptyAdditionalTokensWorks() {
+        let special = SpecialTokens(
+            bosToken: ("<s>", 0),
+            eosToken: ("</s>", 1),
+            padToken: nil,
+            additionalSpecialTokens: [:]
+        )
+        #expect(special.specialTokenIDs.count == 2)
+    }
 }
 
 @Suite("TokenizerVocabulary")
