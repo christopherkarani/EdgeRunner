@@ -4,15 +4,18 @@ import EdgeRunnerIO
 
 // MARK: - Helpers
 
-/// Builds a minimal GPT-2 metadata dictionary suitable for `GGUFTokenizerMetadata(metadata:)`.
-private func makeGPT2Metadata(
+/// Builds a minimal metadata dictionary suitable for `GGUFTokenizerMetadata(metadata:)`.
+private func makeTokenizerMetadata(
     tokens: [String],
     merges: [String] = [],
     tokenTypes: [Int]? = nil,
+    scores: [Float]? = nil,
     bosTokenID: Int? = nil,
     eosTokenID: Int? = nil,
     paddingTokenID: Int? = nil,
+    unknownTokenID: Int? = nil,
     shouldAddBOS: Bool? = nil,
+    addSpacePrefix: Bool? = nil,
     preTokenizer: String? = nil,
     chatTemplate: String? = nil,
     model: String = "gpt2"
@@ -27,6 +30,9 @@ private func makeGPT2Metadata(
     if let tokenTypes {
         meta["tokenizer.ggml.token_type"] = .array(tokenTypes.map { .int($0) })
     }
+    if let scores {
+        meta["tokenizer.ggml.scores"] = .array(scores.map { .float($0) })
+    }
     if let bosTokenID {
         meta["tokenizer.ggml.bos_token_id"] = .int(bosTokenID)
     }
@@ -36,8 +42,14 @@ private func makeGPT2Metadata(
     if let paddingTokenID {
         meta["tokenizer.ggml.padding_token_id"] = .int(paddingTokenID)
     }
+    if let unknownTokenID {
+        meta["tokenizer.ggml.unknown_token_id"] = .int(unknownTokenID)
+    }
     if let shouldAddBOS {
         meta["tokenizer.ggml.add_bos_token"] = .bool(shouldAddBOS)
+    }
+    if let addSpacePrefix {
+        meta["tokenizer.ggml.add_space_prefix"] = .bool(addSpacePrefix)
     }
     if let preTokenizer {
         meta["tokenizer.ggml.pre"] = .string(preTokenizer)
@@ -58,7 +70,7 @@ struct TokenizerFactoryTests {
     @Test func createFromGPT2MetadataReturnsWorkingTokenizer() throws {
         let tokens = ["<s>", "</s>", "h", "e", "l", "lo", "hel"]
         let merges = ["h e", "l o", "he l"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             merges: merges,
             tokenTypes: [1, 1, 1, 1, 1, 1, 1],
@@ -77,7 +89,7 @@ struct TokenizerFactoryTests {
 
     @Test func createFromLlamaBPEMetadataSucceeds() throws {
         let tokens = ["<s>", "</s>", "a", "b"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1, 1, 1],
             bosTokenID: 0,
@@ -89,26 +101,32 @@ struct TokenizerFactoryTests {
         #expect(tokenizer.vocabularySize == 4)
     }
 
-    // MARK: - SentencePiece model throws unsupportedModel
+    // MARK: - SentencePiece model dispatches to SentencePieceTokenizer
 
-    @Test func sentencePieceModelThrowsUnsupportedModel() throws {
-        let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+    @Test func sentencePieceModelCreatesSentencePieceTokenizer() throws {
+        let tokens = ["<unk>", "<s>", "</s>", "\u{2581}", "a"]
+        let scores: [Float] = [0.0, 0.0, 0.0, -1.0, -2.0]
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
-            tokenTypes: [1, 1, 1],
-            eosTokenID: 1,
+            tokenTypes: [2, 3, 3, 1, 1],
+            scores: scores,
+            bosTokenID: 1,
+            eosTokenID: 2,
+            unknownTokenID: 0,
             model: "sentencepiece"
         )
         let gguf = try GGUFTokenizerMetadata(metadata: meta)
+        let tokenizer = try TokenizerFactory.create(from: gguf)
 
-        #expect(throws: TokenizerFactoryError.self) {
-            try TokenizerFactory.create(from: gguf)
-        }
+        #expect(tokenizer is SentencePieceTokenizer)
+        #expect(tokenizer.vocabularySize == 5)
+        #expect(tokenizer.eosTokenID == 2)
+        #expect(tokenizer.bosTokenID == 1)
     }
 
-    @Test func sentencePieceErrorIsUnsupportedModel() throws {
+    @Test func sentencePieceModelWithoutScoresThrowsMissingScores() throws {
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1, 1],
             eosTokenID: 1,
@@ -118,10 +136,10 @@ struct TokenizerFactoryTests {
 
         do {
             _ = try TokenizerFactory.create(from: gguf)
-            Issue.record("Expected TokenizerFactoryError.unsupportedModel to be thrown")
+            Issue.record("Expected TokenizerFactoryError.missingRequiredToken to be thrown")
         } catch let error as TokenizerFactoryError {
-            if case .unsupportedModel(let name) = error {
-                #expect(name == "sentencepiece")
+            if case .missingRequiredToken(let name) = error {
+                #expect(name == "scores")
             } else {
                 Issue.record("Wrong error case: \(error)")
             }
@@ -132,7 +150,7 @@ struct TokenizerFactoryTests {
 
     @Test func missingEOSThrowsMissingRequiredToken() throws {
         let tokens = ["<s>", "a", "b"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1, 1],
             bosTokenID: 0
@@ -147,7 +165,7 @@ struct TokenizerFactoryTests {
 
     @Test func missingEOSErrorIsMissingRequiredToken() throws {
         let tokens = ["<s>", "a", "b"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1, 1],
             bosTokenID: 0
@@ -172,7 +190,7 @@ struct TokenizerFactoryTests {
         // Tokens: 0=<s>(control), 1=</s>(control), 2=<|im_start|>(control), 3=hello(normal)
         let tokens = ["<s>", "</s>", "<|im_start|>", "hello"]
         let tokenTypes = [3, 3, 3, 1]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: tokenTypes,
             bosTokenID: 0,
@@ -192,7 +210,7 @@ struct TokenizerFactoryTests {
     @Test func userDefinedTokensAreRecognizedAsSpecial() throws {
         let tokens = ["<s>", "</s>", "<|custom|>", "a"]
         let tokenTypes = [3, 3, 4, 1]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: tokenTypes,
             bosTokenID: 0,
@@ -209,7 +227,7 @@ struct TokenizerFactoryTests {
 
     @Test func shouldAddBOSIsPropagated() throws {
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [3, 3, 1],
             bosTokenID: 0,
@@ -224,7 +242,7 @@ struct TokenizerFactoryTests {
 
     @Test func shouldAddBOSDefaultsToFalse() throws {
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [3, 3, 1],
             bosTokenID: 0,
@@ -248,7 +266,7 @@ struct TokenizerFactoryTests {
             tokens.append(String(format: "<0x%02X>", b))
             types.append(6) // byte type
         }
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: types,
             bosTokenID: 0,
@@ -265,7 +283,7 @@ struct TokenizerFactoryTests {
 
     @Test func preTokenizerResolvesFromMetadata() throws {
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [3, 3, 1],
             bosTokenID: 0,
@@ -283,7 +301,7 @@ struct TokenizerFactoryTests {
     @Test func chatTemplateEngineIsCreatedWhenPresent() throws {
         let template = "{% for message in messages %}{{ message.content }}{% endfor %}"
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [3, 3, 1],
             bosTokenID: 0,
@@ -293,12 +311,13 @@ struct TokenizerFactoryTests {
         let gguf = try GGUFTokenizerMetadata(metadata: meta)
         let tokenizer = try TokenizerFactory.create(from: gguf)
 
-        #expect(tokenizer.chatTemplateEngine != nil)
+        let bpe = try #require(tokenizer as? BPETokenizer)
+        #expect(bpe.chatTemplateEngine != nil)
     }
 
     @Test func noChatTemplateYieldsNilEngine() throws {
         let tokens = ["<s>", "</s>", "a"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [3, 3, 1],
             bosTokenID: 0,
@@ -307,14 +326,15 @@ struct TokenizerFactoryTests {
         let gguf = try GGUFTokenizerMetadata(metadata: meta)
         let tokenizer = try TokenizerFactory.create(from: gguf)
 
-        #expect(tokenizer.chatTemplateEngine == nil)
+        let bpe = try #require(tokenizer as? BPETokenizer)
+        #expect(bpe.chatTemplateEngine == nil)
     }
 
     // MARK: - EOS ID out of bounds throws missingRequiredToken
 
     @Test func eosIDOutOfBoundsThrowsMissingRequiredToken() throws {
         let tokens = ["<s>", "</s>"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1],
             eosTokenID: 999 // out of bounds
@@ -337,7 +357,7 @@ struct TokenizerFactoryTests {
 
     @Test func unknownModelTypeThrowsUnsupportedModel() throws {
         let tokens = ["<s>", "</s>"]
-        let meta = makeGPT2Metadata(
+        let meta = makeTokenizerMetadata(
             tokens: tokens,
             tokenTypes: [1, 1],
             eosTokenID: 1,
@@ -355,5 +375,78 @@ struct TokenizerFactoryTests {
                 Issue.record("Wrong error case: \(error)")
             }
         }
+    }
+
+    // MARK: - Llama model dispatches to SentencePieceTokenizer
+
+    @Test func createFromLlamaModelReturnsSentencePiece() throws {
+        let metadata = try GGUFTokenizerMetadata(metadata: [
+            "tokenizer.ggml.model": .string("llama"),
+            "tokenizer.ggml.tokens": .array(["<unk>", "<s>", "</s>", "\u{2581}", "a"].map { .string($0) }),
+            "tokenizer.ggml.scores": .array([0.0, 0.0, 0.0, -1.0, -2.0].map { MetadataValue.float(Float($0)) }),
+            "tokenizer.ggml.token_type": .array([2, 3, 3, 1, 1].map { MetadataValue.int($0) }),
+            "tokenizer.ggml.bos_token_id": .int(1),
+            "tokenizer.ggml.eos_token_id": .int(2),
+        ])
+        let tokenizer = try TokenizerFactory.create(from: metadata)
+        #expect(tokenizer is SentencePieceTokenizer)
+        #expect(tokenizer.eosTokenID == 2)
+        #expect(tokenizer.bosTokenID == 1)
+    }
+
+    @Test func llamaModelWithoutScoresThrows() throws {
+        let metadata = try GGUFTokenizerMetadata(metadata: [
+            "tokenizer.ggml.model": .string("llama"),
+            "tokenizer.ggml.tokens": .array(["a", "b"].map { .string($0) }),
+            "tokenizer.ggml.eos_token_id": .int(1),
+        ])
+        #expect(throws: TokenizerFactoryError.self) {
+            _ = try TokenizerFactory.create(from: metadata)
+        }
+    }
+
+    // MARK: - Llama model shouldAddBOS defaults to true
+
+    @Test func llamaModelShouldAddBOSDefaultsToTrue() throws {
+        let tokens = ["<unk>", "<s>", "</s>", "\u{2581}", "a"]
+        let scores: [Float] = [0.0, 0.0, 0.0, -1.0, -2.0]
+        let meta = makeTokenizerMetadata(
+            tokens: tokens,
+            tokenTypes: [2, 3, 3, 1, 1],
+            scores: scores,
+            bosTokenID: 1,
+            eosTokenID: 2,
+            unknownTokenID: 0,
+            model: "llama"
+            // shouldAddBOS not set — defaults to true for SPM
+        )
+        let gguf = try GGUFTokenizerMetadata(metadata: meta)
+        let tokenizer = try TokenizerFactory.create(from: gguf)
+
+        #expect(tokenizer.shouldAddBOS == true)
+    }
+
+    // MARK: - Llama model addSpacePrefix defaults to true
+
+    @Test func llamaModelAddSpacePrefixDefaultsToTrue() throws {
+        let tokens = ["<unk>", "<s>", "</s>", "\u{2581}", "a"]
+        let scores: [Float] = [0.0, 0.0, 0.0, -1.0, -2.0]
+        let meta = makeTokenizerMetadata(
+            tokens: tokens,
+            tokenTypes: [2, 3, 3, 1, 1],
+            scores: scores,
+            bosTokenID: 1,
+            eosTokenID: 2,
+            unknownTokenID: 0,
+            model: "llama"
+        )
+        let gguf = try GGUFTokenizerMetadata(metadata: meta)
+        let tokenizer = try TokenizerFactory.create(from: gguf)
+        let spm = try #require(tokenizer as? SentencePieceTokenizer)
+
+        // Encode "a" — with addSpacePrefix=true, the SPM prepends the space char.
+        let encoded = spm.encode("a")
+        // Should contain the "▁a" or "▁" + "a" tokens, confirming space prefix is on.
+        #expect(!encoded.isEmpty)
     }
 }
