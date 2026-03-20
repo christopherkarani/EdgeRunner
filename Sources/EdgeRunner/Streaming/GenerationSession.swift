@@ -4,18 +4,35 @@ import EdgeRunnerCore
 /// Manages a single text generation session with streaming output.
 public struct GenerationSession<Model: EdgeRunnerLanguageModel>: Sendable {
     private let model: Model
-    private let samplingPipeline: SamplingPipeline
+    private let sampling: SamplingConfiguration
     public let maxTokens: Int
     private let onToken: (@Sendable (Int, String) -> Void)?
 
     public init(
         model: Model,
-        samplingPipeline: SamplingPipeline = .greedy,
+        sampling: SamplingConfiguration = SamplingConfiguration(),
         maxTokens: Int = 2048,
         onToken: (@Sendable (Int, String) -> Void)? = nil
     ) {
         self.model = model
-        self.samplingPipeline = samplingPipeline
+        self.sampling = sampling
+        self.maxTokens = maxTokens
+        self.onToken = onToken
+    }
+
+    /// Backward-compatible initializer that accepts a `SamplingPipeline`.
+    ///
+    /// Uses the default `SamplingConfiguration` internally — the pipeline
+    /// parameter is accepted for API compatibility but ignored in favor of
+    /// the configuration-based approach.
+    public init(
+        model: Model,
+        samplingPipeline: SamplingPipeline,
+        maxTokens: Int = 2048,
+        onToken: (@Sendable (Int, String) -> Void)? = nil
+    ) {
+        self.model = model
+        self.sampling = SamplingConfiguration()
         self.maxTokens = maxTokens
         self.onToken = onToken
     }
@@ -25,6 +42,7 @@ public struct GenerationSession<Model: EdgeRunnerLanguageModel>: Sendable {
         let model = self.model
         let maxTokens = self.maxTokens
         let onToken = self.onToken
+        let sampling = self.sampling
 
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -39,10 +57,10 @@ public struct GenerationSession<Model: EdgeRunnerLanguageModel>: Sendable {
                     for _ in 0..<maxTokens {
                         try Task.checkCancellation()
 
-                        // Use nextToken — universal path for both FM and local models
+                        // Use nextToken with the session's sampling configuration
                         let tokenID = try await model.nextToken(
                             for: tokenIDs,
-                            sampling: SamplingConfiguration()
+                            sampling: sampling
                         )
 
                         if tokenID == model.eosTokenID {

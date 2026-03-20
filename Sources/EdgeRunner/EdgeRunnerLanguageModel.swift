@@ -95,20 +95,12 @@ public protocol LogitsModel: EdgeRunnerLanguageModel {
     func logits(for tokenIDs: [Int]) async throws -> [Float]
 }
 
-// Default implementation: LogitsModel gets nextToken via logits + greedy sampling
+// Default implementation: LogitsModel gets nextToken via logits + sampling pipeline
 extension LogitsModel {
     public func nextToken(for tokenIDs: [Int], sampling: SamplingConfiguration) async throws -> Int {
         let logitsArray = try await logits(for: tokenIDs)
-        // Greedy: pick argmax
-        var maxVal: Float = -.infinity
-        var maxIdx = 0
-        for (i, v) in logitsArray.enumerated() {
-            if v > maxVal {
-                maxVal = v
-                maxIdx = i
-            }
-        }
-        return maxIdx
+        let pipeline = sampling.toPipeline()
+        return pipeline.sample(logits: logitsArray, previousTokens: tokenIDs)
     }
 }
 
@@ -120,10 +112,24 @@ extension EdgeRunnerLanguageModel {
     ) -> String? { nil }
 }
 
-// Default stream implementation
+// Default stream implementation — satisfies protocol requirement
 extension EdgeRunnerLanguageModel {
     public func stream(_ prompt: String) -> AsyncThrowingStream<String, Error> {
+        stream(prompt, sampling: SamplingConfiguration())
+    }
+
+    /// Streams generated text using the specified sampling configuration.
+    ///
+    /// - Parameters:
+    ///   - prompt: The input prompt text.
+    ///   - sampling: Configuration for sampling strategy (temperature, top-p, etc.).
+    /// - Returns: An `AsyncThrowingStream` that yields generated text chunks.
+    public func stream(
+        _ prompt: String,
+        sampling: SamplingConfiguration
+    ) -> AsyncThrowingStream<String, Error> {
         let model = self
+        let sampling = sampling
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -132,7 +138,7 @@ extension EdgeRunnerLanguageModel {
                         try Task.checkCancellation()
                         let tokenID = try await model.nextToken(
                             for: tokenIDs,
-                            sampling: SamplingConfiguration()
+                            sampling: sampling
                         )
                         if tokenID == model.eosTokenID { break }
                         tokenIDs.append(tokenID)
