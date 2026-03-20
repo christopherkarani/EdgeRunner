@@ -321,12 +321,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// - Returns: The ID of the generated next token.
     /// - Throws: `GenerationError` if generation fails.
     public func nextToken(for tokenIDs: [Int], sampling: SamplingConfiguration) async throws -> Int {
+        let logitsArray: [Float]
         if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
-            return greedyArgmax(cached)
+            logitsArray = cached
+        } else {
+            logitsArray = try await self.logits(for: tokenIDs)
         }
 
-        let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs)
-        return greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
+        let pipeline = sampling.toPipeline()
+        return pipeline.sample(logits: logitsArray, previousTokens: tokenIDs)
     }
 
     /// Computes the raw logits for the next token given an input sequence.
@@ -375,9 +378,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             && tokenIDs.count > 1
             && tokenIDs.dropLast().elementsEqual(previousTokenIDs)
 
-        if isDecodeMode {
+        if isDecodeMode, let newTokenID = tokenIDs.last {
             // DECODE MODE: process only the single new token using KV cache
-            let newTokenID = tokenIDs.last!
             let currentPos = previousTokenIDs.count  // 0-indexed position of new token
 
             // Embedding lookup for single token — use pre-allocated buffer (zero allocation)
