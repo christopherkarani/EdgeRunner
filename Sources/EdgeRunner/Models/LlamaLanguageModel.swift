@@ -25,6 +25,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
+    private let tokenizer: BPETokenizer?
     private var tiedEmbeddingWeightName: String {
         weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
     }
@@ -70,13 +71,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let layerKCaches: [MTLBuffer]
     private let layerVCaches: [MTLBuffer]
 
-    // Dequantized weight cache — avoids re-dequantizing on every forward pass
-    private let weightCache: WeightCacheActor
-
-    // Metal buffer cache — avoids re-creating MTLBuffers from [Float] on every GEMV call
-    private let metalBufferCache: MetalBufferCacheActor
-
     // Pre-loaded weight buffers — eliminates async actor hops during forward pass
+    // Uses raw Q8_0 buffers directly; no float32 caching to save memory
     private let preloadedWeights: PreloadedWeightsStore
 
     // Pre-allocated scratch buffers — eliminates per-call buffer allocations
@@ -90,13 +86,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let decodeDebugOptions: DecodeDebugOptions
 
     public init(model: LlamaModel, maxSeqLen: Int = 4096) throws {
-        try self.init(model: model, maxSeqLen: maxSeqLen, decodeDebugOptions: nil)
+        try self.init(model: model, maxSeqLen: maxSeqLen, decodeDebugOptions: nil, tokenizer: nil)
     }
 
     fileprivate init(
         model: LlamaModel,
         maxSeqLen: Int = 4096,
-        decodeDebugOptions: DecodeDebugOptions?
+        decodeDebugOptions: DecodeDebugOptions?,
+        tokenizer: BPETokenizer? = nil
     ) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -107,6 +104,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         self.config = model.config
         self.weights = model.loadedWeights
+        self.tokenizer = tokenizer
         self.device = device
         self.commandQueue = queue
         self.decodeDebugOptions = decodeDebugOptions ?? DecodeDebugOptions(
@@ -168,8 +166,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Initialize decoder state for incremental decode
         self.decoderState = DecoderStateStore()
 
-        self.weightCache = WeightCacheActor()
-        self.metalBufferCache = MetalBufferCacheActor()
         self.preloadedWeights = PreloadedWeightsStore()
 
         // Pre-allocate scratch buffers for max seqLen
@@ -223,6 +219,25 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // MARK: - EdgeRunnerLanguageModel conformance
 
+    /// Loads a Llama-family model from a GGUF file.
+    ///
+    /// This method loads the model weights using memory-mapped I/O for efficient
+    /// memory usage and fast loading. The model is immediately ready for inference
+    /// after loading completes.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// let modelURL = URL(fileURLWithPath: "/path/to/model.gguf")
+    /// let config = ModelConfiguration(contextWindowSize: 2048)
+    /// let model = try await LlamaLanguageModel.load(from: modelURL, configuration: config)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - url: File URL pointing to a `.gguf` model file.
+    ///   - configuration: Configuration for loading and behavior.
+    /// - Returns: A loaded `LlamaLanguageModel` ready for inference.
+    /// - Throws: `GenerationError.modelLoadFailed` if loading fails.
     public static func load(
         from url: URL,
         configuration: ModelConfiguration
@@ -232,6 +247,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let ggufConfig = try LlamaConfig(fromGGUFMetadata: loader.modelConfig.metadata)
         var model = LlamaModel(config: ggufConfig)
         try model.loadWeights(from: weightMap)
+
+        // Create BPE tokenizer from GGUF metadata
+        let bpeTokenizer: BPETokenizer?
+        do {
+            let tokenizerMetadata = try loader.modelConfig.tokenizerMetadata()
+            bpeTokenizer = try TokenizerFactory.create(from: tokenizerMetadata)
+        } catch {
+            // Fall back to nil tokenizer if metadata is missing or unsupported
+            bpeTokenizer = nil
+        }
+
         return try LlamaLanguageModel(
             model: model,
             maxSeqLen: configuration.contextWindowSize,
@@ -239,24 +265,61 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 environment: ProcessInfo.processInfo.environment,
                 config: ggufConfig,
                 overrides: configuration.llamaDecodeOverrides
-            )
+            ),
+            tokenizer: bpeTokenizer
         )
     }
 
+    /// Tokenizes text into token IDs using the BPE tokenizer loaded from GGUF metadata.
+    /// Falls back to byte-level encoding if no tokenizer is available.
     public func tokenize(_ text: String) -> [Int] {
-        Array(text.utf8).map { Int($0) }
+        if let tokenizer {
+            return tokenizer.encode(text, addBOS: tokenizer.shouldAddBOS)
+        }
+        return Array(text.utf8).map { Int($0) }
     }
 
+    /// Detokenizes token IDs back to text using the BPE tokenizer.
+    /// Falls back to byte-level decoding if no tokenizer is available.
     public func detokenize(_ ids: [Int]) -> String {
-        String(ids.compactMap { UInt8(exactly: $0) }.map { Character(UnicodeScalar($0)) })
+        if let tokenizer {
+            return tokenizer.decode(ids, skipSpecialTokens: true)
+        }
+        return String(ids.compactMap { UInt8(exactly: $0) }.map { Character(UnicodeScalar($0)) })
     }
 
-    public var eosTokenID: Int { 151645 }
-    public var bosTokenID: Int? { 151643 }
-    public var vocabularySize: Int { config.vocabSize }
+    /// The end-of-sequence token ID.
+    public var eosTokenID: Int { tokenizer?.eosTokenID ?? 151645 }
+
+    /// The beginning-of-sequence token ID.
+    public var bosTokenID: Int? { tokenizer?.bosTokenID ?? 151643 }
+
+    /// The total number of tokens in the model's vocabulary.
+    public var vocabularySize: Int { tokenizer?.vocabularySize ?? config.vocabSize }
+
+    /// Formats conversation messages using the model's chat template.
+    public func applyChatTemplate(
+        messages: [EdgeRunnerCore.ChatMessage],
+        addGenerationPrompt: Bool
+    ) -> String? {
+        try? tokenizer?.applyChatTemplate(
+            messages: messages,
+            addGenerationPrompt: addGenerationPrompt
+        )
+    }
 
     // MARK: - LogitsModel: forward pass
 
+    /// Generates the next token using the provided sampling configuration.
+    ///
+    /// This method performs a forward pass through the model and applies
+    /// the specified sampling strategy (greedy, temperature, top-p, etc.).
+    ///
+    /// - Parameters:
+    ///   - tokenIDs: The input token sequence.
+    ///   - sampling: Configuration for sampling strategy.
+    /// - Returns: The ID of the generated next token.
+    /// - Throws: `GenerationError` if generation fails.
     public func nextToken(for tokenIDs: [Int], sampling: SamplingConfiguration) async throws -> Int {
         if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
             return greedyArgmax(cached)
@@ -266,6 +329,31 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
     }
 
+    /// Computes the raw logits for the next token given an input sequence.
+    ///
+    /// This is the core inference method. It performs a forward pass through
+    /// the transformer and returns the unnormalized log probabilities for each
+    /// token in the vocabulary.
+    ///
+    /// ## Performance
+    ///
+    /// For autoregressive generation, this method automatically uses the KV cache
+    /// for sequences longer than one token, significantly speeding up inference.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// var tokens = [1]  // Start with BOS token
+    /// for _ in 0..<10 {
+    ///     let logits = try await model.logits(for: tokens)
+    ///     let nextToken = greedyArgmax(logits)  // Or use sampling
+    ///     tokens.append(nextToken)
+    /// }
+    /// ```
+    ///
+    /// - Parameter tokenIDs: The input sequence of token IDs.
+    /// - Returns: An array of logits with length equal to `vocabularySize`.
+    /// - Throws: `GenerationError` if the forward pass fails.
     public func logits(for tokenIDs: [Int]) async throws -> [Float] {
         if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
             return cached
@@ -1964,35 +2052,57 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // MARK: - Weight Reading with Dequantization
 
-    /// Read a weight tensor, dequantizing on first access and caching the result.
-    private func readWeight(_ name: String) async throws -> [Float] {
-        if let cached = await weightCache.get(name) {
-            return cached
-        }
-
+    /// Read a weight tensor as an MTLBuffer, dequantizing if necessary.
+    /// Does NOT cache - creates a fresh buffer each time.
+    /// For Q8_0 models, prefer makeRawQ8BufferIfAvailable to avoid float32 materialization.
+    private func readWeightBuffer(_ name: String) async throws -> MTLBuffer {
         guard let storage = weights[name] else {
             throw GenerationError.modelLoadFailed(reason: "Missing weight: \(name)")
         }
 
-        let floats: [Float]
+        let floats = try await dequantizeToFloatArray(storage)
+        guard let buffer = device.makeBuffer(
+            bytes: floats,
+            length: floats.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create MTLBuffer for \(name)")
+        }
+        return buffer
+    }
+
+    /// Dequantizes weight storage to a Float array (no caching).
+    /// Copies data to ensure proper alignment for all data types.
+    private func dequantizeToFloatArray(_ storage: TensorStorage) async throws -> [Float] {
         let elementCount = storage.elementCount
         let basePtr = storage.buffer.contents() + storage.byteOffset
 
         switch storage.dataType {
         case .float32:
-            let ptr = basePtr.bindMemory(to: Float.self, capacity: elementCount)
-            floats = Array(UnsafeBufferPointer(start: ptr, count: elementCount))
+            // Copy to ensure alignment - don't assume byteOffset is 4-byte aligned
+            var result = [Float](repeating: 0, count: elementCount)
+            result.withUnsafeMutableBytes { rawBuffer in
+                rawBuffer.copyMemory(from: UnsafeRawBufferPointer(
+                    start: basePtr,
+                    count: elementCount * MemoryLayout<Float>.stride
+                ))
+            }
+            return result
 
         case .float16:
-            let ptr = basePtr.bindMemory(to: Float16.self, capacity: elementCount)
-            floats = Array(UnsafeBufferPointer(start: ptr, count: elementCount)).map { Float($0) }
+            let byteCount = elementCount * MemoryLayout<Float16>.stride
+            var f16Array = [Float16](repeating: 0, count: elementCount)
+            f16Array.withUnsafeMutableBytes { rawBuffer in
+                rawBuffer.copyMemory(from: UnsafeRawBufferPointer(start: basePtr, count: byteCount))
+            }
+            return f16Array.map { Float($0) }
 
         case .q4_0:
             let blockCount = elementCount / 32
             let byteCount = blockCount * 18
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
-            floats = try await dequantQ4_0.dequantise(
+            return try await dequantQ4_0.dequantise(
                 blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
             )
 
@@ -2001,7 +2111,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let byteCount = blockCount * 34
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
-            floats = try await dequantQ8_0.dequantise(
+            return try await dequantQ8_0.dequantise(
                 blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
             )
 
@@ -2010,38 +2120,19 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let byteCount = superBlockCount * 144
             let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
             let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
-            floats = try await dequantQ4KM.dequantise(
+            return try await dequantQ4KM.dequantise(
                 blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
             )
 
         default:
             throw GenerationError.modelLoadFailed(
-                reason: "Unsupported weight data type \(storage.dataType) for \(name)"
+                reason: "Unsupported weight data type \(storage.dataType)"
             )
         }
-
-        await weightCache.set(name, value: floats)
-        return floats
-    }
-
-    /// Read a weight tensor as a cached MTLBuffer.
-    private func readWeightBuffer(_ name: String) async throws -> MTLBuffer {
-        if let cached = await metalBufferCache.get(name) {
-            return cached.rawValue
-        }
-        let floats = try await readWeight(name)
-        guard let buffer = device.makeBuffer(
-            bytes: floats,
-            length: floats.count * MemoryLayout<Float>.stride,
-            options: .storageModeShared
-        ) else {
-            throw GenerationError.modelLoadFailed(reason: "Failed to create MTLBuffer for \(name)")
-        }
-        await metalBufferCache.set(name, handle: MetalBufferHandle(buffer))
-        return buffer
     }
 
     /// Exposes the original Q8_0 payload without materializing a Float32 copy.
+    /// This is the memory-efficient path - use this for matmul weights when available.
     private func makeRawQ8BufferIfAvailable(_ name: String) -> MTLBuffer? {
         guard let storage = weights[name], storage.dataType == .q8_0 else {
             return nil
@@ -2312,14 +2403,6 @@ private final class Metal4State: @unchecked Sendable {
     }
 }
 
-// MARK: - Weight Cache Actor
-
-private actor WeightCacheActor {
-    private var cache: [String: [Float]] = [:]
-    func get(_ name: String) -> [Float]? { cache[name] }
-    func set(_ name: String, value: [Float]) { cache[name] = value }
-}
-
 // MARK: - Pre-allocated Scratch Buffers
 
 /// Pre-allocated GPU buffers reused across all forward passes.
@@ -2454,14 +2537,6 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
         self.lmHeadCols = lmHeadCols
         self.isLoaded = true
     }
-}
-
-// MARK: - Metal Buffer Cache Actor
-
-private actor MetalBufferCacheActor {
-    private var cache: [String: MetalBufferHandle] = [:]
-    func get(_ name: String) -> MetalBufferHandle? { cache[name] }
-    func set(_ name: String, handle: MetalBufferHandle) { cache[name] = handle }
 }
 
 // MARK: - Decoder State Store
