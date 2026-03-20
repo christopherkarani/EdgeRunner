@@ -96,8 +96,7 @@ public struct BPETokenizer: Tokenizer, Sendable {
         guard !text.isEmpty else { return [] }
         var ids = [Int]()
 
-        let useBOS = addBOS || shouldAddBOS
-        if useBOS, let bosID = specialTokens.bosTokenID {
+        if addBOS, let bosID = specialTokens.bosTokenID {
             ids.append(bosID)
         }
 
