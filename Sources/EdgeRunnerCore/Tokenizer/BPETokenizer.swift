@@ -8,8 +8,13 @@ public struct BPETokenizer: Tokenizer, Sendable {
     private let mergeRanks: [String: Int]
     private let mergeResults: [String: String]
     private let preTokenizer: PreTokenizer
-    private let shouldAddBOS: Bool
     private let byteFallbackTable: [UInt8: Int]
+
+    /// Whether to prepend BOS token during encoding (from GGUF metadata).
+    public let shouldAddBOS: Bool
+
+    /// Optional chat template engine for formatting conversation messages.
+    public let chatTemplateEngine: ChatTemplateEngine?
 
     public var vocabularySize: Int {
         vocabulary.count
@@ -24,12 +29,15 @@ public struct BPETokenizer: Tokenizer, Sendable {
         specialTokens: SpecialTokens,
         merges: [(String, String)],
         preTokenizer: PreTokenizer,
-        shouldAddBOS: Bool = false
+        shouldAddBOS: Bool = false,
+        byteFallbackTable: [UInt8: Int]? = nil,
+        chatTemplateEngine: ChatTemplateEngine? = nil
     ) {
         self.vocabulary = vocabulary
         self.specialTokens = specialTokens
         self.preTokenizer = preTokenizer
         self.shouldAddBOS = shouldAddBOS
+        self.chatTemplateEngine = chatTemplateEngine
         var ranks = [String: Int](minimumCapacity: merges.count)
         var results = [String: String](minimumCapacity: merges.count)
         for (index, merge) in merges.enumerated() {
@@ -40,16 +48,40 @@ public struct BPETokenizer: Tokenizer, Sendable {
         self.mergeRanks = ranks
         self.mergeResults = results
 
-        // Build byte fallback table: map each byte value to its vocab ID
-        // if the byte-encoded character exists in the vocabulary.
-        var fallback = [UInt8: Int]()
-        for b in UInt8.min...UInt8.max {
-            let encoded = String(ByteEncoder.encode(b))
-            if let id = vocabulary.tokenToID(encoded) {
-                fallback[b] = id
+        // Use provided byte fallback table, or build one from vocabulary.
+        if let provided = byteFallbackTable {
+            self.byteFallbackTable = provided
+        } else {
+            var fallback = [UInt8: Int]()
+            for b in UInt8.min...UInt8.max {
+                let encoded = String(ByteEncoder.encode(b))
+                if let id = vocabulary.tokenToID(encoded) {
+                    fallback[b] = id
+                }
             }
+            self.byteFallbackTable = fallback
         }
-        self.byteFallbackTable = fallback
+    }
+
+    // MARK: - Chat Template
+
+    /// Apply the chat template to format conversation messages.
+    /// Returns nil if no chat template is available.
+    public func applyChatTemplate(
+        messages: [ChatMessage],
+        addGenerationPrompt: Bool = true,
+        tools: [ToolDefinition]? = nil
+    ) throws -> String? {
+        guard let engine = chatTemplateEngine else { return nil }
+        let bosToken = specialTokens.bosTokenID.flatMap { vocabulary.idToToken($0) }
+        let eosToken = vocabulary.idToToken(eosTokenID)
+        return try engine.apply(
+            messages: messages,
+            addGenerationPrompt: addGenerationPrompt,
+            bosToken: bosToken,
+            eosToken: eosToken,
+            tools: tools
+        )
     }
 
     public func encode(_ text: String, addBOS: Bool = false) -> [Int] {
