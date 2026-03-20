@@ -25,7 +25,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
-    private let tokenizer: BPETokenizer?
+    private let tokenizer: (any Tokenizer)?
     private var tiedEmbeddingWeightName: String {
         weights["lmHead.weight"] != nil ? "lmHead.weight" : "embedding.weight"
     }
@@ -93,7 +93,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         model: LlamaModel,
         maxSeqLen: Int = 4096,
         decodeDebugOptions: DecodeDebugOptions?,
-        tokenizer: BPETokenizer? = nil
+        tokenizer: (any Tokenizer)? = nil
     ) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw GenerationError.modelLoadFailed(reason: "No Metal device available")
@@ -248,14 +248,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         var model = LlamaModel(config: ggufConfig)
         try model.loadWeights(from: weightMap)
 
-        // Create BPE tokenizer from GGUF metadata
-        let bpeTokenizer: BPETokenizer?
+        // Create tokenizer from GGUF metadata (BPE or SentencePiece)
+        let loadedTokenizer: (any Tokenizer)?
         do {
             let tokenizerMetadata = try loader.modelConfig.tokenizerMetadata()
-            bpeTokenizer = try TokenizerFactory.create(from: tokenizerMetadata)
+            loadedTokenizer = try TokenizerFactory.create(from: tokenizerMetadata)
         } catch {
             // Fall back to nil tokenizer if metadata is missing or unsupported
-            bpeTokenizer = nil
+            loadedTokenizer = nil
         }
 
         return try LlamaLanguageModel(
@@ -266,11 +266,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 config: ggufConfig,
                 overrides: configuration.llamaDecodeOverrides
             ),
-            tokenizer: bpeTokenizer
+            tokenizer: loadedTokenizer
         )
     }
 
-    /// Tokenizes text into token IDs using the BPE tokenizer loaded from GGUF metadata.
+    /// Tokenizes text into token IDs using the tokenizer loaded from GGUF metadata.
     /// Falls back to byte-level encoding if no tokenizer is available.
     public func tokenize(_ text: String) -> [Int] {
         if let tokenizer {
@@ -279,7 +279,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return Array(text.utf8).map { Int($0) }
     }
 
-    /// Detokenizes token IDs back to text using the BPE tokenizer.
+    /// Detokenizes token IDs back to text using the tokenizer.
     /// Falls back to byte-level decoding if no tokenizer is available.
     public func detokenize(_ ids: [Int]) -> String {
         if let tokenizer {

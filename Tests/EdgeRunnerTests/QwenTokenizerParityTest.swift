@@ -26,7 +26,7 @@ struct QwenTokenizerParityTest {
         ("emoji: 🎉🚀", [37523, 25, 11162, 236, 231, 145836]),
     ]
 
-    private func loadTokenizer() throws -> BPETokenizer {
+    private func loadTokenizer() throws -> any Tokenizer {
         let url = URL(fileURLWithPath: Self.modelPath)
         let loader = try GGUFLoader(url: url)
         let metadata = try loader.modelConfig.tokenizerMetadata()
