@@ -6,17 +6,20 @@ struct LlamaDecodeOverrides: Sendable, Equatable {
     var disableMegaKernel: Bool?
     var disableFusedFinalNormLMHead: Bool?
     var disableKVCacheBarrier: Bool?
+    var preferMetal4DecodePath: Bool?
 
     init(
         forceBaseDecodePath: Bool? = nil,
         disableMegaKernel: Bool? = nil,
         disableFusedFinalNormLMHead: Bool? = nil,
-        disableKVCacheBarrier: Bool? = nil
+        disableKVCacheBarrier: Bool? = nil,
+        preferMetal4DecodePath: Bool? = nil
     ) {
         self.forceBaseDecodePath = forceBaseDecodePath
         self.disableMegaKernel = disableMegaKernel
         self.disableFusedFinalNormLMHead = disableFusedFinalNormLMHead
         self.disableKVCacheBarrier = disableKVCacheBarrier
+        self.preferMetal4DecodePath = preferMetal4DecodePath
     }
 }
 

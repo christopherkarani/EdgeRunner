@@ -690,6 +690,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     private func runDecodePass(hiddenBuf: MTLBuffer, currentPos: Int) async throws -> MTLBuffer {
         if !decodeDebugOptions.requiresBaseDecodePath,
+           decodeDebugOptions.preferMetal4DecodePath,
+           #available(macOS 26.0, iOS 26.0, *),
+           let m4 = metal4State {
+            return try await fusedDecodePassMetal4(
+                hiddenBuf: hiddenBuf,
+                currentPos: currentPos,
+                state: m4
+            )
+        }
+
+        if !decodeDebugOptions.requiresBaseDecodePath,
            let paramsBuf = decodeParamsBuffer,
            preloadedWeights.layers.first?.wqRaw != nil {
             return try await fusedDecodePassOpt(
@@ -2775,6 +2786,7 @@ private struct DecodeDebugOptions: Sendable {
     let disableMegaKernel: Bool
     let disableFusedFinalNormLMHead: Bool
     let disableKVCacheBarrier: Bool
+    let preferMetal4DecodePath: Bool
 
     var requiresBaseDecodePath: Bool {
         forceBaseDecodePath || disableMegaKernel
@@ -2798,6 +2810,9 @@ private struct DecodeDebugOptions: Sendable {
         self.disableKVCacheBarrier =
             overrides?.disableKVCacheBarrier
             ?? Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_KV_BARRIER"])
+        self.preferMetal4DecodePath =
+            overrides?.preferMetal4DecodePath
+            ?? Self.isEnabled(environment["EDGERUNNER_DECODE_PREFER_METAL4"])
     }
 
     private static func isEnabled(_ value: String?) -> Bool {
@@ -2809,6 +2824,7 @@ private struct DecodeDebugOptions: Sendable {
             return false
         }
     }
+
 }
 
 // MARK: - Fused QKV Params (matches Metal ERFusedQKVParams layout)
@@ -2819,6 +2835,16 @@ private struct FusedQKVParams {
     var cols: UInt32           // input columns (dim)
     var blocksPerRow: UInt32   // Q8_0 blocks per row
     var rmsEps: Float          // RMSNorm epsilon (for fused RMSNorm+QKV)
+}
+
+private struct ERFusedNormRoPEParams {
+    var numHeads: UInt32
+    var numKVHeads: UInt32
+    var headDim: UInt32
+    var startPos: UInt32
+    var theta: Float
+    var scalingFactor: Float
+    var rmsEps: Float
 }
 
 private struct FusedGateUpSiluParams {

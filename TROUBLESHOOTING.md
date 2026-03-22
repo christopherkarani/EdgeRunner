@@ -170,6 +170,7 @@ swift test -c release --filter "PublishableBenchmark/fullBenchmark"
   - non-default `EDGERUNNER_BENCHMARK_CONTEXT`
   - `EDGERUNNER_PROFILE_LMHEAD`
   - `EDGERUNNER_DECODE_FORCE_BASE`
+  - `EDGERUNNER_DECODE_PREFER_METAL4`
   - `EDGERUNNER_DECODE_DISABLE_MEGA_GQA`
   - `EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD`
   - `EDGERUNNER_DECODE_DISABLE_KV_BARRIER`
@@ -225,6 +226,7 @@ llama-cli -m model.gguf -p "The capital of France is" -n 10
 | Variable | Purpose |
 |----------|---------|
 | `EDGERUNNER_DECODE_FORCE_BASE=1` | Use base decode path (slower, more stable) |
+| `EDGERUNNER_DECODE_PREFER_METAL4=1` | Prefer the Metal 4 decode path for profiling/comparison |
 | `EDGERUNNER_DECODE_DISABLE_MEGA_GQA=1` | Disable fused attention kernel |
 | `EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD=1` | Disable fused final layer |
 | `EDGERUNNER_RUN_QUALITY_COMPARISON=1` | Run quality comparison tests |
@@ -275,7 +277,7 @@ Running on Intel Mac or in simulator. EdgeRunner requires Apple Silicon.
 
 ### macOS
 - Requires macOS 26.0 (beta) or later
-- Metal 4 features auto-detected and used when available
+- Metal 4 features are available on supported OS versions, but the optimized Metal 3 decode path remains the default unless `EDGERUNNER_DECODE_PREFER_METAL4=1` is set
 
 ### iOS
 - Requires iOS 26.0 (beta) or later

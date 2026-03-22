@@ -52,6 +52,7 @@ struct PublishableBenchmark {
             profileLMHead
             ||
             isEnabled(env["EDGERUNNER_DECODE_FORCE_BASE"])
+            || isEnabled(env["EDGERUNNER_DECODE_PREFER_METAL4"])
             || isEnabled(env["EDGERUNNER_DECODE_DISABLE_MEGA_GQA"])
             || isEnabled(env["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
             || isEnabled(env["EDGERUNNER_DECODE_DISABLE_KV_BARRIER"])
@@ -124,7 +125,12 @@ struct PublishableBenchmark {
                 """
             )
         }
-        if isCanonicalRun {
+        let isPinnedHarness =
+            tokenCount == Self.generateCount
+            && runCount == Self.benchmarkRuns
+            && contextWindow == 2048
+
+        if isPinnedHarness {
             guard tokenHash == Self.expectedTokenHash else {
                 throw GenerationError.modelLoadFailed(
                     reason: """

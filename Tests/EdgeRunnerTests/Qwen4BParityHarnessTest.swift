@@ -103,7 +103,17 @@ struct Qwen4BParityHarnessTest {
             overrides: LlamaDecodeOverrides(
                 forceBaseDecodePath: false,
                 disableMegaKernel: false,
-                disableFusedFinalNormLMHead: false
+                disableFusedFinalNormLMHead: false,
+                preferMetal4DecodePath: false
+            )
+        ),
+        ModeCase(
+            label: "metal4_mega",
+            overrides: LlamaDecodeOverrides(
+                forceBaseDecodePath: false,
+                disableMegaKernel: false,
+                disableFusedFinalNormLMHead: false,
+                preferMetal4DecodePath: true
             )
         ),
         ModeCase(
@@ -111,7 +121,8 @@ struct Qwen4BParityHarnessTest {
             overrides: LlamaDecodeOverrides(
                 forceBaseDecodePath: true,
                 disableMegaKernel: false,
-                disableFusedFinalNormLMHead: false
+                disableFusedFinalNormLMHead: false,
+                preferMetal4DecodePath: false
             )
         ),
         ModeCase(
@@ -119,7 +130,8 @@ struct Qwen4BParityHarnessTest {
             overrides: LlamaDecodeOverrides(
                 forceBaseDecodePath: true,
                 disableMegaKernel: true,
-                disableFusedFinalNormLMHead: false
+                disableFusedFinalNormLMHead: false,
+                preferMetal4DecodePath: false
             )
         ),
         ModeCase(
@@ -127,7 +139,8 @@ struct Qwen4BParityHarnessTest {
             overrides: LlamaDecodeOverrides(
                 forceBaseDecodePath: true,
                 disableMegaKernel: true,
-                disableFusedFinalNormLMHead: true
+                disableFusedFinalNormLMHead: true,
+                preferMetal4DecodePath: false
             )
         ),
     ]

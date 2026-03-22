@@ -13,7 +13,7 @@ RESEARCH → MODIFY → BUILD → BENCHMARK → KEEP/ROLLBACK → REPEAT.
 - Model: Qwen 3 0.6B Q8_0 at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` (expected size: **804,753,504** bytes)
 - `QwenBenchmark/decodeBenchmark` is **smoke/regression only** (4 tokens, not apples-to-apples)
 - Cached JSON artifacts in `benchmarks/` are for record-keeping only; always rerun benchmarks for truth
-- Metal 4: default decode uses Metal 4 on macOS 26+; set `EDGERUNNER_DECODE_FORCE_BASE=1` to compare Metal 3 vs Metal 4 overhead
+- Metal 4: available on macOS 26+, but the optimized Metal 3 decode path remains the default. Use `EDGERUNNER_DECODE_PREFER_METAL4=1` to compare Metal 4 against the default path.
 
 ### The Loop
 
