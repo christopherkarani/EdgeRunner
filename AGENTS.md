@@ -3,26 +3,28 @@
 ## Autoresearch: Inference Optimization Agent
 
 Autonomous optimization loop targeting maximum autoregressive decode tokens/sec
-on Qwen 3 0.6B Q8_0 (610 MB GGUF). Follows the Karpathy autoresearch pattern:
+on Qwen 3 0.6B Q8_0 (pinned GGUF size: 804,753,504 bytes). Follows the Karpathy autoresearch pattern:
 RESEARCH → MODIFY → BUILD → BENCHMARK → KEEP/ROLLBACK → REPEAT.
 
-### Current Baseline
+### Current Benchmark Ground Rules
 
-- **0.058 tok/s** (17.3s per token)
-- Model: Qwen 3 0.6B Q8_0 at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf`
-- Baseline file: `benchmarks/baseline.json`
-- Target: **15-30 tok/s**
+- Primary metric: **Publishable benchmark** (128-token greedy decode, TTFT separated, release build)
+- Command: `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Model: Qwen 3 0.6B Q8_0 at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` (expected size: **804,753,504** bytes)
+- `QwenBenchmark/decodeBenchmark` is **smoke/regression only** (4 tokens, not apples-to-apples)
+- Cached JSON artifacts in `benchmarks/` are for record-keeping only; always rerun benchmarks for truth
+- Metal 4: default decode uses Metal 4 on macOS 26+; set `EDGERUNNER_DECODE_FORCE_BASE=1` to compare Metal 3 vs Metal 4 overhead
 
 ### The Loop
 
 ```
-1. READ baseline → benchmarks/baseline.json
+1. READ latest benchmark results (rerun if stale) → publishable benchmark JSON
 2. RESEARCH → find optimization (see Optimization Patterns below)
 3. MODIFY → edit Sources/EdgeRunner/Models/LlamaLanguageModel.swift
 4. BUILD → swift build 2>&1 | tail -5
    - If fails → FIX or ROLLBACK: git checkout -- <files>
-5. BENCHMARK → swift test --filter "QwenBenchmark/decodeBenchmark" 2>&1 | tail -15
-   - Parse: BENCHMARK: qwen_decode_throughput <value> tokens/sec
+5. BENCHMARK → swift test -c release --filter "PublishableBenchmark/fullBenchmark" 2>&1 | tail -15
+   - Parse: publishable decode metrics (p50 decode tok/s is canonical)
 6. EVALUATE:
    - IMPROVED + correctness PASSED → git add + commit
    - REGRESSED or correctness FAILED → git checkout -- <files>
@@ -39,14 +41,14 @@ RESEARCH → MODIFY → BUILD → BENCHMARK → KEEP/ROLLBACK → REPEAT.
 
 ### What You MUST NOT Modify
 
-- `Tests/EdgeRunnerTests/QwenBenchmark.swift` — benchmark is ground truth
-- `benchmarks/baseline.json` — written by benchmark only
+- Benchmark harness semantics (`Tests/EdgeRunnerTests/PublishableBenchmark.swift`, `Tests/EdgeRunnerTests/QwenBenchmark.swift`) without intentional, documented changes
 - `Package.swift` — no dependency changes
 
 ### Correctness Guard
 
-Expected greedy tokens: `[1, 1479, 21456, 96793, 15859]`.
-If your optimization changes these, it broke correctness. **ROLLBACK IMMEDIATELY.**
+Canonical publishable benchmark guard: greedy prefix must start with `[1, 14582, 25]`.
+Canonical publishable runs also enforce the pinned full-token hash for the 128-token harness.
+If the publishable benchmark loses determinism, the prefix changes, or the canonical token hash changes on the pinned GGUF, treat it as a correctness regression.
 
 ### Commit Protocol
 
@@ -121,36 +123,20 @@ await commandBuffer.completed()  // ONE GPU round-trip
 
 ### Pattern 4: Fused Dequant+GEMV (2-3x)
 
-EdgeRunner dequantizes Q8_0 → Float32, then does GEMV. This doubles memory bandwidth.
-llama.cpp and MLX operate directly on quantized data.
-
-EdgeRunner already has `dequantQ4_0.fusedDequantGEMV()`. Need Q8_0 equivalent:
-```swift
-dequantQ8_0.fusedDequantGEMV(quantisedRows: rawBytes, x: hidden, rows: M, cols: K, ...)
-```
+EdgeRunner already uses fused Q8_0 decode kernels in the hot path.
+The remaining work is to profile and tighten the highest-cost fused kernels rather than re-introducing float materialization.
 
 ### Pattern 5: GPU LM Head (2-5x for 151K vocab)
 
-`computeTiedLMHead()` runs 151K dot products on CPU. Move to GPU:
-```swift
-// Use fused dequant+GEMV for the tied embedding LM head
-let logits = try await dequantQ8_0.fusedDequantGEMV(
-    quantisedRows: embeddingRawBytes, x: hidden,
-    rows: vocabSize, cols: dim, commandQueue: queue
-)
-```
+The active path already keeps the LM head on GPU. Current work should focus on:
+- avoiding host logits materialization for greedy decode
+- profiling the fused final norm + LM head cost
+- improving kernel occupancy if LM head remains dominant
 
 ### Pattern 6: KV Cache Usage
 
-EdgeRunner has KVCache but doesn't use it in the forward pass. For single-token decode:
-```swift
-// Project new K, V
-let newK = try await gemvKernel.execute(a: wk, x: hidden, M: kvDim, K: dim, ...)
-// Append to cache
-try kvCache.append(layer: layerIndex, keys: newK, values: newV)
-// Attend new Q against ALL cached K/V
-let (allK, allV) = try kvCache.retrieve(layer: layerIndex, asType: Float.self)
-```
+EdgeRunner already uses KV cache in decode and prefix-reuse paths.
+Current optimization work is about reducing cache/barrier overhead and measuring context-length scaling.
 
 ### Priority Order
 
@@ -175,5 +161,5 @@ ropeFreqBase: 1000000.0, rmsNormEpsilon: 1e-6
 ## Running the Benchmark
 
 ```bash
-swift test --filter "QwenBenchmark/decodeBenchmark" 2>&1 | grep -E "BENCHMARK:|BASELINE:"
+swift test -c release --filter "PublishableBenchmark/fullBenchmark"
 ```

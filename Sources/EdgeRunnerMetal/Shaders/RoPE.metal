@@ -247,12 +247,24 @@ kernel void fused_qk_norm_rope_gqa(
         float partial = q_a0 * dk_a0 + q_a1 * dk_a1 + q_b0 * dk_b0 + q_b1 * dk_b1;
         float score = simd_sum(partial) * p.attnScale;  // full dot product, NO barrier!
 
-        // Online softmax
-        float oldMax = runMax;
-        runMax = max(runMax, score);
-        float correction = exp(oldMax - runMax);
-        float prob = exp(score - runMax);
-        runSum = runSum * correction + prob;
+        // Online softmax. `score` is identical across the full simdgroup after `simd_sum`,
+        // so compute the scalar update once and broadcast it instead of repeating the
+        // same transcendental work on all 32 lanes.
+        float nextRunMax = runMax;
+        float nextRunSum = runSum;
+        float correction = 1.0f;
+        float prob = 0.0f;
+        if (dimIdx == 0) {
+            float oldMax = runMax;
+            nextRunMax = max(runMax, score);
+            correction = exp(oldMax - nextRunMax);
+            prob = exp(score - nextRunMax);
+            nextRunSum = runSum * correction + prob;
+        }
+        runMax = simd_broadcast_first(nextRunMax);
+        runSum = simd_broadcast_first(nextRunSum);
+        correction = simd_broadcast_first(correction);
+        prob = simd_broadcast_first(prob);
 
         // Weighted V accumulation
         acc_a0 = acc_a0 * correction + prob * float(vCache[kvBase + dimIdx]);

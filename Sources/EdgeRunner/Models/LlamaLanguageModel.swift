@@ -60,6 +60,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let dequantQ4_0: DequantQ4_0Kernel
     private let dequantQ8_0: DequantQ8_0Kernel
     private let dequantQ4KM: DequantQ4KMKernel
+    private let dequantQ5K: DequantQ5KKernel
+    private let dequantQ6K: DequantQ6KKernel
+    private let dequantQ3K: DequantQ3KKernel
+    private let dequantQ2K: DequantQ2KKernel
+    private let dequantQ5_0: DequantQ5_0Kernel
+    private let dequantQ5_1: DequantQ5_1Kernel
 
     // KV cache for autoregressive generation
     private let kvCache: KVCache
@@ -138,6 +144,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
         self.dequantQ8_0 = try DequantQ8_0Kernel(device: device)
         self.dequantQ4KM = try DequantQ4KMKernel(device: device)
+        self.dequantQ5K = try DequantQ5KKernel(device: device)
+        self.dequantQ6K = try DequantQ6KKernel(device: device)
+        self.dequantQ3K = try DequantQ3KKernel(device: device)
+        self.dequantQ2K = try DequantQ2KKernel(device: device)
+        self.dequantQ5_0 = try DequantQ5_0Kernel(device: device)
+        self.dequantQ5_1 = try DequantQ5_1Kernel(device: device)
 
         // Initialize KV cache
         let effectiveMaxSeq = maxSeqLen
@@ -317,7 +329,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// Validates that all tensors in the weight map use supported quantization types.
     /// Throws at load time instead of crashing at dequantization time.
     private static func validateQuantizationTypes(_ weightMap: WeightMap) throws {
-        let supportedTypes: Set<TensorDataType> = [.float32, .float16, .q4_0, .q8_0, .q4_K]
+        let supportedTypes: Set<TensorDataType> = [
+            .float32, .float16, .q4_0, .q8_0, .q4_K,
+            .q6_K, .q5_K, .q3_K, .q2_K, .q5_0, .q5_1
+        ]
 
         var unsupportedTypes = Set<TensorDataType>()
         var unsupportedTensors = [String]()
@@ -351,7 +366,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let examples = unsupportedTensors.joined(separator: ", ")
             throw GenerationError.modelLoadFailed(
                 reason: "Model uses unsupported quantization: \(typeNames). "
-                    + "Supported: Q4_0, Q8_0, Q4_K_M, F16, F32. "
+                    + "Supported: Q2_K, Q3_K, Q4_0, Q4_K_M, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, F16, F32. "
                     + "Examples: \(examples)"
             )
         }
@@ -370,6 +385,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// - Returns: The ID of the generated next token.
     /// - Throws: `GenerationError` if generation fails.
     public func nextToken(for tokenIDs: [Int], sampling: SamplingConfiguration) async throws -> Int {
+        let isPureGreedy = sampling.temperature <= 0 && sampling.repetitionPenalty <= 1.0
+        if isPureGreedy {
+            let result = try await greedyToken(for: tokenIDs)
+            if result.hasNonFinite {
+                throw GenerationError.decodingFailed("Logits contain NaN/Inf during greedy decode")
+            }
+            return result.token
+        }
+
         let logitsArray: [Float]
         if tokenIDs == decoderState.cachedLogitsInput, let cached = decoderState.cachedLogits {
             logitsArray = cached
@@ -415,6 +439,103 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         decoderState.cachedLogits = result
         decoderState.cachedLogitsInput = tokenIDs
         return result
+    }
+
+    /// Greedy argmax without materializing logits to a Swift array.
+    /// Returns the selected token and whether any non-finite values were present.
+    func greedyToken(for tokenIDs: [Int]) async throws -> (token: Int, hasNonFinite: Bool) {
+        let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs)
+        let (token, hasNonFinite) = argmaxAndValidity(logitsBuf: logitsBuf, count: config.vocabSize)
+        decoderState.cachedLogits = nil
+        decoderState.cachedLogitsInput = tokenIDs
+        return (token, hasNonFinite)
+    }
+
+    /// Measures average wall-clock latency (ms) of the final norm + LM head GPU path.
+    /// Intended for profiling only; not used in normal decode.
+    public func measureLMHeadLatency(samples: Int = 5) async throws -> Double {
+        guard let finalNorm = preloadedWeights.finalNorm else {
+            throw GenerationError.modelLoadFailed(reason: "Final norm weights not loaded")
+        }
+
+        let dim = config.embeddingDim
+        let logitsBuf = scratch.logits
+        let hiddenBuf = scratch.decodeHidden
+        memset(hiddenBuf.contents(), 0, hiddenBuf.length)
+
+        let clock = ContinuousClock()
+        var totalMs: Double = 0
+
+        for _ in 0..<samples {
+            guard let cmdBuf = commandQueue.makeCommandBuffer(),
+                  let enc = cmdBuf.makeComputeCommandEncoder() else {
+                throw GenerationError.modelLoadFailed(reason: "Failed to create LM head command encoder")
+            }
+
+            let rmsEps = Float(config.rmsNormEpsilon)
+            if let lmRaw = preloadedWeights.lmHeadRaw {
+                let blocksPerRow = preloadedWeights.lmHeadCols / 32
+                var p = FusedGateUpSiluParams(
+                    rows: UInt32(config.vocabSize),
+                    cols: UInt32(dim),
+                    blocksPerRow: UInt32(blocksPerRow),
+                    rmsEps: rmsEps
+                )
+                enc.setComputePipelineState(fusedFinalNormGemvPipeline)
+                enc.setBuffer(lmRaw, offset: 0, index: 0)
+                enc.setBuffer(hiddenBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(finalNorm, offset: 0, index: 3)
+                enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            } else if let lmHead = preloadedWeights.lmHead {
+                let finalOutputBuf = scratch.finalOut
+                var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
+                enc.setComputePipelineState(rmsNormKernel.pipeline)
+                enc.setBuffer(hiddenBuf, offset: 0, index: 0)
+                enc.setBuffer(finalNorm, offset: 0, index: 1)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+                enc.setBytes(&normP, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+                enc.dispatchThreads(
+                    MTLSize(width: 1, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+                )
+
+                let blocksPerRow = preloadedWeights.lmHeadCols / 32
+                var p = ERDequantGEMVParams(
+                    rows: UInt32(config.vocabSize),
+                    cols: UInt32(dim),
+                    blocksPerRow: UInt32(blocksPerRow)
+                )
+                enc.setComputePipelineState(fusedQ8GemvPipeline)
+                enc.setBuffer(lmHead, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            } else {
+                throw GenerationError.modelLoadFailed(reason: "LM head weights not loaded")
+            }
+
+            enc.endEncoding()
+            let start = clock.now
+            cmdBuf.commit()
+            await cmdBuf.completed()
+            let end = clock.now
+            if let error = cmdBuf.error { throw error }
+
+            let duration = start.duration(to: end)
+            totalMs += Double(duration.components.seconds) * 1000.0
+                + Double(duration.components.attoseconds) * 1e-15
+        }
+
+        return totalMs / Double(max(samples, 1))
     }
 
     private func forwardLogitsBuffer(for tokenIDs: [Int]) async throws -> MTLBuffer {
@@ -617,6 +738,23 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         var maxIndex: vDSP_Length = 0
         vDSP_maxvi(ptr, 1, &maxValue, &maxIndex, vDSP_Length(count))
         return Int(maxIndex)
+    }
+
+    private func argmaxAndValidity(logitsBuf: MTLBuffer, count: Int) -> (Int, Bool) {
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: count)
+        var maxValue: Float = -.infinity
+        var maxIndex = 0
+        var hasNonFinite = false
+
+        for i in 0..<count {
+            let v = ptr[i]
+            if !v.isFinite { hasNonFinite = true }
+            if v > maxValue {
+                maxValue = v
+                maxIndex = i
+            }
+        }
+        return (maxIndex, hasNonFinite)
     }
 
     // MARK: - Fully Fused Prefill Pass
@@ -1317,7 +1455,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // KV cache buffers disable hazard tracking, so decode must insert an explicit
             // barrier before GQA consumes the freshly-written K/V slices.
-            enc.memoryBarrier(scope: .buffers)
+            if !decodeDebugOptions.disableKVCacheBarrier {
+                enc.memoryBarrier(scope: .buffers)
+            }
 
             // 3+4. MEGA-FUSED: Q/K norm + RoPE + GQA in SINGLE dispatch (saves 1 dispatch/layer)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
@@ -1393,7 +1533,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                enc.memoryBarrier(scope: .buffers)
+                if !decodeDebugOptions.disableKVCacheBarrier {
+                    enc.memoryBarrier(scope: .buffers)
+                }
                 do {
                     let groupSize = numHeads / numKVHeads
                     var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
@@ -1691,7 +1833,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // KV cache buffers disable hazard tracking, so decode must insert an explicit
             // barrier before GQA consumes the freshly-written K/V slices.
-            enc.memoryBarrier(scope: .buffers)
+            if !decodeDebugOptions.disableKVCacheBarrier {
+                enc.memoryBarrier(scope: .buffers)
+            }
 
             // DISPATCH 2: Mega-kernel Q/K norm + RoPE + GQA
             enc.setComputePipelineState(megaPSO)
@@ -2229,6 +2373,96 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
             )
 
+        case .q6_K:
+            let weightsPerBlock = 256
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q6_K"
+                )
+            }
+            let superBlockCount = elementCount / weightsPerBlock
+            let byteCount = superBlockCount * 210
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ6K.dequantise(
+                blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
+            )
+
+        case .q5_K:
+            let weightsPerBlock = 256
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q5_K"
+                )
+            }
+            let superBlockCount = elementCount / weightsPerBlock
+            let byteCount = superBlockCount * 176
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ5K.dequantise(
+                blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
+            )
+
+        case .q3_K:
+            let weightsPerBlock = 256
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q3_K"
+                )
+            }
+            let superBlockCount = elementCount / weightsPerBlock
+            let byteCount = superBlockCount * 110
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ3K.dequantise(
+                blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
+            )
+
+        case .q2_K:
+            let weightsPerBlock = 256
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q2_K"
+                )
+            }
+            let superBlockCount = elementCount / weightsPerBlock
+            let byteCount = superBlockCount * 84
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ2K.dequantise(
+                blockData: blockData, superBlockCount: superBlockCount, commandQueue: commandQueue
+            )
+
+        case .q5_0:
+            let weightsPerBlock = 32
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q5_0"
+                )
+            }
+            let blockCount = elementCount / weightsPerBlock
+            let byteCount = blockCount * 22
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ5_0.dequantise(
+                blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
+            )
+
+        case .q5_1:
+            let weightsPerBlock = 32
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q5_1"
+                )
+            }
+            let blockCount = elementCount / weightsPerBlock
+            let byteCount = blockCount * 24
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            let blockData = Array(UnsafeBufferPointer(start: ptr, count: byteCount))
+            return try await dequantQ5_1.dequantise(
+                blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
+            )
+
         default:
             throw GenerationError.modelLoadFailed(
                 reason: "Unsupported weight data type \(storage.dataType)"
@@ -2540,6 +2774,7 @@ private struct DecodeDebugOptions: Sendable {
     let forceBaseDecodePath: Bool
     let disableMegaKernel: Bool
     let disableFusedFinalNormLMHead: Bool
+    let disableKVCacheBarrier: Bool
 
     var requiresBaseDecodePath: Bool {
         forceBaseDecodePath || disableMegaKernel
@@ -2560,6 +2795,9 @@ private struct DecodeDebugOptions: Sendable {
         self.disableFusedFinalNormLMHead =
             overrides?.disableFusedFinalNormLMHead
             ?? Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
+        self.disableKVCacheBarrier =
+            overrides?.disableKVCacheBarrier
+            ?? Self.isEnabled(environment["EDGERUNNER_DECODE_DISABLE_KV_BARRIER"])
     }
 
     private static func isEnabled(_ value: String?) -> Bool {

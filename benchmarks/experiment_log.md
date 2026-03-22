@@ -1,10 +1,12 @@
 # EdgeRunner Autoresearch Experiment Log
 
-**Model:** Qwen 3 0.6B Q8_0 (610 MB)
+**Model:** Qwen 3 0.6B Q8_0 (pinned GGUF size: 804,753,504 bytes)
 **Device:** Apple M3 Max, 28 GB unified memory
-**Metric:** Autoregressive decode tokens/sec (greedy, 4 tokens)
+**Primary Metric:** Publishable benchmark median decode tok/s (128-token greedy decode, TTFT separated, release build)
 
-> **WARNING: `publishable_benchmark.json` includes cold-start Run 0 in its statistics, which drags the median down significantly. The JSON file may show ~14 tok/s when warm throughput is actually ~224 tok/s. Always run a fresh benchmark yourself — do NOT trust cached JSON numbers as ground truth.**
+> **Benchmark truth rule:** treat `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` as the canonical benchmark. Fresh reruns are the source of truth. Override-driven profiling runs write `benchmarks/publishable_profile_benchmark.json` and are not directly comparable to canonical publishable results.
+
+> **Feasibility checkpoint (2026-03-22):** With the publishable benchmark as canonical and buffer-native greedy decode in place, the `650 tok/s` goal on **M3 Max** remains unverified. Re-run `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` before claiming progress; the public `658 tok/s` MetalRT number is on **M4 Max**, not M3 Max.
 
 ---
 

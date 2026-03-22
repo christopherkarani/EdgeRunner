@@ -4,30 +4,29 @@ import Foundation
 @testable import EdgeRunnerIO
 @testable import EdgeRunnerCore
 
-/// The primary benchmark for the autoresearch optimization loop.
+/// Short smoke benchmark for the autoresearch optimization loop.
 ///
-/// Produces a single metric: `qwen_decode_throughput` (tokens/sec).
-/// Writes results to `benchmarks/baseline.json` for comparison across runs.
-/// Validates correctness via argmax stability (same greedy tokens every run).
+/// Produces a small, fast regression metric: `qwen_decode_throughput` (tokens/sec).
+/// Writes results to `benchmarks/baseline.json` for quick comparison across runs.
+/// Use `PublishableBenchmark/fullBenchmark` as the canonical publishable metric.
 @Suite("Qwen 3 0.6B Real Model Benchmark")
 struct QwenBenchmark {
 
     static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
     static let baselinePath = "benchmarks/baseline.json"
-    static let expectedModelFileSizeBytes: Int64 = 639_447_744
+    static let expectedModelFileSizeBytes: Int64 = 804_753_504
 
     // Stable greedy prefix for the pinned GGUF. Later tokens drift slightly across
     // fresh processes on current main, so cross-check the full decode path via the
     // prefix-equivalence test below instead of hard-coding all 4 generated tokens.
     static let expectedGreedyPrefix = [1, 14582, 25]
 
-    // MARK: - Primary Benchmark (Autoresearch Target)
+    // MARK: - Smoke Benchmark
 
     @Test func decodeBenchmark() async throws {
         let url = URL(fileURLWithPath: Self.modelPath)
         guard FileManager.default.fileExists(atPath: Self.modelPath) else {
-            print("SKIP: Model not found at \(Self.modelPath)")
-            return
+            throw GenerationError.modelLoadFailed(reason: "Pinned smoke benchmark model not found at \(Self.modelPath)")
         }
         let modelFileSize = try pinnedModelFileSize(at: url)
 
@@ -38,28 +37,23 @@ struct QwenBenchmark {
 
         // Autoregressive decode: generate 4 tokens
         let generateCount = 4
-        var tokenIDs = [1] // BOS
+        var tokenIDs = [1] // Pinned benchmark seed token for the canonical Qwen3 harness
 
         // Warmup (caches dequantized weights)
-        _ = try await model.logits(for: tokenIDs)
+        _ = try await model.greedyToken(for: tokenIDs)
 
         let clock = ContinuousClock()
         let start = clock.now
 
+        var hasNaN = false
         for _ in 0..<generateCount {
-            let logits = try await model.logits(for: tokenIDs)
+            let result = try await model.greedyToken(for: tokenIDs)
 
             // Correctness: logits must be finite
-            let hasNaN = logits.contains(where: { !$0.isFinite })
+            hasNaN = hasNaN || result.hasNonFinite
             #expect(!hasNaN, "Logits contain NaN/Inf — optimization broke numerical stability")
 
-            // Greedy argmax
-            var maxVal: Float = -.infinity
-            var maxIdx = 0
-            for (i, v) in logits.enumerated() {
-                if v > maxVal { maxVal = v; maxIdx = i }
-            }
-            tokenIDs.append(maxIdx)
+            tokenIDs.append(result.token)
         }
 
         let elapsed = start.duration(to: clock.now)
@@ -97,7 +91,9 @@ struct QwenBenchmark {
 
     @Test func loadModel() async throws {
         let url = URL(fileURLWithPath: Self.modelPath)
-        guard FileManager.default.fileExists(atPath: Self.modelPath) else { return }
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            throw GenerationError.modelLoadFailed(reason: "Pinned smoke benchmark model not found at \(Self.modelPath)")
+        }
 
         let clock = ContinuousClock()
         let start = clock.now
@@ -115,7 +111,9 @@ struct QwenBenchmark {
 
     @Test func singleForwardPass() async throws {
         let url = URL(fileURLWithPath: Self.modelPath)
-        guard FileManager.default.fileExists(atPath: Self.modelPath) else { return }
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            throw GenerationError.modelLoadFailed(reason: "Pinned smoke benchmark model not found at \(Self.modelPath)")
+        }
 
         let model = try await LlamaLanguageModel.load(
             from: url,
@@ -201,13 +199,14 @@ struct QwenBenchmark {
             throw GenerationError.modelLoadFailed(reason: "Could not read file size for \(url.path)")
         }
 
-        #expect(
-            Int64(fileSize) == Self.expectedModelFileSizeBytes,
-            """
-            Benchmark input drifted: expected \(Self.expectedModelFileSizeBytes) bytes at \(Self.modelPath), \
-            got \(fileSize) bytes. Download the pinned GGUF before comparing results.
-            """
-        )
+        guard Int64(fileSize) == Self.expectedModelFileSizeBytes else {
+            throw GenerationError.modelLoadFailed(
+                reason: """
+                Benchmark input drifted: expected \(Self.expectedModelFileSizeBytes) bytes at \(Self.modelPath), \
+                got \(fileSize) bytes. Download the pinned GGUF before comparing results.
+                """
+            )
+        }
 
         return Int64(fileSize)
     }

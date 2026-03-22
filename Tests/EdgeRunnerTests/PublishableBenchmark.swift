@@ -21,16 +21,49 @@ struct PublishableBenchmark {
     static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
     static let generateCount = 128
     static let benchmarkRuns = 5
-    static let expectedModelFileSizeBytes: Int64 = 639_447_744
+    static let expectedModelFileSizeBytes: Int64 = 804_753_504
     static let expectedGreedyPrefix = [1, 14582, 25]
+    static let expectedTokenHash = "722b9d67f78744b9"
 
     // MARK: - Primary Publishable Benchmark
 
     @Test func fullBenchmark() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let tokenCount = try validatedPositiveInt(
+            env["EDGERUNNER_BENCHMARK_TOKENS"],
+            defaultValue: Self.generateCount,
+            name: "EDGERUNNER_BENCHMARK_TOKENS"
+        )
+        let runCount = try validatedPositiveInt(
+            env["EDGERUNNER_BENCHMARK_RUNS"],
+            defaultValue: Self.benchmarkRuns,
+            name: "EDGERUNNER_BENCHMARK_RUNS"
+        )
+        let contextWindow = try validatedPositiveInt(
+            env["EDGERUNNER_BENCHMARK_CONTEXT"],
+            defaultValue: 2048,
+            name: "EDGERUNNER_BENCHMARK_CONTEXT"
+        )
+        guard contextWindow >= tokenCount else {
+            throw GenerationError.decodingFailed("Context window must be >= token count for publishable benchmark")
+        }
+        let profileLMHead = isEnabled(env["EDGERUNNER_PROFILE_LMHEAD"])
+        let hasDecodeOverride =
+            profileLMHead
+            ||
+            isEnabled(env["EDGERUNNER_DECODE_FORCE_BASE"])
+            || isEnabled(env["EDGERUNNER_DECODE_DISABLE_MEGA_GQA"])
+            || isEnabled(env["EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD"])
+            || isEnabled(env["EDGERUNNER_DECODE_DISABLE_KV_BARRIER"])
+        let isCanonicalRun =
+            tokenCount == Self.generateCount
+            && runCount == Self.benchmarkRuns
+            && contextWindow == 2048
+            && !hasDecodeOverride
+
         let url = URL(fileURLWithPath: Self.modelPath)
         guard FileManager.default.fileExists(atPath: Self.modelPath) else {
-            print("SKIP: Model not found at \(Self.modelPath)")
-            return
+            throw GenerationError.modelLoadFailed(reason: "Pinned publishable benchmark model not found at \(Self.modelPath)")
         }
         let modelFileSize = try pinnedModelFileSize(at: url)
 
@@ -39,7 +72,7 @@ struct PublishableBenchmark {
 
         let model = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: ModelConfiguration(contextWindowSize: contextWindow)
         )
 
         let memAfterLoad = currentRSS()
@@ -47,19 +80,19 @@ struct PublishableBenchmark {
         // Warmup: one full generation to JIT all pipelines
         var warmupTokens = [1]
         for _ in 0..<4 {
-            let logits = try await model.logits(for: warmupTokens)
-            warmupTokens.append(argmax(logits))
+            let result = try await model.greedyToken(for: warmupTokens)
+            warmupTokens.append(result.token)
         }
 
         // Run benchmarkRuns iterations (single model, reset via fresh prefill each run)
         var runResults: [RunResult] = []
 
-        for run in 0..<Self.benchmarkRuns {
+        for run in 0..<runCount {
             // Each run starts with logits(for: [1]) which triggers prefill + KV cache reset.
             // The model's decode detector sees a fresh sequence and resets automatically.
             let result = try await measureGeneration(
                 model: model,
-                tokenCount: Self.generateCount,
+                tokenCount: tokenCount,
                 runIndex: run
             )
             runResults.append(result)
@@ -70,24 +103,57 @@ struct PublishableBenchmark {
         // Compute statistics
         let stats = computeStatistics(runs: runResults)
 
+        let lmHeadMs = profileLMHead ? try await model.measureLMHeadLatency(samples: 5) : nil
+
         // Determinism check: all runs should produce identical tokens
         let referenceTokens = runResults[0].tokens
         let allDeterministic = runResults.allSatisfy { $0.tokens == referenceTokens }
         let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(referenceTokens.count))
         let actualPrefix = Array(referenceTokens.prefix(expectedPrefix.count))
+        let tokenHash = tokenSequenceHash(referenceTokens)
 
-        // Print human-readable report
+        // Hard validation guards: invalid runs must not persist artifacts.
+        guard allDeterministic else {
+            throw GenerationError.decodingFailed("Non-deterministic output across runs — publishable benchmark aborted")
+        }
+        guard actualPrefix == expectedPrefix else {
+            throw GenerationError.modelLoadFailed(
+                reason: """
+                Benchmark input or decode path drifted: expected greedy prefix \(expectedPrefix), \
+                got \(actualPrefix). Re-pin the GGUF before comparing publishable results.
+                """
+            )
+        }
+        if isCanonicalRun {
+            guard tokenHash == Self.expectedTokenHash else {
+                throw GenerationError.modelLoadFailed(
+                    reason: """
+                    Publishable output drifted: expected token hash \(Self.expectedTokenHash), \
+                    got \(tokenHash). Re-pin the GGUF or investigate decode correctness before publishing results.
+                    """
+                )
+            }
+        }
+        guard stats.decodeMedian > 0 else {
+            throw GenerationError.decodingFailed("Decode throughput must be positive")
+        }
+        for run in runResults where run.hasNaN {
+            throw GenerationError.decodingFailed("Run \(run.runIndex) produced NaN/Inf logits")
+        }
+
+        // Print and persist only after validation passes.
         printReport(
             stats: stats,
             runs: runResults,
             memLoadMB: Double(memAfterLoad - memBefore) / 1_048_576,
             memPeakMB: Double(memPeak - memBefore) / 1_048_576,
             deterministic: allDeterministic,
-            tokenCount: Self.generateCount,
-            runCount: Self.benchmarkRuns
+            tokenCount: tokenCount,
+            runCount: runCount,
+            lmHeadMs: lmHeadMs,
+            isCanonicalRun: isCanonicalRun
         )
 
-        // Write JSON
         try writeJSON(
             stats: stats,
             runs: runResults,
@@ -96,22 +162,14 @@ struct PublishableBenchmark {
             deterministic: allDeterministic,
             modelPath: url.path,
             modelFileSize: modelFileSize,
-            tokenPrefix: actualPrefix
+            tokenPrefix: actualPrefix,
+            tokenHash: tokenHash,
+            lmHeadMs: lmHeadMs,
+            tokenCount: tokenCount,
+            runCount: runCount,
+            contextWindow: contextWindow,
+            isCanonicalRun: isCanonicalRun
         )
-
-        // Assertions
-        #expect(allDeterministic, "Non-deterministic output across runs — optimization broke reproducibility")
-        #expect(
-            actualPrefix == expectedPrefix,
-            """
-            Benchmark input or decode path drifted: expected greedy prefix \(expectedPrefix), \
-            got \(actualPrefix). Re-pin the GGUF before comparing publishable results.
-            """
-        )
-        #expect(stats.decodeMedian > 0, "Decode throughput must be positive")
-        for run in runResults {
-            #expect(!run.hasNaN, "Run \(run.runIndex) produced NaN/Inf logits")
-        }
     }
 
     // MARK: - Single-Run Measurement
@@ -122,29 +180,29 @@ struct PublishableBenchmark {
         runIndex: Int
     ) async throws -> RunResult {
         let clock = ContinuousClock()
-        var tokenIDs = [1] // BOS
+        var tokenIDs = [1] // Pinned benchmark seed token for the canonical Qwen3 harness
         var hasNaN = false
         var decodeLatencies: [Double] = [] // ms per decode token
 
         // === PREFILL (token 1) — measures TTFT ===
         let prefillStart = clock.now
-        let firstLogits = try await model.logits(for: tokenIDs)
+        let firstLogits = try await model.greedyToken(for: tokenIDs)
         let prefillEnd = clock.now
         let ttft = durationMs(from: prefillStart, to: prefillEnd)
 
-        if firstLogits.contains(where: { !$0.isFinite }) { hasNaN = true }
-        tokenIDs.append(argmax(firstLogits))
+        if firstLogits.hasNonFinite { hasNaN = true }
+        tokenIDs.append(firstLogits.token)
 
         // === DECODE (tokens 2..tokenCount) — pure autoregressive ===
         let decodeStart = clock.now
 
         for _ in 1..<tokenCount {
             let tokenStart = clock.now
-            let logits = try await model.logits(for: tokenIDs)
+            let logits = try await model.greedyToken(for: tokenIDs)
             let tokenEnd = clock.now
 
-            if logits.contains(where: { !$0.isFinite }) { hasNaN = true }
-            tokenIDs.append(argmax(logits))
+            if logits.hasNonFinite { hasNaN = true }
+            tokenIDs.append(logits.token)
 
             let latency = durationMs(from: tokenStart, to: tokenEnd)
             decodeLatencies.append(latency)
@@ -155,7 +213,7 @@ struct PublishableBenchmark {
 
         let decodeEnd = clock.now
         let totalDecodeMs = durationMs(from: decodeStart, to: decodeEnd)
-        let decodeTokenCount = tokenIDs.count - 2 // exclude BOS and first generated token (prefill)
+        let decodeTokenCount = tokenIDs.count - 2 // exclude seed token and first generated token (prefill)
         let decodeTokPerSec = decodeTokenCount > 0 ? Double(decodeTokenCount) / (totalDecodeMs / 1000.0) : 0
 
         let totalMs = durationMs(from: prefillStart, to: decodeEnd)
@@ -243,18 +301,23 @@ struct PublishableBenchmark {
         memPeakMB: Double,
         deterministic: Bool,
         tokenCount: Int,
-        runCount: Int
+        runCount: Int,
+        lmHeadMs: Double?,
+        isCanonicalRun: Bool
     ) {
         print("")
         print("=" * 70)
         print("  EdgeRunner Inference Benchmark — Qwen 3 0.6B Q8_0")
         print("=" * 70)
         print("")
-        print("  Model:           Qwen3-0.6B-Q8_0 (610 MB, 28 layers, 151K vocab)")
+        print("  Model:           Qwen3-0.6B-Q8_0 (804,753,504-byte GGUF, 28 layers, 151K vocab)")
         print("  Device:          \(deviceDescription())")
         print("  Tokens:          \(tokenCount) per run")
         print("  Runs:            \(runCount)")
         print("  Deterministic:   \(deterministic ? "YES" : "NO")")
+        if !isCanonicalRun {
+            print("  Mode:            NON-CANONICAL (override-driven profiling run)")
+        }
         print("")
         print("  --- Decode Throughput (tokens 2-\(tokenCount), excludes prefill) ---")
         print(String(format: "  Median:          %.1f tok/s", stats.decodeMedian))
@@ -275,6 +338,11 @@ struct PublishableBenchmark {
         print(String(format: "  P90:             %.2f ms", stats.tokenLatencyP90))
         print(String(format: "  P99:             %.2f ms", stats.tokenLatencyP99))
         print("")
+        if let lmHeadMs {
+            print("  --- LM Head Profiling (EDGERUNNER_PROFILE_LMHEAD=1) ---")
+            print(String(format: "  Avg latency:     %.2f ms (final norm + LM head only)", lmHeadMs))
+            print("")
+        }
         print("  --- Memory ---")
         print(String(format: "  Model load:      %.0f MB", memLoadMB))
         print(String(format: "  Peak RSS:        %.0f MB", memPeakMB))
@@ -288,10 +356,12 @@ struct PublishableBenchmark {
         print("")
         print("=" * 70)
         print("")
-        print("PUBLISH: qwen_decode_throughput_median \(String(format: "%.1f", stats.decodeMedian)) tok/s")
-        print("PUBLISH: qwen_decode_throughput_max \(String(format: "%.1f", stats.decodeMax)) tok/s")
-        print("PUBLISH: qwen_ttft_median \(String(format: "%.1f", stats.ttftMedian)) ms")
-        print("PUBLISH: qwen_e2e_throughput_median \(String(format: "%.1f", stats.e2eMedian)) tok/s")
+        let prefix = isCanonicalRun ? "PUBLISH" : "PROFILE"
+        print("\(prefix): qwen_decode_throughput_median \(String(format: "%.1f", stats.decodeMedian)) tok/s")
+        print("\(prefix): qwen_decode_throughput_max \(String(format: "%.1f", stats.decodeMax)) tok/s")
+        print("\(prefix): qwen_ttft_median \(String(format: "%.1f", stats.ttftMedian)) ms")
+        print("\(prefix): qwen_e2e_throughput_median \(String(format: "%.1f", stats.e2eMedian)) tok/s")
+        print("\(prefix): qwen_token_hash \(tokenSequenceHash(runs[0].tokens))")
     }
 
     // MARK: - JSON Output
@@ -304,7 +374,13 @@ struct PublishableBenchmark {
         deterministic: Bool,
         modelPath: String,
         modelFileSize: Int64,
-        tokenPrefix: [Int]
+        tokenPrefix: [Int],
+        tokenHash: String,
+        lmHeadMs: Double?,
+        tokenCount: Int,
+        runCount: Int,
+        contextWindow: Int,
+        isCanonicalRun: Bool
     ) throws {
         let runData: [[String: Any]] = runs.map { run in
             [
@@ -326,9 +402,12 @@ struct PublishableBenchmark {
             "model_path": modelPath,
             "model_file_size_bytes": modelFileSize,
             "greedy_prefix": tokenPrefix,
+            "token_hash": tokenHash,
             "device": deviceDescription(),
-            "tokens_per_run": Self.generateCount,
-            "num_runs": Self.benchmarkRuns,
+            "tokens_per_run": tokenCount,
+            "num_runs": runCount,
+            "context_window": contextWindow,
+            "is_canonical_run": isCanonicalRun,
             "deterministic": deterministic,
             "decode_throughput": [
                 "median": stats.decodeMedian,
@@ -345,6 +424,7 @@ struct PublishableBenchmark {
                 "median": stats.e2eMedian,
                 "mean": stats.e2eMean,
             ],
+            "lm_head_avg_ms": lmHeadMs as Any,
             "per_token_latency_ms": [
                 "median": stats.tokenLatencyMedian,
                 "p90": stats.tokenLatencyP90,
@@ -362,7 +442,8 @@ struct PublishableBenchmark {
         let benchDir = URL(fileURLWithPath: projectDir).appendingPathComponent("benchmarks")
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
 
-        let outputURL = benchDir.appendingPathComponent("publishable_benchmark.json")
+        let outputFileName = isCanonicalRun ? "publishable_benchmark.json" : "publishable_profile_benchmark.json"
+        let outputURL = benchDir.appendingPathComponent(outputFileName)
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: outputURL)
         print("Benchmark results written to: \(outputURL.path)")
@@ -370,18 +451,38 @@ struct PublishableBenchmark {
 
     // MARK: - Helpers
 
-    private func argmax(_ array: [Float]) -> Int {
-        var maxVal: Float = -.infinity
-        var maxIdx = 0
-        for (i, v) in array.enumerated() {
-            if v > maxVal { maxVal = v; maxIdx = i }
-        }
-        return maxIdx
-    }
-
     private func durationMs(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
         let d = start.duration(to: end)
         return Double(d.components.seconds) * 1000.0 + Double(d.components.attoseconds) * 1e-15
+    }
+
+    private func validatedPositiveInt(_ rawValue: String?, defaultValue: Int, name: String) throws -> Int {
+        guard let rawValue, !rawValue.isEmpty else { return defaultValue }
+        guard let parsed = Int(rawValue), parsed > 0 else {
+            throw GenerationError.decodingFailed("Invalid \(name)=\(rawValue). Expected a positive integer.")
+        }
+        return parsed
+    }
+
+    private func tokenSequenceHash(_ tokens: [Int]) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for token in tokens {
+            for byte in "\(token),".utf8 {
+                hash ^= UInt64(byte)
+                hash &*= 0x100000001b3
+            }
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private func isEnabled(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return false }
+        switch rawValue.lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
     }
 
     private func percentile(_ sorted: [Double], _ p: Double) -> Double {
@@ -423,13 +524,14 @@ struct PublishableBenchmark {
             throw GenerationError.modelLoadFailed(reason: "Could not read file size for \(url.path)")
         }
 
-        #expect(
-            Int64(fileSize) == Self.expectedModelFileSizeBytes,
-            """
-            Benchmark input drifted: expected \(Self.expectedModelFileSizeBytes) bytes at \(Self.modelPath), \
-            got \(fileSize) bytes. Download the pinned GGUF before comparing publishable results.
-            """
-        )
+        guard Int64(fileSize) == Self.expectedModelFileSizeBytes else {
+            throw GenerationError.modelLoadFailed(
+                reason: """
+                Benchmark input drifted: expected \(Self.expectedModelFileSizeBytes) bytes at \(Self.modelPath), \
+                got \(fileSize) bytes. Download the pinned GGUF before comparing publishable results.
+                """
+            )
+        }
 
         return Int64(fileSize)
     }
