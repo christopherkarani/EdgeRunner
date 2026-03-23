@@ -1,0 +1,45 @@
+{
+  "metadata": {
+    "project": "EdgeRunner",
+    "target_model": "Qwen3-0.6B-Q8_0",
+    "target_metric": "decode_throughput_median",
+    "baseline": 228.1,
+    "current_baseline": 238.0,
+    "baseline_max": 241.0,
+    "baseline_ttft_ms": 3.8,
+    "last_updated": "2026-03-24T00:00:00Z",
+    "total_experiments": 35,
+    "breakthrough_count": 0,
+    "experiments_since_last_breakthrough": 0,
+    "swarm_phase": {
+      "started": "2026-03-24",
+      "target": 280,
+      "agents": ["orchestrator", "researcher", "designer", "implementer", "benchmarker", "analyst", "logger"]
+    }
+  },
+  "experiments": [],
+  "patterns": {
+    "what_works": [
+      "Kernel fusion for attention path",
+      "Fused Q8_0 dequant+GEMV",
+      "Decode warmup (15 passes)",
+      "Single-simdgroup GQA (32 threads/head, zero barriers)",
+      "Greedy nextToken fast path (vectorized argmax)",
+      "Direct-fill raw-Q8 embedding"
+    ],
+    "what_doesnt_work": [
+      "Q4_0 quantization (compute overhead exceeds bandwidth savings)",
+      "2-simdgroup GEMV (reduces occupancy)",
+      "Flash-Decode GQA at 128 tokens (overhead > savings)",
+      "Self-speculative decoding (no training)",
+      "Prompt-lookup speculation"
+    ],
+    "open_questions": [
+      "Metal Indirect Command Buffers (ICBs) for pre-recorded dispatch",
+      "GEMV bandwidth optimization (currently 207 GB/s, target 250+)",
+      "Non-async forward pass (eliminate Swift overhead)",
+      "Flash attention for small models",
+      "Weight layout optimization for cache efficiency"
+    ]
+  }
+}
