@@ -26,7 +26,7 @@ kernel void rope_f32(
     }
 
     float exponent = float(2 * dimPair) / float(params.headDim);
-    float frequency = 1.0f / pow(params.theta, exponent);
+    float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
@@ -56,7 +56,7 @@ kernel void rope_neox_f32(
     }
 
     float exponent = float(2 * dimPair) / float(params.headDim);
-    float frequency = 1.0f / pow(params.theta, exponent);
+    float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
@@ -297,7 +297,7 @@ kernel void rope_neox_f32_to_f16(
     if (dimPair >= halfDim || head >= params.numHeads || seq >= params.seqLen) return;
 
     float exponent = float(2 * dimPair) / float(params.headDim);
-    float frequency = 1.0f / pow(params.theta, exponent);
+    float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
