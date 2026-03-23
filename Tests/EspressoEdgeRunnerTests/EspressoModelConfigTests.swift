@@ -5,19 +5,28 @@ import EdgeRunnerIO
 @Suite("EspressoModelConfig")
 struct EspressoModelConfigTests {
 
-    private func makeModelConfig(arch: String, prefixed: Bool) -> ModelConfig {
+    private func makeModelConfig(
+        arch: String,
+        prefixed: Bool,
+        explicitHeadDim: Int? = nil
+    ) -> ModelConfig {
         let prefix = prefixed ? "\(arch)." : ""
+        var metadata: [String: MetadataValue] = [
+            "\(prefix)embedding_length": .int(4096),
+            "\(prefix)attention.head_count": .int(32),
+            "\(prefix)attention.head_count_kv": .int(8),
+            "\(prefix)block_count": .int(32),
+            "\(prefix)feed_forward_length": .int(11008),
+            "\(prefix)context_length": .int(2048),
+            "\(prefix)attention.layer_norm_rms_epsilon": .float(1e-5),
+        ]
+        if let explicitHeadDim {
+            metadata["\(prefix)attention.key_length"] = .int(explicitHeadDim)
+        }
+
         return ModelConfig(
             architectureName: arch,
-            metadata: [
-                "\(prefix)embedding_length": .int(4096),
-                "\(prefix)attention.head_count": .int(32),
-                "\(prefix)attention.head_count_kv": .int(8),
-                "\(prefix)block_count": .int(32),
-                "\(prefix)feed_forward_length": .int(11008),
-                "\(prefix)context_length": .int(2048),
-                "\(prefix)attention.layer_norm_rms_epsilon": .float(1e-5),
-            ]
+            metadata: metadata
         )
     }
 
@@ -53,6 +62,24 @@ struct EspressoModelConfigTests {
     func headDimComputed() throws {
         let config = try EspressoModelConfig(from: makeModelConfig(arch: "llama", prefixed: true))
         #expect(config.headDim == 128) // 4096 / 32
+    }
+
+    @Test("Explicit Qwen headDim overrides embedding/headCount when prefixed")
+    func explicitHeadDimPrefixed() throws {
+        let config = try EspressoModelConfig(
+            from: makeModelConfig(arch: "qwen3", prefixed: true, explicitHeadDim: 256)
+        )
+        #expect(config.explicitHeadDim == 256)
+        #expect(config.headDim == 256)
+    }
+
+    @Test("Explicit Qwen headDim overrides embedding/headCount when unprefixed")
+    func explicitHeadDimUnprefixed() throws {
+        let config = try EspressoModelConfig(
+            from: makeModelConfig(arch: "qwen3", prefixed: false, explicitHeadDim: 256)
+        )
+        #expect(config.explicitHeadDim == 256)
+        #expect(config.headDim == 256)
     }
 
     @Test("Equatable conformance")

@@ -34,6 +34,18 @@ struct EspressoTensorNameMapperTests {
         #expect(EspressoTensorNameMapper.espressoPath(for: "blk.0.ffn_norm.weight", architecture: "llama") == "layers/0/rms_ffn.bin")
     }
 
+    @Test("LLaMA Q/K norm tensors map to stable artifact paths")
+    func llamaLayerQKNormMappings() {
+        #expect(EspressoTensorNameMapper.espressoPath(for: "blk.0.attn_q_norm.weight", architecture: "llama") == "layers/0/q_norm.bin")
+        #expect(EspressoTensorNameMapper.espressoPath(for: "blk.0.attn_k_norm.weight", architecture: "llama") == "layers/0/k_norm.bin")
+    }
+
+    @Test("Qwen-family models reuse llama-family Q/K norm artifact paths")
+    func qwenLayerQKNormMappings() {
+        #expect(EspressoTensorNameMapper.espressoPath(for: "blk.0.attn_q_norm.weight", architecture: "qwen3") == "layers/0/q_norm.bin")
+        #expect(EspressoTensorNameMapper.espressoPath(for: "blk.0.attn_k_norm.weight", architecture: "qwen3") == "layers/0/k_norm.bin")
+    }
+
     // MARK: - GPT-2 mappings
 
     @Test("GPT-2 global tensor names map correctly")

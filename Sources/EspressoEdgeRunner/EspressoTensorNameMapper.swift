@@ -7,6 +7,8 @@ public enum EspressoTensorNameMapper: Sendable {
         "attn_k.weight": "wk.bin",
         "attn_v.weight": "wv.bin",
         "attn_output.weight": "wo.bin",
+        "attn_q_norm.weight": "q_norm.bin",
+        "attn_k_norm.weight": "k_norm.bin",
         "ffn_gate.weight": "w1.bin",
         "ffn_down.weight": "w2.bin",
         "ffn_up.weight": "w3.bin",

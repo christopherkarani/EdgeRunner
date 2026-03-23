@@ -225,4 +225,5 @@ struct GQATests {
             #expect(abs(result[index] - expected[index]) < 1e-4)
         }
     }
+
 }

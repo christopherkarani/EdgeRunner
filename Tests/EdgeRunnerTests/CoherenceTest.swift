@@ -35,12 +35,16 @@ struct CoherenceTest {
         // Parse GGUF header
         var offset = 0
         func readU32() -> UInt32 {
-            let val = data[offset..<offset+4].withUnsafeBytes { $0.load(as: UInt32.self) }
+            let val = data[offset..<offset+4].withUnsafeBytes { buffer in
+                buffer.loadUnaligned(as: UInt32.self)
+            }
             offset += 4
             return val
         }
         func readU64() -> UInt64 {
-            let val = data[offset..<offset+8].withUnsafeBytes { $0.load(as: UInt64.self) }
+            let val = data[offset..<offset+8].withUnsafeBytes { buffer in
+                buffer.loadUnaligned(as: UInt64.self)
+            }
             offset += 8
             return val
         }

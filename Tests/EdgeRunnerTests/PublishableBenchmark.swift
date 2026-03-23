@@ -21,9 +21,9 @@ struct PublishableBenchmark {
     static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
     static let generateCount = 128
     static let benchmarkRuns = 5
-    static let expectedModelFileSizeBytes: Int64 = 804_753_504
-    static let expectedGreedyPrefix = [1, 14582, 25]
-    static let expectedTokenHash = "722b9d67f78744b9"
+    static let expectedModelFileSizeBytes: Int64 = 639_446_688
+    static let expectedGreedyPrefix = [1, 1479, 35]
+    static let expectedTokenHash = "0afae14a84cf0df8"
 
     // MARK: - Primary Publishable Benchmark
 

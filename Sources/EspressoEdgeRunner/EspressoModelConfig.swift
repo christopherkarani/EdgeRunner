@@ -9,8 +9,9 @@ public struct EspressoModelConfig: Sendable, Equatable {
     public let contextLength: Int
     public let rmsNormEpsilon: Float
     public let architectureName: String
+    public let explicitHeadDim: Int?
 
-    public var headDim: Int { embeddingDim / headCount }
+    public var headDim: Int { explicitHeadDim ?? (embeddingDim / headCount) }
 
     /// Creates config by reading GGUF metadata from a `ModelConfig`.
     /// Tries `"{arch}.{key}"` first, then bare `"{key}"`.
@@ -37,6 +38,8 @@ public struct EspressoModelConfig: Sendable, Equatable {
         self.feedForwardLength = try intKey("feed_forward_length")
         self.contextLength = try intKey("context_length")
         self.rmsNormEpsilon = try floatKey("attention.layer_norm_rms_epsilon")
+        self.explicitHeadDim = config.int(forKey: "\(arch).attention.key_length")
+            ?? config.int(forKey: "attention.key_length")
     }
 
     /// Memberwise initializer.
@@ -48,7 +51,8 @@ public struct EspressoModelConfig: Sendable, Equatable {
         feedForwardLength: Int,
         contextLength: Int,
         rmsNormEpsilon: Float,
-        architectureName: String
+        architectureName: String,
+        explicitHeadDim: Int? = nil
     ) {
         self.embeddingDim = embeddingDim
         self.headCount = headCount
@@ -58,5 +62,6 @@ public struct EspressoModelConfig: Sendable, Equatable {
         self.contextLength = contextLength
         self.rmsNormEpsilon = rmsNormEpsilon
         self.architectureName = architectureName
+        self.explicitHeadDim = explicitHeadDim
     }
 }

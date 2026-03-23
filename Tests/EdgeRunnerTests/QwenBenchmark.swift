@@ -14,12 +14,12 @@ struct QwenBenchmark {
 
     static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
     static let baselinePath = "benchmarks/baseline.json"
-    static let expectedModelFileSizeBytes: Int64 = 804_753_504
+    static let expectedModelFileSizeBytes: Int64 = 639_446_688
 
     // Stable greedy prefix for the pinned GGUF. Later tokens drift slightly across
     // fresh processes on current main, so cross-check the full decode path via the
     // prefix-equivalence test below instead of hard-coding all 4 generated tokens.
-    static let expectedGreedyPrefix = [1, 14582, 25]
+    static let expectedGreedyPrefix = [1, 1479, 35]
 
     // MARK: - Smoke Benchmark
 
