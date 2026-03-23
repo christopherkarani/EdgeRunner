@@ -113,6 +113,120 @@ public enum DequantDispatcher: Sendable {
                 blockData: bytes, superBlockCount: superBlockCount, commandQueue: queue
             )
 
+        case .q5_K:
+            let blockByteCount = 176
+            let weightsPerBlock = 256
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let superBlockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = superBlockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ5KKernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, superBlockCount: superBlockCount, commandQueue: queue
+            )
+
+        case .q6_K:
+            let blockByteCount = 210
+            let weightsPerBlock = 256
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let superBlockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = superBlockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ6KKernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, superBlockCount: superBlockCount, commandQueue: queue
+            )
+
+        case .q3_K:
+            let blockByteCount = 110
+            let weightsPerBlock = 256
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let superBlockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = superBlockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ3KKernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, superBlockCount: superBlockCount, commandQueue: queue
+            )
+
+        case .q2_K:
+            let blockByteCount = 84
+            let weightsPerBlock = 256
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let superBlockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = superBlockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ2KKernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, superBlockCount: superBlockCount, commandQueue: queue
+            )
+
+        case .q5_0:
+            let blockByteCount = 22
+            let weightsPerBlock = 32
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let blockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = blockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ5_0Kernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, blockCount: blockCount, commandQueue: queue
+            )
+
+        case .q5_1:
+            let blockByteCount = 24
+            let weightsPerBlock = 32
+            try validateBlockAlignment(tensor: tensor, weightsPerBlock: weightsPerBlock)
+            let blockCount = tensor.elementCount / weightsPerBlock
+            let byteCount = blockCount * blockByteCount
+            try validateBufferBounds(tensor: tensor, requiredBytes: byteCount)
+            let bytes = Array(UnsafeBufferPointer(
+                start: pointer.assumingMemoryBound(to: UInt8.self),
+                count: byteCount
+            ))
+            guard let queue = device.makeCommandQueue() else {
+                throw EspressoError.metalDeviceUnavailable
+            }
+            let kernel = try DequantQ5_1Kernel(device: device)
+            return try await kernel.dequantise(
+                blockData: bytes, blockCount: blockCount, commandQueue: queue
+            )
+
         default:
             throw EspressoError.unsupportedDataType(String(describing: tensor.dataType))
         }

@@ -77,6 +77,108 @@ struct DequantDispatcherTests {
         #expect(result.count == blockCount * 32)
     }
 
+    @Test("Q5_0 dispatch produces correct count via Metal kernel")
+    func q5_0Dispatch() async throws {
+        let device = try makeDevice()
+        let blockCount = 2
+        let byteCount = blockCount * 22
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q5_0, shape: [blockCount * 32], name: "q5_0_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == blockCount * 32)
+    }
+
+    @Test("Q5_1 dispatch produces correct count via Metal kernel")
+    func q5_1Dispatch() async throws {
+        let device = try makeDevice()
+        let blockCount = 3
+        let byteCount = blockCount * 24
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q5_1, shape: [blockCount * 32], name: "q5_1_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == blockCount * 32)
+    }
+
+    @Test("Q2_K dispatch produces correct count via Metal kernel")
+    func q2_kDispatch() async throws {
+        let device = try makeDevice()
+        let superBlockCount = 2
+        let byteCount = superBlockCount * 84
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q2_K, shape: [superBlockCount * 256], name: "q2_k_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == superBlockCount * 256)
+    }
+
+    @Test("Q3_K dispatch produces correct count via Metal kernel")
+    func q3_kDispatch() async throws {
+        let device = try makeDevice()
+        let superBlockCount = 2
+        let byteCount = superBlockCount * 110
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q3_K, shape: [superBlockCount * 256], name: "q3_k_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == superBlockCount * 256)
+    }
+
+    @Test("Q5_K dispatch produces correct count via Metal kernel")
+    func q5_kDispatch() async throws {
+        let device = try makeDevice()
+        let superBlockCount = 2
+        let byteCount = superBlockCount * 176
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q5_K, shape: [superBlockCount * 256], name: "q5_k_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == superBlockCount * 256)
+    }
+
+    @Test("Q6_K dispatch produces correct count via Metal kernel")
+    func q6_kDispatch() async throws {
+        let device = try makeDevice()
+        let superBlockCount = 2
+        let byteCount = superBlockCount * 210
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q6_K, shape: [superBlockCount * 256], name: "q6_k_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == superBlockCount * 256)
+    }
+
     @Test("Unsupported data type throws")
     func unsupportedThrows() async {
         do {
