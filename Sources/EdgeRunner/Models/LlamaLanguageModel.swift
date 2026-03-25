@@ -448,7 +448,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// Returns the selected token and whether any non-finite values were present.
     func greedyToken(for tokenIDs: [Int]) async throws -> (token: Int, hasNonFinite: Bool) {
         let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs)
-        let (token, hasNonFinite) = argmaxAndValidity(logitsBuf: logitsBuf, count: config.vocabSize)
+        let token = greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
+        let hasNonFinite = containsNonFinite(logitsBuf: logitsBuf, count: config.vocabSize)
         decoderState.cachedLogits = nil
         decoderState.cachedLogitsInput = tokenIDs
         return (token, hasNonFinite)
@@ -744,6 +745,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private func greedyArgmax(logitsBuf: MTLBuffer, count: Int) -> Int {
         let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: count)
         return greedyArgmax(ptr, count: count)
+    }
+
+    private func containsNonFinite(logitsBuf: MTLBuffer, count: Int) -> Bool {
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: count)
+        for i in 0..<count {
+            if !ptr[i].isFinite {
+                return true
+            }
+        }
+        return false
     }
 
     private func greedyArgmax(_ ptr: UnsafePointer<Float>, count: Int) -> Int {
