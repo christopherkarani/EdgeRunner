@@ -46,6 +46,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // Fused dequant+GEMV pipeline for Q8_0 weights (3.8x bandwidth reduction)
     private let fusedQ8GemvPipeline: MTLComputePipelineState
+    private let fusedQ8GemvTiledPipeline: MTLComputePipelineState  // Exp 35: Tile-based with coalesced access
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
     private let fusedGateUpSiluPipeline: MTLComputePipelineState
@@ -130,6 +131,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let registry = try KernelRegistry(device: device)
         self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
         self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
+        self.fusedQ8GemvTiledPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_tiled")
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
         self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
@@ -224,9 +226,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             self.metal4State = nil
         }
 
-        // Pre-allocated params buffer for optimized Metal 3 decode
-        // 7 slots × 256 bytes each: QKV(0), Mega(256), Wo(512), GUS(768), Down(1024), FinalNorm(1280), LMHead(1536)
-        self.decodeParamsBuffer = device.makeBuffer(length: 7 * 256, options: .storageModeShared)
+        // Pre-allocated params buffer for optimized Metal 3 decode.
+        // 8 slots x 256 bytes each: QKV(0), Mega(256), Wo(512), GUS(768), Down(1024),
+        // FinalNorm(1280), LMHead(1536), FusedFinalNormLMHead(1792)
+        self.decodeParamsBuffer = device.makeBuffer(length: 8 * 256, options: .storageModeShared)
     }
 
     // MARK: - EdgeRunnerLanguageModel conformance
@@ -882,6 +885,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
+        let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -1134,7 +1138,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // Fallback: separate projection + add (for seqLen > 1 or non-Q8)
                 for t in 0..<seqLen {
                     if useQ8Fused, let woRaw = lw.woRaw {
-                        enc.setComputePipelineState(fusedQ8PSO)
+                        // Use tiled kernel for better memory coalescing in decode path
+                        let useTiled = seqLen == 1
+                        enc.setComputePipelineState(useTiled ? fusedQ8TiledPSO : fusedQ8PSO)
                         var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
                         enc.setBuffer(woRaw, offset: 0, index: 0)
                         enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
@@ -1198,7 +1204,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     let tokOff = t * dim * floatStride
                     let intOff = t * interDim * floatStride
                     if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
-                        enc.setComputePipelineState(fusedQ8PSO)
+                        // Use tiled kernel for better memory coalescing in decode path
+                        let useTiled = seqLen == 1
+                        enc.setComputePipelineState(useTiled ? fusedQ8TiledPSO : fusedQ8PSO)
                         var p = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim))
                         enc.setBuffer(gateRaw, offset: 0, index: 0)
                         enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
@@ -1255,7 +1263,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // Fallback: separate down + add (for seqLen > 1 or non-Q8)
                 for t in 0..<seqLen {
                     if useQ8Fused, let downRaw = lw.downRaw {
-                        enc.setComputePipelineState(fusedQ8PSO)
+                        // Use tiled kernel for better memory coalescing in decode path
+                        let useTiled = seqLen == 1
+                        enc.setComputePipelineState(useTiled ? fusedQ8TiledPSO : fusedQ8PSO)
                         var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
                         enc.setBuffer(downRaw, offset: 0, index: 0)
                         enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
@@ -1386,7 +1396,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let rmsNormPSO = rmsNormKernel.pipeline
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
-        let fusedQ8PSO = fusedQ8GemvPipeline
+        _ = fusedQ8GemvPipeline  // Unused: we use tiled variant for decode
+        let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -1706,7 +1717,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             if let lmRaw = preloadedWeights.lmHeadRaw {
                 let blocksPerRow = preloadedWeights.lmHeadCols / 32
                 var p = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRow))
-                enc.setComputePipelineState(fusedQ8PSO)
+                // Use tiled kernel for LM head projection (always seqLen == 1 in decode)
+                enc.setComputePipelineState(fusedQ8TiledPSO)
                 enc.setBuffer(lmRaw, offset: 0, index: 0)
                 enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
                 enc.setBuffer(logitsBuf, offset: 0, index: 2)
@@ -1804,6 +1816,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let bpr = preloadedWeights.lmHeadCols / 32
                 var lmP = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(bpr))
                 memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERDequantGEMVParams>.stride)
+                var fusedLmP = FusedGateUpSiluParams(
+                    rows: UInt32(config.vocabSize),
+                    cols: UInt32(dim),
+                    blocksPerRow: UInt32(bpr),
+                    rmsEps: rmsEps
+                )
+                memcpy(paramsBase + 1792, &fusedLmP, MemoryLayout<FusedGateUpSiluParams>.stride)
             } else {
                 var lmP = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
                 memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERGEMVParams>.stride)
@@ -1892,19 +1911,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let logitsBuf = scratch.logits
         if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
-            let blocksPerRow = preloadedWeights.lmHeadCols / 32
-            var p = FusedGateUpSiluParams(
-                rows: UInt32(config.vocabSize),
-                cols: UInt32(dim),
-                blocksPerRow: UInt32(blocksPerRow),
-                rmsEps: rmsEps
-            )
             enc.setComputePipelineState(fusedFinalNormGemvPSO)
             enc.setBuffer(lmRaw, offset: 0, index: 0)
             enc.setBuffer(currentHidden, offset: 0, index: 1)
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
-            enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
+            enc.setBuffer(paramsBuffer, offset: 1792, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
             let finalOutputBuf = scratch.finalOut
@@ -1987,7 +1999,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let gemvAddPSO = gemvAddPipeline
         let fusedGUSPSO = fusedGateUpSiluPipeline
         let rmsNormPSO = rmsNormKernel.pipeline
-        let fusedQ8PSO = fusedQ8GemvPipeline
+        _ = fusedQ8GemvPipeline  // Unused: we use tiled variant for decode
+        let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let gemvPSO = gemvKernel.f32Pipeline
 
         // MTL4 command buffer setup
@@ -2223,7 +2236,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // === LM HEAD (single token) — params pre-written in slot 6 ===
         let logitsBuf = scratch.logits
         if let lmRaw = preloadedWeights.lmHeadRaw {
-            enc.setComputePipelineState(fusedQ8PSO)
+            // Use tiled kernel for LM head projection (always seqLen == 1 in decode)
+            enc.setComputePipelineState(fusedQ8TiledPSO)
             argTable.setAddress(lmRaw.gpuAddress, index: 0)
             argTable.setAddress(finalOutputBuf.gpuAddress, index: 1)
             argTable.setAddress(logitsBuf.gpuAddress, index: 2)

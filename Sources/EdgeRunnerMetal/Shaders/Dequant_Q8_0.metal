@@ -474,8 +474,195 @@ kernel void dequant_q8_0_gemv_add(
 }
 
 // =============================================================================
-// === f16 Accumulation Variants ===============================================
+// === Tile-Based GEMV with Coalesced Memory Access ============================
 // =============================================================================
+// This kernel restructures Q8_0 GEMV to use 2D tile-based access patterns.
+// Problem: Current kernel has each thread loading x[] directly from DRAM with
+// strided access (each thread loads elements 32 apart -> 32 separate memory
+// streams per simdgroup, causing DRAM row buffer thrashing).
+// Solution: All 32 threads cooperatively load a contiguous tile of x[] (1024
+// elements) into threadgroup memory, then access from fast SRAM with coalesced
+// patterns.
+//
+// Expected improvement: 207 GB/s -> 250+ GB/s (20% bandwidth increase)
+
+kernel void dequant_q8_0_gemv_tiled(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+    constexpr uint TILE_SIZE = 1024;  // 4KB, fits comfortably in threadgroup memory
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const uint tilesPerRow = (params.cols + TILE_SIZE - 1) / TILE_SIZE;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    // Pointers to weight rows
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    // Threadgroup memory for the tile - shared across all 32 threads
+    threadgroup float tile[TILE_SIZE];
+
+    // Process the row in tiles
+    for (uint tileIdx = 0; tileIdx < tilesPerRow; tileIdx++) {
+        const uint tileOffset = tileIdx * TILE_SIZE;
+        const uint remainingCols = params.cols - tileOffset;
+        const uint tileLen = min(TILE_SIZE, remainingCols);
+
+        // === Phase 1: Cooperatively load tile into threadgroup memory ===
+        // All 32 threads participate in loading the tile contiguously
+        // This creates coalesced memory access patterns
+        for (uint i = tiisg; i < tileLen; i += 32) {
+            tile[i] = x[tileOffset + i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // === Phase 2: Process Q8_0 blocks within this tile ===
+        // Each thread processes blocks that fall within the current tile
+        // A Q8_0 block covers 32 elements, so we process blocks [tileStartBlock, tileEndBlock)
+        const uint tileStartBlock = (tileOffset) / 32;
+        const uint tileEndBlock = min((tileOffset + tileLen + 31) / 32, (uint)nb);
+
+        for (short ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
+            // Calculate position within tile for this block
+            const uint blockStartInTile = (ib * 32) - tileOffset;
+
+            // Load x values for this block from tile (fast SRAM access)
+            float xl[32];
+            for (short i = 0; i < 32; i++) {
+                uint tilePos = blockStartInTile + i;
+                if (tilePos < TILE_SIZE) {
+                    xl[i] = tile[tilePos];
+                } else {
+                    // Fallback to device memory for edge cases (shouldn't happen with proper tile sizing)
+                    xl[i] = x[ib * 32 + i];
+                }
+            }
+
+            // Process this block for all rows
+            for (short row = 0; row < LOCAL_NR; row++) {
+                if (row0 + row >= params.rows) break;
+
+                device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+                float scale = float(as_type<half>(*(device const ushort*)block));
+                device const char* qs = (device const char*)(block + 2);
+
+                float sumq = 0.f;
+                for (short i = 0; i < 32; i++) sumq += float(qs[i]) * xl[i];
+                sumf[row] += sumq * scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Single simd_sum reduction
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row];
+        }
+    }
+}
+
+// =============================================================================
+// === f16 Accumulation Variant of Tiled GEMV ==================================
+// =============================================================================
+kernel void dequant_q8_0_gemv_tiled_f16acc(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERDequantQ8GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+    constexpr uint TILE_SIZE = 1024;
+
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const short nb = params.blocksPerRow;
+    const uint tilesPerRow = (params.cols + TILE_SIZE - 1) / TILE_SIZE;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    threadgroup float tile[TILE_SIZE];
+
+    for (uint tileIdx = 0; tileIdx < tilesPerRow; tileIdx++) {
+        const uint tileOffset = tileIdx * TILE_SIZE;
+        const uint remainingCols = params.cols - tileOffset;
+        const uint tileLen = min(TILE_SIZE, remainingCols);
+
+        // Cooperatively load tile
+        for (uint i = tiisg; i < tileLen; i += 32) {
+            tile[i] = x[tileOffset + i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const uint tileStartBlock = (tileOffset) / 32;
+        const uint tileEndBlock = min((tileOffset + tileLen + 31) / 32, (uint)nb);
+
+        for (short ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
+            const uint blockStartInTile = (ib * 32) - tileOffset;
+
+            half xl[32];
+            for (short i = 0; i < 32; i++) {
+                uint tilePos = blockStartInTile + i;
+                if (tilePos < TILE_SIZE) {
+                    xl[i] = half(tile[tilePos]);
+                } else {
+                    xl[i] = half(x[ib * 32 + i]);
+                }
+            }
+
+            for (short row = 0; row < LOCAL_NR; row++) {
+                if (row0 + row >= params.rows) break;
+
+                device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+                float scale = float(as_type<half>(*(device const ushort*)block));
+                device const char* qs = (device const char*)(block + 2);
+
+                half sumq = 0.h;
+                for (short i = 0; i < 32; i++) sumq += half(qs[i]) * xl[i];
+                sumf[row] += float(sumq) * scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row];
+        }
+    }
+}
 // These kernels use half-precision for the inner dot product (xl[] cache and
 // per-block sumq), halving register pressure and doubling ALU throughput on
 // Apple Silicon. The outer cross-block accumulator (sumf[]) stays float32 to
