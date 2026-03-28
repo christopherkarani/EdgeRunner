@@ -1518,18 +1518,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         signs: turboQuantKernel!.keySigns
                     )
                 } else {
-                    // Convert RoPE'd K from f32 → f16 (layerKCache) for each position
-                    for t in 0..<seqLen {
-                        let srcOff = t * kvDim * floatStride
-                        let dstOff = (t + startPosition) * kvDim * halfStride
-                        enc.setComputePipelineState(convertF32ToF16PSO)
-                        enc.setBuffer(ropeKOut, offset: srcOff, index: 0)
-                        enc.setBuffer(layerKCache!, offset: dstOff, index: 1)
-                        var convCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                        enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                        enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                    }
+                    // Convert the full RoPE'd K slab from f32 -> f16 in one dispatch.
+                    let dstOff = startPosition * kvDim * halfStride
+                    enc.setComputePipelineState(convertF32ToF16PSO)
+                    enc.setBuffer(ropeKOut, offset: 0, index: 0)
+                    enc.setBuffer(layerKCache!, offset: dstOff, index: 1)
+                    var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                    enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
                 ropeQOut = hasQKNorm ? allQBuf : ropeQBuf
             }
