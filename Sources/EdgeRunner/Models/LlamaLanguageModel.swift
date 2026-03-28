@@ -1219,6 +1219,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let gateBuf = try await readWeightBufferIfNeeded("\(p).feedForward.gate.weight", rawBuffer: gateRaw)
                 let upBuf = try await readWeightBufferIfNeeded("\(p).feedForward.up.weight", rawBuffer: upRaw)
                 let downBuf = try await readWeightBufferIfNeeded("\(p).feedForward.down.weight", rawBuffer: downRaw)
+                let wqPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).attention.wq.weight", rows: qDim, cols: dim)
+                let wkPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).attention.wk.weight", rows: kvDim, cols: dim)
+                let wvPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).attention.wv.weight", rows: kvDim, cols: dim)
+                let woPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).attention.wo.weight", rows: dim, cols: qDim)
+                let gatePackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).feedForward.gate.weight", rows: interDim, cols: dim)
+                let upPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).feedForward.up.weight", rows: interDim, cols: dim)
+                let downPackedPrefill = try await makePackedPrefillWeightBufferIfNeeded("\(p).feedForward.down.weight", rows: dim, cols: interDim)
                 // Load per-head Q/K norm weights if present (Qwen3)
                 let qNormName = "\(p).attention.qNorm.weight"
                 let kNormName = "\(p).attention.kNorm.weight"
@@ -1228,9 +1235,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 layers.append(LayerWeightBuffers(
                     attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
                     wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
+                    wqPackedPrefill: wqPackedPrefill,
+                    wkPackedPrefill: wkPackedPrefill,
+                    wvPackedPrefill: wvPackedPrefill,
+                    woPackedPrefill: woPackedPrefill,
                     qNorm: qNormBuf, kNorm: kNormBuf,
                     ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
                     gate: gateBuf, up: upBuf, down: downBuf,
+                    gatePackedPrefill: gatePackedPrefill,
+                    upPackedPrefill: upPackedPrefill,
+                    downPackedPrefill: downPackedPrefill,
                     wqRaw: wqRaw, wkRaw: wkRaw, wvRaw: wvRaw, woRaw: woRaw,
                     gateRaw: gateRaw, upRaw: upRaw, downRaw: downRaw
                 ))
@@ -3030,6 +3044,34 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return try await readWeightBuffer(name)
     }
 
+    private func makePackedPrefillWeightBufferIfNeeded(
+        _ name: String,
+        rows: Int,
+        cols: Int
+    ) async throws -> MTLBuffer? {
+        guard prefillDebugOptions.prefersExperimentalExactMatrixPrefillPath else {
+            return nil
+        }
+
+        let floats = try await dequantizeToFloatArray(weights[name]!)
+        var packed = [Float](repeating: 0, count: floats.count)
+        packed.withUnsafeMutableBufferPointer { dst in
+            floats.withUnsafeBufferPointer { src in
+                guard let srcBase = src.baseAddress, let dstBase = dst.baseAddress else { return }
+                vDSP_mtrans(srcBase, 1, dstBase, 1, vDSP_Length(cols), vDSP_Length(rows))
+            }
+        }
+
+        guard let buffer = device.makeBuffer(
+            bytes: packed,
+            length: packed.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create packed prefill weight buffer for \(name)")
+        }
+        return buffer
+    }
+
     /// Fills embedding rows directly into the destination buffer, avoiding an intermediate array.
     private func fillEmbeddings(
         tokenIDs: [Int],
@@ -3253,12 +3295,19 @@ private final class Metal4State: @unchecked Sendable {
             if let buffer = lw.wk { residencySet.addAllocation(buffer) }
             if let buffer = lw.wv { residencySet.addAllocation(buffer) }
             if let buffer = lw.wo { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wqPackedPrefill { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wkPackedPrefill { residencySet.addAllocation(buffer) }
+            if let buffer = lw.wvPackedPrefill { residencySet.addAllocation(buffer) }
+            if let buffer = lw.woPackedPrefill { residencySet.addAllocation(buffer) }
             if let q = lw.qNorm { residencySet.addAllocation(q) }
             if let k = lw.kNorm { residencySet.addAllocation(k) }
             residencySet.addAllocation(lw.ffnNorm)
             if let buffer = lw.gate { residencySet.addAllocation(buffer) }
             if let buffer = lw.up { residencySet.addAllocation(buffer) }
             if let buffer = lw.down { residencySet.addAllocation(buffer) }
+            if let buffer = lw.gatePackedPrefill { residencySet.addAllocation(buffer) }
+            if let buffer = lw.upPackedPrefill { residencySet.addAllocation(buffer) }
+            if let buffer = lw.downPackedPrefill { residencySet.addAllocation(buffer) }
             if let b = lw.wqRaw { residencySet.addAllocation(b) }
             if let b = lw.wkRaw { residencySet.addAllocation(b) }
             if let b = lw.wvRaw { residencySet.addAllocation(b) }
@@ -3372,12 +3421,19 @@ private struct LayerWeightBuffers {
     let wk: MTLBuffer!
     let wv: MTLBuffer!
     let wo: MTLBuffer!
+    let wqPackedPrefill: MTLBuffer?
+    let wkPackedPrefill: MTLBuffer?
+    let wvPackedPrefill: MTLBuffer?
+    let woPackedPrefill: MTLBuffer?
     let qNorm: MTLBuffer?  // Per-head Q RMSNorm weight [headDim] (Qwen3)
     let kNorm: MTLBuffer?  // Per-head K RMSNorm weight [headDim] (Qwen3)
     let ffnNorm: MTLBuffer
     let gate: MTLBuffer!
     let up: MTLBuffer!
     let down: MTLBuffer!
+    let gatePackedPrefill: MTLBuffer?
+    let upPackedPrefill: MTLBuffer?
+    let downPackedPrefill: MTLBuffer?
 
     // Raw Q8_0 quantized weight buffers (nil if not Q8_0)
     let wqRaw: MTLBuffer?
