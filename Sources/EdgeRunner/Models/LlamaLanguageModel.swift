@@ -3181,6 +3181,98 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
     }
 
+    private func encodePackedPrefillAttentionProjections(
+        encoder: MTLComputeCommandEncoder,
+        pipeline: MTLComputePipelineState,
+        packed: PackedPrefillAttentionWeights,
+        normalizedHidden: MTLBuffer,
+        allQ: MTLBuffer,
+        allK: MTLBuffer,
+        allV: MTLBuffer,
+        seqLen: Int
+    ) {
+        encodePackedPrefillMatmul(
+            encoder: encoder,
+            pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.wq,
+            output: allQ,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmul(
+            encoder: encoder,
+            pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.wk,
+            output: allK,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmul(
+            encoder: encoder,
+            pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.wv,
+            output: allV,
+            rows: seqLen
+        )
+    }
+
+    private func encodePackedPrefillFFNProjections(
+        encoder: MTLComputeCommandEncoder,
+        pipeline: MTLComputePipelineState,
+        packed: PackedPrefillFFNWeights,
+        normalizedHidden: MTLBuffer,
+        gateOut: MTLBuffer,
+        upOut: MTLBuffer,
+        seqLen: Int
+    ) {
+        encodePackedPrefillMatmul(
+            encoder: encoder,
+            pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.gate,
+            output: gateOut,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmul(
+            encoder: encoder,
+            pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.up,
+            output: upOut,
+            rows: seqLen
+        )
+    }
+
+    private func encodePackedPrefillMatmul(
+        encoder: MTLComputeCommandEncoder,
+        pipeline: MTLComputePipelineState,
+        lhs: MTLBuffer,
+        rhs: PackedPrefillWeight,
+        output: MTLBuffer,
+        rows: Int
+    ) {
+        var params = ERGEMMParams(
+            M: UInt32(rows),
+            N: UInt32(rhs.rows),
+            K: UInt32(rhs.cols),
+            lda: UInt32(rhs.cols),
+            ldb: UInt32(rhs.rows),
+            ldc: UInt32(rhs.rows)
+        )
+        let tgWidth = min(16, pipeline.maxTotalThreadsPerThreadgroup)
+        let tgHeight = max(1, min(16, pipeline.maxTotalThreadsPerThreadgroup / tgWidth))
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(lhs, offset: 0, index: 0)
+        encoder.setBuffer(rhs.buffer, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<ERGEMMParams>.size, index: 3)
+        encoder.dispatchThreads(
+            MTLSize(width: rhs.rows, height: rows, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: tgWidth, height: tgHeight, depth: 1)
+        )
+    }
+
     /// Fills embedding rows directly into the destination buffer, avoiding an intermediate array.
     private func fillEmbeddings(
         tokenIDs: [Int],
