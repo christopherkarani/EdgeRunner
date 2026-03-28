@@ -38,6 +38,41 @@
   - The prompt tokens are identical across runtimes because both consumed the same pre-tokenized ID list.
   - The underlying model formats still differ (`GGUF Q8_0` for EdgeRunner vs MLX 8-bit safetensors), so this is apples-to-apples at the prompt/workload level, not at the raw weight-format level.
 
+# Runtime Repack + Matrix Prefill Rewrite
+
+## Goal
+- Replace the current experimental packed-prefill scaffolding with a production runtime repack for compatible Q8 hot-path weights.
+- Replace the token-loop-heavy multi-token prompt path with a true prompt-matrix exact prefill engine.
+- Replace the long-KV exact decode attention path with a dedicated exact kernel and cache layout that scale better at `kvLen ~ 1k+`.
+- Preserve the current deterministic short-decode path and legacy prefill/decode fallbacks until the rewrite has benchmarked wins.
+
+## Plan
+- [ ] Phase 0: re-establish authoritative baselines on this checkout for publishable decode and the 1024-token long-prompt benchmark, then record them in the review notes below.
+- [ ] Phase 1: promote runtime repacking from debug scaffolding to a first-class load-time artifact for compatible Q8 weights, with explicit metadata and fallback preservation.
+- [ ] Phase 2: add a dedicated exact matrix-prefill engine entrypoint instead of routing every path through `fusedPrefillPass`.
+- [ ] Phase 3: implement matrix-backed QKV projection in the new prefill engine and validate parity plus long-prompt benchmark effect.
+- [ ] Phase 4: implement prompt-wide exact FFN (`wo`, `gate/up/down`) in the new prefill engine and re-benchmark.
+- [ ] Phase 5: replace prompt attention with a dedicated exact tiled kernel that operates on prompt slabs and writes K/V directly in cache-native form.
+- [ ] Phase 6: redesign long-KV exact decode attention and KV layout behind explicit routing, then re-run publishable and long-prompt benchmarks.
+- [ ] Phase 7: only after kernel architecture is winning, revisit dispatch/runtime cleanup and Metal 4 fast-path routing.
+- [ ] Kill criteria:
+  - matrix-backed slices that regress long-prompt prompt throughput or TTFT after one tuning pass are reverted immediately
+  - decode-only changes that do not improve the 1024-token decode metric are reverted even if short decode stays healthy
+  - no slice is kept if publishable determinism or hash parity regresses
+
+## Review
+- Trusted kept baseline on `perf2@05736be73ef5f8d73e51edec2b743de0726f548a`:
+  - publishable decode median `~211-213 tok/s`
+  - publishable TTFT `~4.0 ms`
+  - publishable hash `0afae14a84cf0df8`
+  - long-prompt prompt throughput median `489.0 tok/s`
+  - long-prompt TTFT median `2093.9 ms`
+  - long-prompt decode median `42.26 tok/s`
+- Dead rewrite branches already measured and reverted:
+  - GEMM-backed exact matrix prefill over repacked Q8 weights: regressed long-prompt prompt throughput to `433.3 tok/s`
+  - contiguous raw-Q8 prefill bundle views over the GGUF mmap: regressed long-prompt prompt throughput to `469.2 tok/s`
+- Implication: the remaining viable path is a larger engine split, not more local substitutions inside the legacy prefill body.
+
 # Mega Fused GQA Kernel Repair
 
 # TurboQuant KV Cache Integration
