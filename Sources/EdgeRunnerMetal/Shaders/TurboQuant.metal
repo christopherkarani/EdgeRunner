@@ -1068,6 +1068,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     constexpr uint kDecodeThreads = 16;
     constexpr uint kRegularBits = 2;
     constexpr uint kHighBits = 3;
+    constexpr uint kTileRows = 4;
 
     const uint kvHeadIndex = headIndex / params.groupSize;
     const uint kvSeqLen = params.kvSeqLen;
@@ -1114,49 +1115,79 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     float runningMax = -INFINITY;
     float runningSum = 0.0;
 
-    for (uint kvPos = lane; kvPos < kvLimit; kvPos += kDecodeThreads) {
-        uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
-        device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
-        device const uint *kSignRow = KResidualSigns + rowIndex * 4;
-        device const uint *kMaskRow = KOutlierMask + rowIndex * 4;
-        device const float *kMetaRow = KMetadata + rowIndex * 2;
-        float keyRowNorm = kMetaRow[0];
-        float keyResidualNorm = kMetaRow[1];
+    for (uint kvBase = lane; kvBase < kvLimit; kvBase += kDecodeThreads * kTileRows) {
+        float tileScores[kTileRows];
+        float tileProbs[kTileRows];
+        uint tileRowIndices[kTileRows];
+        float tileMax = -INFINITY;
 
-        float mseDot = 0.0;
-        float residualDot = 0.0;
-        for (uint block = 0; block < 4; ++block) {
-            uint maskWord = kMaskRow[block];
-            uint signWord = kSignRow[block];
-            for (uint bit = 0; bit < 32; ++bit) {
-                uint dim = block * 32 + bit;
-                uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
-                mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
-                residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint kvPos = kvBase + tile * kDecodeThreads;
+            if (kvPos >= kvLimit) {
+                tileScores[tile] = -INFINITY;
+                tileProbs[tile] = 0.0;
+                tileRowIndices[tile] = UINT_MAX;
+                continue;
             }
-        }
-        uint keySidebandOffset = 128u * kRegularBits;
-        for (uint block = 0; block < 4; ++block) {
-            uint maskWord = kMaskRow[block];
-            while (maskWord != 0u) {
-                uint bit = ctz(maskWord);
-                uint dim = block * 32 + bit;
-                uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
-                uint extra = tq_extract_code(kCodeRow, keySidebandOffset, 1u);
-                uint fullCode = baseCode | (extra << kRegularBits);
-                mseDot += qRotation[dim] * (tq_centroid_3bit(fullCode) - tq_centroid_2bit(baseCode));
-                keySidebandOffset += 1u;
-                maskWord &= (maskWord - 1u);
+
+            uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+            tileRowIndices[tile] = rowIndex;
+
+            device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
+            device const uint *kSignRow = KResidualSigns + rowIndex * 4;
+            device const uint *kMaskRow = KOutlierMask + rowIndex * 4;
+            device const float *kMetaRow = KMetadata + rowIndex * 2;
+            float keyRowNorm = kMetaRow[0];
+            float keyResidualNorm = kMetaRow[1];
+
+            float mseDot = 0.0;
+            float residualDot = 0.0;
+            for (uint block = 0; block < 4; ++block) {
+                uint signWord = kSignRow[block];
+                for (uint bit = 0; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
+                    mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
+                    residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
             }
+            uint keySidebandOffset = 128u * kRegularBits;
+            for (uint block = 0; block < 4; ++block) {
+                uint maskWord = kMaskRow[block];
+                while (maskWord != 0u) {
+                    uint bit = ctz(maskWord);
+                    uint dim = block * 32 + bit;
+                    uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
+                    uint extra = tq_extract_code(kCodeRow, keySidebandOffset, 1u);
+                    uint fullCode = baseCode | (extra << kRegularBits);
+                    mseDot += qRotation[dim] * (tq_centroid_3bit(fullCode) - tq_centroid_2bit(baseCode));
+                    keySidebandOffset += 1u;
+                    maskWord &= (maskWord - 1u);
+                }
+            }
+
+            float score = keyRowNorm * (
+                mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+            ) * params.scale;
+            tileScores[tile] = score;
+            tileMax = max(tileMax, score);
         }
 
-        float score = keyRowNorm * (
-            mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
-        ) * params.scale;
-        float nextMax = max(runningMax, score);
+        float nextMax = max(runningMax, tileMax);
         float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
-        float prob = exp(score - nextMax);
-        runningSum = runningSum * correction + prob;
+        float tileSum = 0.0;
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            float score = tileScores[tile];
+            if (score == -INFINITY) {
+                tileProbs[tile] = 0.0;
+                continue;
+            }
+            float prob = exp(score - nextMax);
+            tileProbs[tile] = prob;
+            tileSum += prob;
+        }
+
+        runningSum = runningSum * correction + tileSum;
         runningMax = nextMax;
 
         for (uint dim = 0; dim < 128; ++dim) {
@@ -1164,37 +1195,42 @@ kernel void gqa_attention_turboquant_decode_aggressive(
             laneOutputResidual[dim] *= correction;
         }
 
-        device const uint *vCodeRow = VCodes + rowIndex * params.codeWordsPerRow;
-        device const uint *vSignRow = VResidualSigns + rowIndex * 4;
-        device const uint *vMaskRow = VOutlierMask + rowIndex * 4;
-        device const float *vMetaRow = VMetadata + rowIndex * 2;
-        float valueRowNorm = vMetaRow[0];
-        float valueResidualNorm = vMetaRow[1];
-        float mseScale = prob * valueRowNorm;
-        float residualScale = prob * valueRowNorm * valueResidualNorm;
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint rowIndex = tileRowIndices[tile];
+            float prob = tileProbs[tile];
+            if (rowIndex == UINT_MAX || prob == 0.0) { continue; }
 
-        for (uint block = 0; block < 4; ++block) {
-            uint maskWord = vMaskRow[block];
-            uint signWord = vSignRow[block];
-            for (uint bit = 0; bit < 32; ++bit) {
-                uint dim = block * 32 + bit;
-                uint baseCode = tq_extract_code(vCodeRow, dim * kRegularBits, kRegularBits);
-                laneOutputMSE[dim] += mseScale * tq_centroid_2bit(baseCode);
-                laneOutputResidual[dim] += residualScale * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+            device const uint *vCodeRow = VCodes + rowIndex * params.codeWordsPerRow;
+            device const uint *vSignRow = VResidualSigns + rowIndex * 4;
+            device const uint *vMaskRow = VOutlierMask + rowIndex * 4;
+            device const float *vMetaRow = VMetadata + rowIndex * 2;
+            float valueRowNorm = vMetaRow[0];
+            float valueResidualNorm = vMetaRow[1];
+            float mseScale = prob * valueRowNorm;
+            float residualScale = prob * valueRowNorm * valueResidualNorm;
+
+            for (uint block = 0; block < 4; ++block) {
+                uint signWord = vSignRow[block];
+                for (uint bit = 0; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = tq_extract_code(vCodeRow, dim * kRegularBits, kRegularBits);
+                    laneOutputMSE[dim] += mseScale * tq_centroid_2bit(baseCode);
+                    laneOutputResidual[dim] += residualScale * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
             }
-        }
-        uint valueSidebandOffset = 128u * kRegularBits;
-        for (uint block = 0; block < 4; ++block) {
-            uint maskWord = vMaskRow[block];
-            while (maskWord != 0u) {
-                uint bit = ctz(maskWord);
-                uint dim = block * 32 + bit;
-                uint baseCode = tq_extract_code(vCodeRow, dim * kRegularBits, kRegularBits);
-                uint extra = tq_extract_code(vCodeRow, valueSidebandOffset, 1u);
-                uint fullCode = baseCode | (extra << kRegularBits);
-                laneOutputMSE[dim] += mseScale * (tq_centroid_3bit(fullCode) - tq_centroid_2bit(baseCode));
-                valueSidebandOffset += 1u;
-                maskWord &= (maskWord - 1u);
+            uint valueSidebandOffset = 128u * kRegularBits;
+            for (uint block = 0; block < 4; ++block) {
+                uint maskWord = vMaskRow[block];
+                while (maskWord != 0u) {
+                    uint bit = ctz(maskWord);
+                    uint dim = block * 32 + bit;
+                    uint baseCode = tq_extract_code(vCodeRow, dim * kRegularBits, kRegularBits);
+                    uint extra = tq_extract_code(vCodeRow, valueSidebandOffset, 1u);
+                    uint fullCode = baseCode | (extra << kRegularBits);
+                    laneOutputMSE[dim] += mseScale * (tq_centroid_3bit(fullCode) - tq_centroid_2bit(baseCode));
+                    valueSidebandOffset += 1u;
+                    maskWord &= (maskWord - 1u);
+                }
             }
         }
     }

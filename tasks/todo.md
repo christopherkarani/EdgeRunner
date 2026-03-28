@@ -183,6 +183,36 @@
   - aggressive-specific single-token decode kernel
   - generic prefill attention kernel
 
+### Follow-up Tuning Note: Decode Breakdown Harness + Tiled Decode Keep
+- Added an env-gated kernel-level benchmark in [TurboQuantDecodeBreakdownBenchmarks.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Tests/EdgeRunnerMetalTests/TurboQuantDecodeBreakdownBenchmarks.swift) to time:
+  - `turboquant_quantize_rows_small_aggressive`
+  - `turboquant_quantize_rows_small_aggressive_kv`
+  - `gqa_attention_turboquant_decode_aggressive`
+- This harness established that the remaining wall is split between aggressive decode attention and the tiny-row append quantizer, instead of decode attention being the only significant cost.
+- Kept a 4-row strided tile in `gqa_attention_turboquant_decode_aggressive`, which reduces online-softmax rescaling frequency without changing the exact smoke trace.
+- Verified:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Benchmark deltas versus the prior stable aggressive baseline:
+  - `prompt_len=512`: decode `14.60 -> 15.01 tok/s`, TTFT `4637.16 -> 4467.82 ms`
+  - `prompt_len=1024`: decode `11.21 -> 12.06 tok/s`, TTFT `8726.37 -> 8536.71 ms`
+- This is a kept TurboQuant gain, but it still leaves the path far below FP16. On the breakdown harness, decode attention and fused K/V quantization are now in the same cost band instead of one overwhelmingly dominating the other.
+
+### Rejected Follow-up: Deeper Decode Tile / Parallel Decode Hadamard / Direct Pack Rewrite
+- Rejected after measurement:
+  - increasing the aggressive decode tile from `4` rows to `8`
+  - parallelizing the aggressive decode forward/inverse Hadamards across the 16-lane decode threadgroup
+  - replacing the aggressive lane-0 pack stage with direct fixed-plane word packing
+- Why they were rejected:
+  - tile `8` improved the isolated breakdown harness slightly but regressed the real 512/1024 aggressive benchmarks, especially TTFT at `1024`
+  - parallel decode Hadamard work substantially regressed the isolated breakdown benchmark
+  - direct pack reduced fused quantizer time in isolation but regressed the real long-context runs
+- Conclusion:
+  - for this codebase, the 4-row tiled aggressive decode kernel is a real keep, but the next breakthrough will not come from simply pushing tile depth, parallelizing the decode Hadamard transforms, or shortening the lane-0 pack code.
+
 ## Goal
 - Restore deterministic, benchmark-canonical decode on the fast mega fused Q/K norm + RoPE + GQA path for the pinned `Qwen3-0.6B-Q8_0` artifact.
 - Keep benchmark throughput on the fast path without relying on the temporary `disableMegaKernel` benchmark override.
