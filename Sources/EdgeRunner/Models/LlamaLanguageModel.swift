@@ -974,6 +974,27 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         if prefillDebugOptions.prefersExperimentalExactMatrixPrefillPath,
            !prefillDebugOptions.forceLegacyPrefillPath {
+            return try await exactMatrixPrefillPass(
+                hiddenBuf: hiddenBuf,
+                seqLen: seqLen,
+                startPosition: startPosition
+            )
+        }
+
+        return try await fusedPrefillPass(
+            hiddenBuf: hiddenBuf,
+            seqLen: seqLen,
+            startPosition: startPosition
+        )
+    }
+
+    private func exactMatrixPrefillPass(
+        hiddenBuf: MTLBuffer,
+        seqLen: Int,
+        startPosition: Int = 0
+    ) async throws -> MTLBuffer {
+        guard preloadedWeights.layers.count == config.layerCount,
+              preloadedWeights.layers.allSatisfy({ $0.packedPrefillAttention != nil && $0.packedPrefillFFN != nil }) else {
             return try await fusedPrefillPass(
                 hiddenBuf: hiddenBuf,
                 seqLen: seqLen,
