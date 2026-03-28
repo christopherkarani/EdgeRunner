@@ -89,15 +89,36 @@ struct EdgeRunnerLanguageModelProtocolTests {
         let config = ModelConfiguration()
         #expect(config.maxTokens == 2048)
         #expect(config.contextWindowSize == 4096)
+        #expect(config.kvCacheCompression == .automatic)
+        #expect(config.resolvedKVCacheCompression == .disabled)
     }
 
     @Test func modelConfigurationCustom() {
         let config = ModelConfiguration(
             maxTokens: 512,
-            contextWindowSize: 8192
+            contextWindowSize: 8192,
+            kvCacheCompression: .turboQuantAggressive
         )
         #expect(config.maxTokens == 512)
         #expect(config.contextWindowSize == 8192)
+        #expect(config.kvCacheCompression == .turboQuantAggressive)
+        #expect(config.resolvedKVCacheCompression == .turboQuantAggressive)
+    }
+
+    @Test func modelConfigurationAutomaticGate() {
+        let key = ModelConfiguration.automaticTurboQuantGateEnv
+        let previous = ProcessInfo.processInfo.environment[key]
+        setenv(key, "1", 1)
+        defer {
+            if let previous {
+                setenv(key, previous, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+
+        let config = ModelConfiguration(contextWindowSize: 8192)
+        #expect(config.resolvedKVCacheCompression == .turboQuantBalanced)
     }
 
     @Test func generationErrorDescriptions() {

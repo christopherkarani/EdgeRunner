@@ -217,4 +217,57 @@ struct KVCacheTests {
             Issue.record("Expected invalidLayer(1), got \(error)")
         }
     }
+
+    @Test func turboQuantAppendAndDecodeRoundTrip() throws {
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: 8,
+            numLayers: 1,
+            numKVHeads: 2,
+            headDim: 128,
+            precision: .turboQuantAggressive
+        )
+
+        let keys = makeSignal(scale: 1.0) + makeSignal(scale: 0.7)
+        let values = makeSignal(scale: 0.5) + makeSignal(scale: 1.2)
+        try cache.append(layer: 0, keys: keys, values: values)
+
+        let (decodedKeys, decodedValues) = try cache.retrieveDecodedTurboQuant(layer: 0)
+        #expect(decodedKeys.count == keys.count)
+        #expect(decodedValues.count == values.count)
+        #expect(decodedKeys.allSatisfy { $0.isFinite })
+        #expect(decodedValues.allSatisfy { $0.isFinite })
+    }
+
+    @Test func turboQuantBufferAccessUsesDedicatedAPI() throws {
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: 8,
+            numLayers: 1,
+            numKVHeads: 1,
+            headDim: 128,
+            precision: .turboQuantBalanced
+        )
+
+        let buffers = try cache.turboQuantMetalBuffers(layer: 0)
+        #expect(buffers.key.codes.length > 0)
+        #expect(buffers.value.metadata.length > 0)
+
+        do {
+            _ = try cache.metalBuffers(layer: 0)
+            Issue.record("Expected compressedBufferAccessRequiresTurboQuantAPI for TurboQuant storage")
+        } catch let error as KVCacheError {
+            if case .compressedBufferAccessRequiresTurboQuantAPI = error {
+                return
+            }
+            Issue.record("Expected compressedBufferAccessRequiresTurboQuantAPI, got \(error)")
+        }
+    }
+
+    private func makeSignal(scale: Float) -> [Float] {
+        (0..<128).map { index in
+            let x = Float(index)
+            return (sin(x * 0.17) + cos(x * 0.07) * 0.5) * scale
+        }
+    }
 }
