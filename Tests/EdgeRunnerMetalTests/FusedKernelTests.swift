@@ -280,6 +280,54 @@ struct FusedKernelTests {
         }
     }
 
+    @Test("Base GEMV supports batched prompt tokens")
+    func testBaseGEMVBatched() async throws {
+        let tokenCount = 3
+        let rows = 64
+        let cols = 128
+        let x = (0..<(tokenCount * cols)).map { _ in Float.random(in: -1...1) }
+        let w = (0..<(rows * cols)).map { _ in Float.random(in: -0.5...0.5) }
+
+        let wBuf = Self.makeQ8Buffer(device: Self.device, rows: rows, cols: cols, values: w)
+        let xBuf = Self.device.makeBuffer(bytes: x, length: x.count * 4, options: .storageModeShared)!
+        let yBuf = Self.device.makeBuffer(length: tokenCount * rows * 4, options: .storageModeShared)!
+
+        var cpuResult = [Float]()
+        cpuResult.reserveCapacity(tokenCount * rows)
+        for tokenIndex in 0..<tokenCount {
+            let start = tokenIndex * cols
+            cpuResult += Self.cpuQ8GEMV(weight: wBuf, x: Array(x[start..<(start + cols)]), rows: rows, cols: cols)
+        }
+
+        let registry = try KernelRegistry(device: Self.device)
+        let pso = try registry.pipeline(for: "dequant_q8_0_gemv_batched")
+
+        struct Params { var rows: UInt32; var cols: UInt32; var bpr: UInt32; var tokenCount: UInt32 }
+        var params = Params(rows: UInt32(rows), cols: UInt32(cols), bpr: UInt32(cols / 32), tokenCount: UInt32(tokenCount))
+        let cmd = Self.queue.makeCommandBuffer()!
+        let enc = cmd.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(wBuf, offset: 0, index: 0)
+        enc.setBuffer(xBuf, offset: 0, index: 1)
+        enc.setBuffer(yBuf, offset: 0, index: 2)
+        enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 3)
+        enc.dispatchThreadgroups(
+            MTLSize(width: (rows + 1) / 2, height: tokenCount, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+        )
+        enc.endEncoding()
+        cmd.commit()
+        await cmd.completed()
+
+        let gpuResult = Array(UnsafeBufferPointer(
+            start: yBuf.contents().assumingMemoryBound(to: Float.self), count: tokenCount * rows))
+
+        for i in 0..<gpuResult.count {
+            let relError = abs(gpuResult[i] - cpuResult[i]) / max(abs(cpuResult[i]), 1e-6)
+            #expect(relError < 0.02, "Index \(i): GPU=\(gpuResult[i]) CPU=\(cpuResult[i]) relErr=\(relError)")
+        }
+    }
+
     @Test("Fused Gate+Up+SwiGLU supports batched prompt tokens")
     func testFusedGateUpSiluBatched() async throws {
         let tokenCount = 3

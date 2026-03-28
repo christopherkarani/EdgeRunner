@@ -731,3 +731,19 @@ The optimization removes redundant float32 weight caches that existed for a pref
     - long-context decode: `40.95 tok/s`
 - **Result:** KEPT. This is the strongest exact-path prefill win so far, materially improving prompt throughput and TTFT while leaving the publishable decode benchmark stable.
 - **Status:** KEPT
+
+### Experiment 38: Batch Q8 Wo/Down Prefill Projections
+- **Hypothesis:** After batching QKV, GUS, and K-cache conversion, prefill still spends two per-token Q8 projection loops on `wo` and `down`. A batched Q8 GEMV kernel for multi-token prefill should remove those remaining projection launches without perturbing decode or fused residual-add semantics.
+- **Change:**
+  - Added `dequant_q8_0_gemv_batched`, a 2D-grid Q8 GEMV kernel for `[token, row]` output slabs.
+  - Routed multi-token prefill `wo` and `down` projections through that batched kernel, while keeping single-token decode on the existing tiled and fused-add paths.
+  - Added a batched GEMV correctness case to `FusedKernelTests`.
+- **Verification:**
+  - `swift test -c release --filter FusedKernelTests` passed, including the new batched GEMV case.
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic token hash `0afae14a84cf0df8` and median decode `213.2 tok/s`.
+  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner medians:
+    - prompt throughput: `368.5 tok/s`
+    - TTFT: `2778.9 ms`
+    - long-context decode: `41.85 tok/s`
+- **Result:** KEPT. This is another bounded exact-path prefill improvement. It does not change the architecture, but it meaningfully trims prompt-side work while keeping the decode benchmark healthy.
+- **Status:** KEPT

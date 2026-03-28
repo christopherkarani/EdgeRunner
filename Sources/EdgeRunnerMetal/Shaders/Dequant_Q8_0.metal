@@ -37,6 +37,13 @@ struct ERDequantQ8GEMVParams {
     uint blocksPerRow;
 };
 
+struct ERDequantQ8GEMVBatchParams {
+    uint rows;
+    uint cols;
+    uint blocksPerRow;
+    uint tokenCount;
+};
+
 kernel void dequant_q8_0_gemv(
     device const uchar* quantisedW [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -90,6 +97,62 @@ kernel void dequant_q8_0_gemv(
         for (short row = 0; row < LOCAL_NR; row++) {
             if (row0 + row >= params.rows) break;
             y[row0 + row] = sumf[row];
+        }
+    }
+}
+
+kernel void dequant_q8_0_gemv_batched(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERDequantQ8GEMVBatchParams& params [[buffer(3)]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= params.rows || tokenIndex >= params.tokenCount) return;
+
+    const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenY = y + tokenIndex * params.rows;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
+    }
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = tokenX + ib * 32;
+        float xl[32];
+        for (short i = 0; i < 32; i++) xl[i] = xb[i];
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+
+            device const uchar* block = ax[row] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+
+            float sumq = 0.f;
+            for (short i = 0; i < 32; i++) sumq += float(qs[i]) * xl[i];
+            sumf[row] += sumq * scale;
+        }
+    }
+
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            tokenY[row0 + row] = sumf[row];
         }
     }
 }

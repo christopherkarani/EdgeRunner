@@ -123,6 +123,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
     // Fused dequant+GEMV pipeline for Q8_0 weights (3.8x bandwidth reduction)
     private let fusedQ8GemvPipeline: MTLComputePipelineState
+    private let fusedQ8GemvBatchedPipeline: MTLComputePipelineState
     private let fusedQ8GemvTiledPipeline: MTLComputePipelineState  // Exp 35: Tile-based with coalesced access
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
@@ -226,6 +227,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Load elementwise add pipeline for GPU residual connections
         self.addPipeline = try registry.pipeline(for: "elementwise_add_float")
         self.fusedQ8GemvPipeline = try registry.pipeline(for: "dequant_q8_0_gemv")
+        self.fusedQ8GemvBatchedPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_batched")
         self.fusedQ8GemvTiledPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_tiled")
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
@@ -1286,6 +1288,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let fusedQ8PSO = fusedQ8GemvPipeline
+        let fusedQ8BatchedPSO = fusedQ8GemvBatchedPipeline
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
@@ -1581,19 +1584,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate projection + add (for seqLen > 1 or non-Q8)
-                for t in 0..<seqLen {
-                    if useQ8Fused, let woRaw = lw.woRaw {
-                        // Use tiled kernel for better memory coalescing in decode path
-                        let useTiled = seqLen == 1
-                        enc.setComputePipelineState(useTiled ? fusedQ8TiledPSO : fusedQ8PSO)
-                        var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
-                        enc.setBuffer(woRaw, offset: 0, index: 0)
-                        enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
-                        enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
-                        enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                        enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else {
+                if useQ8Fused, let woRaw = lw.woRaw {
+                    enc.setComputePipelineState(fusedQ8BatchedPSO)
+                    var p = DequantQ8GEMVBatchParams(
+                        rows: UInt32(dim),
+                        cols: UInt32(qDim),
+                        blocksPerRow: UInt32(blocksPerRowQDim),
+                        tokenCount: UInt32(seqLen)
+                    )
+                    enc.setBuffer(woRaw, offset: 0, index: 0)
+                    enc.setBuffer(attnOutBuf, offset: 0, index: 1)
+                    enc.setBuffer(projBuf, offset: 0, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<DequantQ8GEMVBatchParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: seqLen, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    for t in 0..<seqLen {
                         enc.setComputePipelineState(gemvPSO)
                         var p = ERGEMVParams(M: UInt32(dim), K: UInt32(qDim), lda: UInt32(qDim))
                         enc.setBuffer(lw.wo, offset: 0, index: 0)
@@ -1706,19 +1712,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate down + add (for seqLen > 1 or non-Q8)
-                for t in 0..<seqLen {
-                    if useQ8Fused, let downRaw = lw.downRaw {
-                        // Use tiled kernel for better memory coalescing in decode path
-                        let useTiled = seqLen == 1
-                        enc.setComputePipelineState(useTiled ? fusedQ8TiledPSO : fusedQ8PSO)
-                        var p = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
-                        enc.setBuffer(downRaw, offset: 0, index: 0)
-                        enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
-                        enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
-                        enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
-                        enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else {
+                if useQ8Fused, let downRaw = lw.downRaw {
+                    enc.setComputePipelineState(fusedQ8BatchedPSO)
+                    var p = DequantQ8GEMVBatchParams(
+                        rows: UInt32(dim),
+                        cols: UInt32(interDim),
+                        blocksPerRow: UInt32(blocksPerRowInterDim),
+                        tokenCount: UInt32(seqLen)
+                    )
+                    enc.setBuffer(downRaw, offset: 0, index: 0)
+                    enc.setBuffer(activBuf, offset: 0, index: 1)
+                    enc.setBuffer(downOutBuf, offset: 0, index: 2)
+                    enc.setBytes(&p, length: MemoryLayout<DequantQ8GEMVBatchParams>.stride, index: 3)
+                    enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: seqLen, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                } else {
+                    for t in 0..<seqLen {
                         enc.setComputePipelineState(gemvPSO)
                         var p = ERGEMVParams(M: UInt32(dim), K: UInt32(interDim), lda: UInt32(interDim))
                         enc.setBuffer(lw.down, offset: 0, index: 0)
@@ -3383,6 +3392,13 @@ private struct FusedQKVParams {
     var blocksPerRow: UInt32   // Q8_0 blocks per row
     var tokenCount: UInt32     // number of input tokens in the batch
     var rmsEps: Float          // RMSNorm epsilon (for fused RMSNorm+QKV)
+}
+
+private struct DequantQ8GEMVBatchParams {
+    var rows: UInt32
+    var cols: UInt32
+    var blocksPerRow: UInt32
+    var tokenCount: UInt32
 }
 
 private struct ERFusedNormRoPEParams {

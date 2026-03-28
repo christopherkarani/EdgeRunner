@@ -745,6 +745,9 @@ See benchmarks/experiment_log.md
 - Kept a second exact-path prefill slice that batches RoPE-K cache writes:
   - `fusedPrefillPass` now converts the full RoPE'd K slab from `f32` to `f16` KV-cache storage in one dispatch instead of one conversion dispatch per token.
   - Decode behavior and canonical benchmark semantics are unchanged.
+- Kept a third exact-path prefill slice that batches the remaining Q8 `wo` and `down` projections:
+  - Added a dedicated batched Q8 GEMV kernel for multi-token prompt projections.
+  - Routed only multi-token prefill `wo` / `down` work through that kernel; single-token decode stays on the existing tiled and fused-add paths.
 - Verification for the kept batched QKV slice:
   - `swift test -c release --filter FusedKernelTests` passed.
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `221.8 tok/s`.
@@ -752,6 +755,10 @@ See benchmarks/experiment_log.md
 - Verification for the kept batched RoPE-K conversion slice:
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `211.1 tok/s`.
   - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `351.9 tok/s` prompt throughput, `2910.2 ms` TTFT, and `40.95 tok/s` long-context decode.
+- Verification for the kept batched `wo` / `down` slice:
+  - `swift test -c release --filter FusedKernelTests` passed, including the new batched GEMV correctness case.
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `213.2 tok/s`.
+  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `368.5 tok/s` prompt throughput, `2778.9 ms` TTFT, and `41.85 tok/s` long-context decode.
 - Interpretation:
   - These are bounded production-safe improvements to exact prefill structure, not the full prefill rewrite.
   - Prompt throughput and TTFT improved materially, but long-context decode is still effectively unchanged and the MLX gap remains architectural.
