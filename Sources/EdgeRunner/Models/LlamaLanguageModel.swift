@@ -704,6 +704,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     rows: UInt32(config.vocabSize),
                     cols: UInt32(dim),
                     blocksPerRow: UInt32(blocksPerRow),
+                    tokenCount: 1,
                     rmsEps: rmsEps
                 )
                 enc.setComputePipelineState(fusedFinalNormGemvPipeline)
@@ -1620,7 +1621,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             // 7+8+9. FUSED RMSNorm + Gate + Up + SwiGLU (saves 3 dispatches for seqLen=1)
-            if useQ8Fused && seqLen == 1, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
+            if useQ8Fused, let gateRaw = lw.gateRaw, let upRaw = lw.upRaw {
                 let fusedGUSPSO = fusedGateUpSiluPipeline
                 enc.setComputePipelineState(fusedGUSPSO)
                 enc.setBuffer(gateRaw, offset: 0, index: 0)
@@ -1628,10 +1629,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(afterAttnBuf, offset: 0, index: 2)  // raw input (RMSNorm applied inline)
                 enc.setBuffer(activBuf, offset: 0, index: 3)
                 var fusedP = FusedGateUpSiluParams(rows: UInt32(interDim), cols: UInt32(dim),
-                    blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+                    blocksPerRow: UInt32(blocksPerRowDim), tokenCount: UInt32(seqLen), rmsEps: rmsEps)
                 enc.setBytes(&fusedP, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
                 enc.setBuffer(lw.ffnNorm, offset: 0, index: 5)  // RMSNorm weight
-                enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: seqLen, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate RMSNorm + Gate + Up + SwiGLU (for seqLen > 1 or non-Q8)
@@ -1755,6 +1756,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 rows: UInt32(config.vocabSize),
                 cols: UInt32(dim),
                 blocksPerRow: UInt32(blocksPerRow),
+                tokenCount: 1,
                 rmsEps: rmsEps
             )
             enc.setComputePipelineState(fusedFinalNormGemvPSO)
@@ -2150,7 +2152,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(afterAttnBuf, offset: 0, index: 2)  // raw input (RMSNorm applied inline)
                 enc.setBuffer(activBuf, offset: 0, index: 3)
                 var p = FusedGateUpSiluParams(rows: UInt32(interDim), cols: UInt32(dim),
-                    blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+                    blocksPerRow: UInt32(blocksPerRowDim), tokenCount: 1, rmsEps: rmsEps)
                 enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
                 enc.setBuffer(lw.ffnNorm, offset: 0, index: 5)  // RMSNorm weight
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
@@ -2224,6 +2226,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 rows: UInt32(config.vocabSize),
                 cols: UInt32(dim),
                 blocksPerRow: UInt32(blocksPerRow),
+                tokenCount: 1,
                 rmsEps: rmsEps
             )
             enc.setComputePipelineState(fusedFinalNormGemvPSO)
@@ -2343,7 +2346,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         memcpy(paramsBase, &qkvP, MemoryLayout<FusedQKVParams>.stride)
         var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
         memcpy(paramsBase + 512, &woP, MemoryLayout<ERDequantGEMVParams>.stride)
-        var gusP = FusedGateUpSiluParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+        var gusP = FusedGateUpSiluParams(
+            rows: UInt32(interDim),
+            cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRowDim),
+            tokenCount: 1,
+            rmsEps: rmsEps
+        )
         memcpy(paramsBase + 768, &gusP, MemoryLayout<FusedGateUpSiluParams>.stride)
         var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
         memcpy(paramsBase + 1024, &downP, MemoryLayout<ERDequantGEMVParams>.stride)
@@ -2357,6 +2366,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 rows: UInt32(config.vocabSize),
                 cols: UInt32(dim),
                 blocksPerRow: UInt32(bpr),
+                tokenCount: 1,
                 rmsEps: rmsEps
             )
             memcpy(paramsBase + 1792, &fusedLmP, MemoryLayout<FusedGateUpSiluParams>.stride)
@@ -2598,7 +2608,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Slot 3: Gate+Up+SiLU params
         var gusP = FusedGateUpSiluParams(
             rows: UInt32(interDim), cols: UInt32(dim),
-            blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps
+            blocksPerRow: UInt32(blocksPerRowDim), tokenCount: 1, rmsEps: rmsEps
         )
         let gusParamsAddr = paramsGPUBase + 768
         memcpy(paramsBase + 768, &gusP, MemoryLayout<FusedGateUpSiluParams>.stride)
@@ -3392,6 +3402,7 @@ private struct FusedGateUpSiluParams {
     var rows: UInt32
     var cols: UInt32
     var blocksPerRow: UInt32
+    var tokenCount: UInt32
     var rmsEps: Float
 }
 

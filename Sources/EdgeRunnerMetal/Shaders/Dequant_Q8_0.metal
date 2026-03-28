@@ -223,6 +223,7 @@ struct ERFusedGateUpSiluParams {
     uint rows;
     uint cols;
     uint blocksPerRow;
+    uint tokenCount;
     float rmsEps;
 };
 
@@ -300,20 +301,23 @@ kernel void dequant_q8_0_fused_gate_up_silu(
     device float* activated [[buffer(3)]],
     device const float* normWeight [[buffer(5)]],  // RMSNorm weight [cols]
     constant ERFusedGateUpSiluParams& params [[buffer(4)]],
-    uint tgIndex [[threadgroup_position_in_grid]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
 
-    const uint row0 = tgIndex * LOCAL_NR;
-    if (row0 >= params.rows) return;
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= params.rows || tokenIndex >= params.tokenCount) return;
 
     const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenActivated = activated + tokenIndex * params.rows;
 
     // === Cooperative RMSNorm ===
     float sumSq = 0.0f;
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         for (short i = 0; i < 32; i++) {
             float v = xb[i];
             sumSq += v * v;
@@ -335,7 +339,7 @@ kernel void dequant_q8_0_fused_gate_up_silu(
     }
 
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         float xl[32];
         // Apply RMSNorm inline
         for (short i = 0; i < 32; i++) {
@@ -371,7 +375,7 @@ kernel void dequant_q8_0_fused_gate_up_silu(
     if (tiisg == 0) {
         for (short r = 0; r < LOCAL_NR; r++) {
             if (row0 + r >= params.rows) break;
-            activated[row0 + r] = silu_fn(sumGate[r]) * sumUp[r];
+            tokenActivated[row0 + r] = silu_fn(sumGate[r]) * sumUp[r];
         }
     }
 }
@@ -832,20 +836,23 @@ kernel void dequant_q8_0_fused_gate_up_silu_f16acc(
     device float* activated [[buffer(3)]],
     device const float* normWeight [[buffer(5)]],
     constant ERFusedGateUpSiluParams& params [[buffer(4)]],
-    uint tgIndex [[threadgroup_position_in_grid]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
 
-    const uint row0 = tgIndex * LOCAL_NR;
-    if (row0 >= params.rows) return;
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= params.rows || tokenIndex >= params.tokenCount) return;
 
     const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenActivated = activated + tokenIndex * params.rows;
 
     // === Cooperative RMSNorm: stays in f32 ===
     float sumSq = 0.0f;
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         for (short i = 0; i < 32; i++) {
             float v = xb[i];
             sumSq += v * v;
@@ -867,7 +874,7 @@ kernel void dequant_q8_0_fused_gate_up_silu_f16acc(
     }
 
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         half xl[32];
         for (short i = 0; i < 32; i++) {
             xl[i] = half(xb[i] * rmsScale * normWeight[ib * 32 + i]);
@@ -902,7 +909,7 @@ kernel void dequant_q8_0_fused_gate_up_silu_f16acc(
     if (tiisg == 0) {
         for (short r = 0; r < LOCAL_NR; r++) {
             if (row0 + r >= params.rows) break;
-            activated[row0 + r] = silu_fn(sumGate[r]) * sumUp[r];
+            tokenActivated[row0 + r] = silu_fn(sumGate[r]) * sumUp[r];
         }
     }
 }

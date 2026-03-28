@@ -82,6 +82,10 @@ struct FusedKernelTests {
         return result
     }
 
+    static func silu(_ x: Float) -> Float {
+        x / (1 + exp(-x))
+    }
+
     // MARK: - Tests
 
     @Test("Base GEMV matches CPU reference")
@@ -273,6 +277,72 @@ struct FusedKernelTests {
         for i in 0..<gpuV.count {
             let relError = abs(gpuV[i] - cpuV[i]) / max(abs(cpuV[i]), 1e-4)
             #expect(relError < 0.05, "V[\(i)]: GPU=\(gpuV[i]) CPU=\(cpuV[i]) relErr=\(relError)")
+        }
+    }
+
+    @Test("Fused Gate+Up+SwiGLU supports batched prompt tokens")
+    func testFusedGateUpSiluBatched() async throws {
+        let tokenCount = 3
+        let dim = 128
+        let interDim = 96
+        let eps: Float = 1e-5
+
+        let x = (0..<(tokenCount * dim)).map { _ in Float.random(in: -1...1) }
+        let normW = (0..<dim).map { _ in Float.random(in: 0.5...1.5) }
+        let gateData = (0..<interDim * dim).map { _ in Float.random(in: -0.3...0.3) }
+        let upData = (0..<interDim * dim).map { _ in Float.random(in: -0.3...0.3) }
+
+        let gateBuf = Self.makeQ8Buffer(device: Self.device, rows: interDim, cols: dim, values: gateData)
+        let upBuf = Self.makeQ8Buffer(device: Self.device, rows: interDim, cols: dim, values: upData)
+
+        var cpuActivated = [Float]()
+        cpuActivated.reserveCapacity(tokenCount * interDim)
+        for tokenIndex in 0..<tokenCount {
+            let start = tokenIndex * dim
+            let end = start + dim
+            let tokenX = Array(x[start..<end])
+            let normed = Self.cpuRMSNorm(tokenX, weight: normW, eps: eps)
+            let gate = Self.cpuQ8GEMV(weight: gateBuf, x: normed, rows: interDim, cols: dim)
+            let up = Self.cpuQ8GEMV(weight: upBuf, x: normed, rows: interDim, cols: dim)
+            cpuActivated += zip(gate, up).map { Self.silu($0) * $1 }
+        }
+
+        let xBuf = Self.device.makeBuffer(bytes: x, length: x.count * 4, options: .storageModeShared)!
+        let normBuf = Self.device.makeBuffer(bytes: normW, length: dim * 4, options: .storageModeShared)!
+        let activatedBuf = Self.device.makeBuffer(length: tokenCount * interDim * 4, options: .storageModeShared)!
+
+        let registry = try KernelRegistry(device: Self.device)
+        let pso = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
+
+        struct Params { var rows: UInt32; var cols: UInt32; var bpr: UInt32; var tokenCount: UInt32; var eps: Float }
+        var params = Params(
+            rows: UInt32(interDim),
+            cols: UInt32(dim),
+            bpr: UInt32(dim / 32),
+            tokenCount: UInt32(tokenCount),
+            eps: eps
+        )
+
+        let cmd = Self.queue.makeCommandBuffer()!
+        let enc = cmd.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(gateBuf, offset: 0, index: 0)
+        enc.setBuffer(upBuf, offset: 0, index: 1)
+        enc.setBuffer(xBuf, offset: 0, index: 2)
+        enc.setBuffer(activatedBuf, offset: 0, index: 3)
+        enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 4)
+        enc.setBuffer(normBuf, offset: 0, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: tokenCount, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        enc.endEncoding()
+        cmd.commit()
+        await cmd.completed()
+
+        let gpuActivated = Array(UnsafeBufferPointer(
+            start: activatedBuf.contents().assumingMemoryBound(to: Float.self), count: tokenCount * interDim))
+        for i in 0..<gpuActivated.count {
+            let relError = abs(gpuActivated[i] - cpuActivated[i]) / max(abs(cpuActivated[i]), 1e-4)
+            #expect(relError < 0.05, "activated[\(i)]: GPU=\(gpuActivated[i]) CPU=\(cpuActivated[i]) relErr=\(relError)")
         }
     }
 }
