@@ -1,3 +1,252 @@
+# Long-Prompt MLX vs EdgeRunner Benchmark
+
+## Goal
+- Run a fresh apples-to-apples long-prompt benchmark for `Qwen3-0.6B` comparing EdgeRunner against MLX on this machine.
+- Measure the prompt-heavy path explicitly instead of inferring from decode-only numbers.
+
+## Plan
+- [x] Define one shared benchmark contract: same semantic prompt, same prompt length target, same generated-token count, same warmup policy, same run count, same reported metrics.
+- [x] Implement or script a matched benchmark harness for EdgeRunner and MLX that records prefill latency, prefill tokens/sec, TTFT, and post-prefill decode throughput separately.
+- [x] Run both benchmarks on the local pinned assets and save the raw results under `benchmarks/`.
+- [x] Review the deltas, note any tokenizer/model-format mismatches that still affect strict comparability, and summarize the outcome.
+
+## Review
+- Added [`LongPromptFrameworkBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/LongPromptFrameworkBenchmark.swift), an env-gated EdgeRunner child benchmark that consumes exact prompt token IDs, warms the prompt shape once, then measures warmed TTFT and post-prefill decode throughput.
+- Added [`run_long_prompt_framework_benchmark.py`](/Users/chriskarani/CodingProjects/EdgeRunner/benchmarks/run_long_prompt_framework_benchmark.py), which:
+  - builds one exact 1024-token prompt with the official `Qwen/Qwen3-0.6B` tokenizer,
+  - feeds the same token IDs to both EdgeRunner and MLX,
+  - warms each runtime once on that exact prompt shape,
+  - runs 3 warmed measurements per framework,
+  - and writes the aggregate result to [`long_prompt_framework_comparison.json`](/Users/chriskarani/CodingProjects/EdgeRunner/benchmarks/long_prompt_framework_comparison.json).
+- Full benchmark settings:
+  - prompt tokens: `1024`
+  - generated tokens: `128`
+  - runs per framework: `3`
+  - context window: `2048`
+- Median results on this machine:
+  - EdgeRunner prompt throughput: **282.1 tok/s**
+  - MLX prompt throughput: **7047.8 tok/s**
+  - EdgeRunner TTFT: **3629.5 ms**
+  - MLX TTFT: **145.3 ms**
+  - EdgeRunner decode throughput after the long prompt: **42.5 tok/s**
+  - MLX decode throughput after the long prompt: **249.3 tok/s**
+- Relative delta from the saved artifact:
+  - MLX prompt throughput is **~24.98x** EdgeRunner (`+2398%`)
+  - EdgeRunner TTFT is **~24.98x** slower than MLX
+  - MLX long-context decode throughput is **~5.87x** EdgeRunner (`+486.7%`)
+- Strict comparability notes:
+  - The prompt tokens are identical across runtimes because both consumed the same pre-tokenized ID list.
+  - The underlying model formats still differ (`GGUF Q8_0` for EdgeRunner vs MLX 8-bit safetensors), so this is apples-to-apples at the prompt/workload level, not at the raw weight-format level.
+
+# Mega Fused GQA Kernel Repair
+
+# TurboQuant KV Cache Integration
+
+## Goal
+- Add the public TurboQuant KV-cache configuration surface and the reference implementation building blocks needed to integrate the paper’s algorithm into EdgeRunner.
+- Keep the current runtime behavior unchanged unless TurboQuant is explicitly requested or the future `.automatic` gate is enabled after validation.
+
+## Plan
+- [x] Add public KV cache compression configuration and adaptive default policy.
+- [x] Add deterministic TurboQuant reference primitives: presets, randomized Hadamard transforms, codebooks, and CPU row encode/decode.
+- [x] Add KV-cache format plumbing, Metal quantization/attention kernels, and runtime model integration.
+- [x] Add focused tests for the new API and TurboQuant reference primitives.
+- [x] Vendor the paper and add implementation notes under `docs/research/turboquant/`.
+- [x] Add env-gated runtime smoke and benchmark harnesses for the TurboQuant path.
+
+## Review
+- Added public `KVCacheCompression` policy to `ModelConfiguration` with `.disabled`, `.automatic`, `.turboQuantBalanced`, and `.turboQuantAggressive`. The public default is `.automatic`, but it currently resolves to `.disabled` unless the rollout gate env var is enabled and the context window is at least `8192`.
+- Replaced the initial TurboQuant scaffolding with a stable row format in `Sources/EdgeRunnerMetal/TurboQuant.swift`: preset descriptors, deterministic randomized Hadamard/QJL transforms, mixed-bit outlier masks, packed code words, residual sign bits, row/residual norms, and CPU encode/decode helpers that match the runtime format.
+- Extended `KVCache` to support packed TurboQuant storage alongside dense FP32/FP16 modes. TurboQuant layers now own packed code buffers, residual-sign buffers, outlier-mask buffers, and metadata buffers with the same ring-buffer semantics as the dense cache.
+- Added `Sources/EdgeRunnerMetal/Shaders/TurboQuant.metal` and `Sources/EdgeRunnerMetal/TurboQuantKernel.swift` for GPU row quantization and TurboQuant GQA attention. The model routes TurboQuant requests through the supported base decode path and quantizes both prefill-written rows and generated-token rows.
+- Wired TurboQuant end-to-end through `LlamaLanguageModel.swift`. TurboQuant loads now succeed for supported `headDim == 128` models, the packed cache path is used during actual inference, and the existing FP16 fast paths remain unchanged for the default `.disabled` mode.
+- Added a repo-local research note and vendored arXiv PDF under `docs/research/turboquant/`.
+- Added focused tests in `Tests/EdgeRunnerMetalTests/TurboQuantReferenceTests.swift`, `Tests/EdgeRunnerMetalTests/KVCacheTests.swift`, `Tests/EdgeRunnerMetalTests/TurboQuantAttentionTests.swift`, and extended `EdgeRunnerLanguageModelTests.swift` for the new public configuration surface.
+- Added env-gated real-model coverage in `Tests/EdgeRunnerTests/QwenTurboQuantSmokeTest.swift` and `Tests/EdgeRunnerTests/TurboQuantLongContextBenchmark.swift`.
+- Verification:
+  - `swift build`
+  - `swift test --filter "TurboQuantReferenceTests"`
+  - `swift test --filter "KVCacheTests"`
+  - `swift test --filter "TurboQuantAttentionTests"`
+  - `swift test --filter "EdgeRunnerLanguageModelProtocolTests"`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter "QwenTurboQuantSmokeTest"`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=8 swift test --filter "TurboQuantLongContextBenchmark"`
+- Current rollout status:
+  - The feature is implemented and works end-to-end, but the current TurboQuant kernels do **not** beat FP16 on this machine yet. The benchmark harness reported `fp16_decode_tok_s=24.79` versus `turboquant_decode_tok_s=1.09` on the sampled 1024-token prompt case, and TTFT was materially worse under TurboQuant.
+  - Because the performance gate is not met, `.automatic` correctly remains disabled by default. TurboQuant is production-safe as an explicit opt-in path, but it is **not** eligible to become the default until the long-context benchmark harness shows a real throughput win.
+
+## Goal
+- Restore deterministic, benchmark-canonical decode on the fast mega fused Q/K norm + RoPE + GQA path for the pinned `Qwen3-0.6B-Q8_0` artifact.
+- Keep benchmark throughput on the fast path without relying on the temporary `disableMegaKernel` benchmark override.
+
+## Assumptions Check
+- [x] Reproduce the pinned 0.6B divergence on the mega decode path with a bounded parity harness.
+- [x] Confirm whether the first divergence is in the fused shader output itself or in surrounding optimized decode orchestration.
+- [x] Measure the repaired path against the current benchmark-safe fallback before re-enabling it for publishable runs.
+
+## Plan
+- [x] Add a focused 0.6B parity/determinism harness that compares mega decode against the safe decode reference on a fixed prompt.
+- [x] Repair or replace the mega fused decode GQA implementation with a correctness-first fast path.
+- [x] Re-enable the fast path in the benchmark configuration once parity and determinism hold on the pinned contract.
+- [x] Run targeted parity tests plus the publishable and smoke benchmarks, then record the outcome and any remaining risks.
+
+## Review
+- Added an env-gated parity regression in [`PublishableBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PublishableBenchmark.swift) that compares the canonical fast mega path against the safe no-mega path on the pinned `Qwen3-0.6B-Q8_0` artifact, using the publishable seed `[1]`, benchmark warmup/reset flow, canonical prefix, and token hash.
+- Reproduced the bug on the pinned 128-token run before the shader fix. The fast path matched the safe path through the early prefix, then diverged first at step `12`, and the final sequence hash drifted to `1cd0d17f740100df` instead of the canonical `0afae14a84cf0df8`.
+- Root cause was inside [`fused_qk_norm_rope_gqa` in `RoPE.metal`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerMetal/Shaders/RoPE.metal): Q threadgroups were reading the current-position K slice back out of `kCache` even though that slice was being produced by separate K threadgroups in the same dispatch. Metal has no cross-threadgroup barrier, so the newest K read was racing the write.
+- Repaired the kernel by keeping the fused dispatch but having each Q threadgroup recompute its own current-token K vector locally from raw `K` + `kNormW` + RoPE and use that value only for `kv == startPos`. K threadgroups still write the canonical cache slice for future decode steps, so the race is removed without falling back to the slow safe path.
+- Re-enabled the canonical benchmark configuration in [`BenchmarkContract.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkContract.swift) so publishable and smoke benchmarks run on the repaired mega path by default again, while tests can still force `disableMegaKernel` for parity probes.
+- Verification:
+  - `EDGERUNNER_RUN_MEGA_PARITY=1 EDGERUNNER_MEGA_PARITY_TOKENS=128 swift test -c release --filter "PublishableBenchmark/megaKernelMatchesSafePath"` passed on the repaired kernel
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic `YES`, canonical hash `0afae14a84cf0df8`, and median decode `202.5 tok/s`
+  - `swift test -c release --filter "QwenBenchmark/decodeBenchmark"` passed with `[1, 1479, 35, 5371, 1]` at `253.4 tok/s`
+- Remaining risk:
+  - This repair removes the live current-K race for the pinned 0.6B benchmark path, but the large-shape `4B` mega-kernel path is still intentionally routed away from mega attention. That remains a separate optimization task.
+
+# Autoresearch Reliability Hardening
+
+## Goal
+- Make autoresearch decisions depend on healthy, repeatable benchmark evidence instead of mixed harness flake and mutation outcomes.
+- Remove duplicated benchmark pin metadata so the loop, bootstrap helper, and benchmark tests all read the same contract.
+
+## Assumptions Check
+- [x] Reproduce the current publishable flake pattern with repeated local runs.
+- [x] Confirm the publishable harness reuses one `LlamaLanguageModel` across all measured runs.
+- [x] Confirm the loop currently treats all nonzero benchmark exits as a generic command failure and has no clean-baseline health gate.
+
+## Plan
+- [x] Add a shared benchmark contract file for the pinned Qwen 0.6B autoresearch artifact.
+- [x] Wire the publishable and smoke benchmarks to that contract instead of hard-coded size/prefix/hash constants.
+- [x] Add explicit model-state reset support to `LlamaLanguageModel` and use it between measured publishable runs.
+- [x] Add a clean-baseline health gate plus failure classification to `autoresearch/run_loop.sh`.
+- [x] Correct the top-level autoresearch instructions in `AGENTS.md` to match the active benchmark contract.
+- [x] Re-run repeated publishable samples and a mutation-free loop iteration to verify the flake rate is reduced and failures are classified correctly.
+
+## Review
+- Added [`benchmarks/pinned_qwen3_0.6b_q8_0.json`](/Users/chriskarani/CodingProjects/EdgeRunner/benchmarks/pinned_qwen3_0.6b_q8_0.json), a shared loader in [`BenchmarkContract.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkContract.swift), and contract-driven pin usage in [`PublishableBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PublishableBenchmark.swift), [`QwenBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/QwenBenchmark.swift), [`SpeculativeGenerationBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/SpeculativeGenerationBenchmark.swift), and [`ensure_benchmark_model.sh`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/ensure_benchmark_model.sh).
+- Hardened model-side benchmark state in [`LlamaLanguageModel.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunner/Models/LlamaLanguageModel.swift): explicit decode/KV reset, scratch zeroing, decode warmup state reset support, and removal of the unsafe params-buffer sentinel in the optimized Metal 3 decode path.
+- Localized the remaining correctness break to the mega fused decode GQA kernel and moved the benchmark harnesses onto the benchmark-only safe path by setting `ModelConfiguration.llamaDecodeOverrides.disableMegaKernel = true` inside [`BenchmarkContract.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/BenchmarkContract.swift). This keeps the app's normal decode defaults unchanged while restoring deterministic benchmark behavior on the pinned artifact.
+- [`PublishableBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/PublishableBenchmark.swift) now supports process-isolated child runs, so repeated publishable measurements are taken from fresh processes and aggregated only after matching token hash and prefix.
+- [`SpeculativeGenerationBenchmark.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerTests/SpeculativeGenerationBenchmark.swift) now uses actual greedy sampling instead of `SamplingConfiguration()` defaults, fixing a separate benchmark-harness bug.
+- Hardened [`run_loop.sh`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/run_loop.sh) with contract-aware failure classes, a baseline health gate, baseline report emission, and correct first-best handling on a fresh log dir. Updated [`AGENTS.md`](/Users/chriskarani/CodingProjects/EdgeRunner/AGENTS.md) to the live pinned GGUF metadata, current greedy prefix, and the temporary benchmark-only mega-kernel disable.
+- Verification:
+  - `bash -n autoresearch/run_loop.sh && bash -n autoresearch/ensure_benchmark_model.sh`
+  - `swift test -c release --filter "QwenBenchmark/decodeBenchmark"` passed with `[1, 1479, 35, 5371, 1]` at `147.5 tok/s` on the safe benchmark path
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic `YES`, canonical prefix `[1,1479,35]`, canonical hash `0afae14a84cf0df8`, and median decode `25.7 tok/s`
+  - `swift test -c release --filter "SpeculativeGenerationBenchmark/selfSpeculativeLookahead"` passed after fixing its greedy-sampling bug
+  - `AUTORESEARCH_BASELINE_HEALTH_RUNS=1 AUTORESEARCH_EXPERIMENT_COMMAND='' AUTORESEARCH_LOG_DIR=$(mktemp -d /tmp/edgerunner-autoresearch-verify.XXXXXX) ./autoresearch/run_loop.sh 1` passed baseline health and kept the first canonical result as best in a fresh log dir
+- Remaining tradeoff:
+  - Benchmark correctness and loop reliability are restored, but the safe benchmark path is materially slower than the previous mega-kernel path. The next performance task is to fix or replace the mega fused GQA kernel so benchmarking can regain the higher-throughput decode path without losing determinism.
+
+# Autoresearch Loop Model Bootstrap Recovery
+
+## Goal
+- Make the autoresearch loop recover automatically when the pinned publishable benchmark GGUF is missing from `/tmp/edgerunner-models`.
+- Keep the loop aligned with the current publishable benchmark artifact instead of the stale 804 MB Qwen source mentioned elsewhere in repo docs.
+
+## Assumptions Check
+- [x] Reproduce the reported failure locally with `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`.
+- [x] Confirm the current loop automation had no model provisioning step before invoking the benchmark.
+- [x] Confirm the currently pinned public artifact metadata from the benchmark harness and live upstream headers before wiring any download logic.
+
+## Plan
+- [x] Inspect `autoresearch/run_loop.sh`, `Tests/EdgeRunnerTests/PublishableBenchmark.swift`, and the latest benchmark artifacts to confirm the current pinned model contract.
+- [x] Add an autoresearch bootstrap helper that validates or downloads the pinned benchmark model before the loop starts.
+- [x] Call the bootstrap helper from `autoresearch/run_loop.sh` so missing local model state no longer aborts the campaign.
+- [x] Verify the fix with a clean `/tmp/edgerunner-models` state and a one-iteration loop run.
+
+## Review
+- Added [`ensure_benchmark_model.sh`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/ensure_benchmark_model.sh) so the autoresearch loop now validates the pinned publishable GGUF and downloads it into `/tmp/edgerunner-models` atomically when missing.
+- The helper pins the same live artifact metadata the current benchmark harness enforces: `Qwen/Qwen3-0.6B-GGUF`, `Qwen3-0.6B-Q8_0.gguf`, `639,446,688` bytes, SHA-256 `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`.
+- [`run_loop.sh`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/run_loop.sh) now runs that preflight before the first iteration, so the loop no longer dies immediately on a missing model path.
+- Verification:
+  - `./autoresearch/ensure_benchmark_model.sh` downloaded the missing GGUF, then reran cleanly in-place and reported the pinned file as ready.
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` now passes on the provisioned artifact and emits a fresh `benchmarks/publishable_benchmark.json` with the pinned file metadata.
+  - `AUTORESEARCH_EXPERIMENT_COMMAND=: AUTORESEARCH_LOG_DIR=/tmp/edgerunner-autoresearch-verify ./autoresearch/run_loop.sh 1` completed a full mutation-free loop iteration, logged the benchmark result, and exited cleanly without any model-provisioning failure.
+- Residual risk:
+  - The missing-model failure is fixed, but the current publishable benchmark is still intermittently nondeterministic on this checkout. With the pinned model present, some runs pass and some still abort on `Non-deterministic output across runs`.
+  - Repo docs are inconsistent about the pinned GGUF metadata. `PublishableBenchmark.swift` and the live upstream artifact agree on `639,446,688` bytes, while some repo instructions still mention an older `804,753,504`-byte pin.
+
+# Production GGUF Tokenizer
+
+## Mutation Iteration 2
+
+### Goal
+- Improve publishable decode throughput with one minimal, correctness-preserving decode-path change.
+
+### Plan
+- [x] Inspect `benchmarks/publishable_benchmark.json`, `benchmarks/experiment_log.md`, and `tasks/todo.md`.
+- [x] Pick one bounded hypothesis that fits the current decode implementation.
+- [x] Patch only the optimized Metal 3 decode path to use the tiled Q8 LM-head projection already used elsewhere.
+- [x] Run `swift build -c release`.
+- [x] Run `swift test -c release --filter "QwenBenchmark/decodeBenchmark"`.
+- [x] If verification fails, revert only this experiment.
+
+### Review
+- Hypothesis tested: switching the optimized Metal 3 decode path's LM-head projection from `dequant_q8_0_gemv` to the tiled `dequant_q8_0_gemv_tiled` kernel would improve publishable decode throughput with no token drift because other decode paths already use the tiled LM head.
+- Result: `swift build -c release` passed, and `swift test -c release --filter "QwenBenchmark/decodeBenchmark"` passed with `266.4631 tok/s` and generated tokens `[1, 1479, 35, 5371, 1]`.
+- Publishable gate: `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` failed with `Non-deterministic output across runs — publishable benchmark aborted`.
+- Decision: rolled back the code experiment. The task note remains as the iteration record; the model code was restored for this hypothesis.
+
+## Goal
+- Replace the placeholder byte-based `LlamaLanguageModel.tokenize` / `detokenize` path with a production tokenizer loaded from GGUF metadata.
+- Support the pinned Qwen3 GGUFs correctly for prompt encoding, detokenization, streaming, and text-based tests.
+- Keep tokenization pluggable so the framework is not hard-wired to one tokenizer family.
+
+## Assumptions Check
+- [ ] Confirm the pinned Qwen3 GGUF tokenizer contract from metadata, not assumptions.
+  Current evidence: `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` exposes `tokenizer.ggml.model = gpt2`, `tokenizer.ggml.tokens`, `tokenizer.ggml.merges`, and `tokenizer.ggml.pre = qwen2`.
+- [ ] Confirm whether Qwen requires byte-level BPE plus a model-specific pre-tokenizer, rather than the current character-level `BPETokenizer`.
+- [ ] Confirm which special-token IDs should come from GGUF metadata versus hard-coded model-family defaults.
+- [ ] Confirm whether chat-template handling belongs in tokenizer scope or a higher prompt-formatting layer.
+
+## Plan
+- [ ] Write a short implementation spec before code changes.
+  Spec should pin supported tokenizer metadata keys, decode semantics, byte fallback behavior, and non-goals for the first version.
+- [x] Add GGUF tokenizer metadata extraction in `EdgeRunnerIO`.
+  Parse and expose tokenizer model type, token list, merge list, token types, BOS/EOS/PAD IDs, add-BOS flag, and pre-tokenizer tag from GGUF metadata.
+- [ ] Refactor tokenization behind a loader-backed abstraction in `EdgeRunnerCore`.
+  Keep `Tokenizer` as the public protocol, but add a factory/loader that constructs the correct tokenizer from GGUF metadata instead of manually instantiating `BPETokenizer`.
+- [ ] Replace the current simplified `BPETokenizer` implementation with a real byte-level BPE path.
+  It must operate on byte-level symbols, apply ranked merges correctly, preserve reversible decode behavior, and handle unknown pieces safely.
+- [ ] Add Qwen-compatible pre-tokenization.
+  Implement the `qwen2` pre-tokenizer behavior needed by the pinned GGUFs so prompt encoding matches model expectations instead of naive character splitting.
+- [ ] Wire the loaded tokenizer into `LlamaLanguageModel`.
+  `load(from:configuration:)` should build and retain the tokenizer, and `tokenize`, `detokenize`, `bosTokenID`, and `eosTokenID` should source from it/metadata instead of placeholders and hard-coded Qwen values.
+- [ ] Keep a bounded fallback policy.
+  If tokenizer metadata is missing or unsupported, fail explicitly for text APIs instead of silently byte-mapping into likely-invalid token IDs.
+- [ ] Update text-facing generation paths.
+  Verify `stream(_:)`, prompt handling, and any user-facing generation helpers use the loaded tokenizer path consistently.
+- [ ] Add production-grade tests before and during implementation.
+  Cover GGUF metadata parsing, byte-level BPE merges, special tokens, round-trip decode, Qwen pre-tokenization behavior, and `LlamaLanguageModel` integration.
+- [ ] Add parity-style verification against the pinned local GGUF.
+  Reuse known prompt/token fixtures so encoded prompt IDs and decoded output pieces match the GGUF vocabulary path already used in coherence/quality harnesses.
+- [ ] Update docs and examples after tests pass.
+  Remove examples that imply raw `[1]` BOS bootstrapping is the normal public API and document tokenizer support/limits precisely.
+
+## Verification
+- [ ] `swift test --filter "EdgeRunnerCoreTests/Tokenizer"`
+- [ ] `swift test --filter "EdgeRunnerIOTests"`
+- [ ] `swift test -c release --filter "CoherenceTest"`
+- [ ] `swift test -c release --filter "QwenQualityComparisonTest"` with the text API routed through the loaded tokenizer where appropriate
+- [ ] Manual smoke test: encode a Qwen prompt, run generation, and detokenize streamed output without using external pre-tokenized fixtures
+- [ ] Regression check: benchmark harnesses still pass unchanged, proving tokenizer work did not perturb token-ID-based inference paths
+
+## Risks
+- The current `BPETokenizer` is structurally too simple for Qwen/GPT-2 style tokenization; patching it incrementally may create subtle correctness bugs. Prefer replacing the core algorithm cleanly.
+- GGUF tokenizer metadata may be sufficient for Qwen but not for every future model family. Keep the loader extensible rather than over-generalizing the first implementation.
+- Chat template support is adjacent but separate. Do not couple template rendering to low-level BPE logic in the first pass.
+
+## Review
+- Added typed tokenizer metadata extraction in [`GGUFTokenizerMetadata.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerIO/GGUF/GGUFTokenizerMetadata.swift).
+- The new `GGUFTokenizerMetadata` surface parses `tokenizer.ggml.model`, `tokenizer.ggml.pre`, `tokenizer.ggml.tokens`, `tokenizer.ggml.merges`, `tokenizer.ggml.token_type`, `tokenizer.ggml.{bos,eos,padding}_token_id`, `tokenizer.ggml.add_bos_token`, and `tokenizer.chat_template`.
+- Added a `ModelConfig.tokenizerMetadata()` bridge so later integration work can construct the tokenizer directly from the loader’s existing model-config path without another metadata conversion layer.
+- Added focused extraction tests in [`GGUFTokenizerMetadataTests.swift`](/Users/chriskarani/CodingProjects/EdgeRunner/Tests/EdgeRunnerIOTests/GGUFTokenizerMetadataTests.swift), including failure coverage for missing keys, malformed merges, token-type mismatches, and unknown tokenizer models.
+- Verification passed with:
+  - `swift test --filter "GGUFTokenizerMetadataTests"`
+  - `swift test --filter "GGUF"`
+
 # Model Quality Comparison: Qwen3 0.6B vs 1.7B vs 4B
 
 ## Goal
@@ -52,7 +301,7 @@
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
 - Current stable results:
   - `0.6B` short benchmark: **362.4 tok/s**, pinned prefix `[1, 14582, 25, 16246, 264]`
-  - `0.6B` publishable benchmark: **234.8 tok/s** median decode, **3.2 ms** TTFT, deterministic `YES`
+  - `0.6B` publishable benchmark: **236.3 tok/s** median decode, **3.6 ms** TTFT, deterministic `YES`
   - `4B` recovered long-form story path: **10.7 tok/s**
   - `llama.cpp` on the same 4B prompt/settings: **45.85 tok/s**
 - Conclusion: `4B` correctness is restored, but the current safe path is far slower than `llama.cpp`. The next optimization work for `4B` should target a new large-shape attention path that preserves correctness without falling all the way back to the unfused base decode implementation.
@@ -102,7 +351,7 @@
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
 - Current post-harness benchmark state remains healthy:
   - `0.6B` short benchmark: **351.9 tok/s**, pinned prefix preserved
-  - `0.6B` publishable benchmark: **236.7 tok/s** median decode, **3.2 ms** TTFT, deterministic `YES`
+  - `0.6B` publishable benchmark: **236.3 tok/s** median decode, **3.6 ms** TTFT, deterministic `YES`
 - Best next move after this harness is now narrower than before: build a shape-correct large-model decode attention path and use this parity suite as the regression gate.
 
 # Model Download: Qwen3 Larger-Model Quality Comparison
@@ -159,6 +408,22 @@
   - at least two publishable reruns remain deterministic, and
   - the publishable decode throughput stays above the current best kept state.
 - Drop any implementation that regresses throughput, breaks determinism, or complicates the code without measurable win.
+
+## Autoresearch Loop Harness
+- [x] Replace console scraping in `autoresearch/run_loop.sh` with parsing of `benchmarks/publishable_benchmark.json`.
+- [x] Add a bounded 100-iteration default plus `AUTORESEARCH_EXPERIMENT_COMMAND` and `AUTORESEARCH_BENCHMARK_COMMAND` hooks so each iteration can mutate the repo before re-benchmarking.
+- [x] Emit append-only JSONL summaries and per-iteration snapshots under `benchmarks/logs/`.
+- [x] Wire the experiment hook to the actual Codex mutation agent.
+- [x] Keep the loop alive after regressions by logging failed iterations and reverting only the iteration-local changes.
+- [x] Launch the campaign through an isolated git worktree entrypoint.
+- [x] Add a formal ranked experiment queue with repeat-prevention rules.
+- [ ] Launch the first 100-experiment campaign.
+
+### Review
+- Added [`autoresearch/run_loop_worktree.sh`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/run_loop_worktree.sh) so the campaign runs in a dedicated git worktree seeded from the current checkout snapshot.
+- Kept benchmark artifacts under `benchmarks/logs/worktrees/...` in the source checkout so cleanup does not erase the run history.
+- Verified the launcher with a one-iteration dry run using a stub benchmark command, and confirmed the temporary worktree is cleaned up afterward.
+- Added [`autoresearch/experiment_queue.md`](/Users/chriskarani/CodingProjects/EdgeRunner/autoresearch/experiment_queue.md) and wired it into the mutation prompt so experiments are chosen from a ranked, repeat-aware queue rather than re-tried ad hoc.
 
 ## Ranked Plan
 - [x] Reconfirm the current best kept publishable benchmark and record it as the revert point for this program.
@@ -310,3 +575,43 @@ At 234.8 tok/s = 4.26ms/token average:
 
 ## Experiment Log
 See benchmarks/experiment_log.md
+
+# Review: TurboQuant Correctness Audit
+
+## Plan
+- [x] Re-review the TurboQuant integration paths in `LlamaLanguageModel.swift`.
+- [x] Verify TurboQuant-specific unit and kernel tests after the latest runtime changes.
+- [x] Run a real-model TurboQuant smoke test that exercises multi-token prefill.
+- [x] Re-run the pinned release benchmark to confirm the default FP16 path remains stable.
+
+## Review
+- Found and fixed a correctness bug in TurboQuant prefill V-cache writes: multi-token prefill was quantizing from the start of `allVBuf` for every token instead of the current token slice. The fix added an explicit `sourceBufferOffset` to the TurboQuant quantization path and now passes the per-token `kvOff` during prefill.
+- Found and fixed a reset/warmup safety issue for compressed KV mode: decode state reset now clears TurboQuant cache buffers through a dedicated helper instead of assuming dense FP16 cache arrays.
+- Strengthened the model smoke fixture so it now uses a multi-token prompt (`[9707, 25, 220]`) and therefore covers TurboQuant prefill cache writes instead of only decode appends.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter TurboQuantReferenceTests`
+  - `swift test --filter KVCacheTests`
+  - `swift test --filter TurboQuantAttentionTests`
+  - `swift test --filter EdgeRunnerLanguageModelProtocolTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Current review conclusion: no open correctness findings remain from this pass. TurboQuant is functional as an explicit opt-in path, but it still does not meet the performance gate required for `.automatic` to enable it by default.
+# Exact Path Rewrite Program
+
+## Goal
+- Replace EdgeRunner's long-prompt exact path with a production-safe architecture that can materially approach MLX on prompt throughput, TTFT, and long-context decode while preserving exact dense semantics by default.
+
+## Plan
+- [ ] Add explicit strategy selection for prefill and decode fast paths with benchmark-safe fallbacks.
+- [ ] Add a single benchmark-gate entrypoint that runs build, publishable benchmark, long-prompt benchmark, and optional parity probes.
+- [ ] Implement runtime weight repacking for prompt-wide exact kernels.
+- [ ] Implement prompt-wide exact prefill projections and remove per-token projection loops from the new path.
+- [ ] Implement exact tiled prompt attention and cache-native K/V writes for prefill.
+- [ ] Implement prompt-wide FFN path for the new exact prefill engine.
+- [ ] Redesign long-context exact decode attention and KV cache layout.
+- [ ] Optimize dispatch and parameter binding after the new kernels are proven.
+- [ ] Evaluate runtime-native int8 packed format for the new exact kernels.
+- [ ] Promote the new exact path to default only after parity and benchmark gates pass.
+
+# Long-Prompt MLX vs EdgeRunner Benchmark

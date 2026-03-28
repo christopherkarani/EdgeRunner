@@ -1,5 +1,39 @@
 import Foundation
 
+/// Public KV-cache compression policy.
+///
+/// `automatic` is the long-term default. Until TurboQuant clears its rollout gate,
+/// it resolves to `disabled` at runtime and preserves today's FP16 cache path.
+public enum KVCacheCompression: String, Sendable, Equatable, Codable {
+    case disabled
+    case automatic
+    case turboQuantBalanced
+    case turboQuantAggressive
+}
+
+enum ResolvedKVCacheCompression: Sendable, Equatable {
+    case disabled
+    case turboQuantBalanced
+    case turboQuantAggressive
+}
+
+/// Internal prefill path overrides for benchmarking and staged rollout.
+struct LlamaPrefillOverrides: Sendable, Equatable {
+    var forceLegacyPrefillPath: Bool?
+    var preferMetal4PrefillPath: Bool?
+    var preferExactMatrixPrefillPath: Bool?
+
+    init(
+        forceLegacyPrefillPath: Bool? = nil,
+        preferMetal4PrefillPath: Bool? = nil,
+        preferExactMatrixPrefillPath: Bool? = nil
+    ) {
+        self.forceLegacyPrefillPath = forceLegacyPrefillPath
+        self.preferMetal4PrefillPath = preferMetal4PrefillPath
+        self.preferExactMatrixPrefillPath = preferExactMatrixPrefillPath
+    }
+}
+
 /// Internal decode path overrides for debugging and compatibility.
 struct LlamaDecodeOverrides: Sendable, Equatable {
     var forceBaseDecodePath: Bool?
@@ -64,8 +98,15 @@ public struct ModelConfiguration: Sendable {
     /// If not provided, the tokenizer is loaded from the model file's
     /// embedded vocabulary (for GGUF models).
     public var tokenizerURL: URL?
+
+    /// KV-cache compression policy.
+    ///
+    /// `automatic` is the public default. It currently resolves to `disabled`
+    /// unless the runtime rollout gate is explicitly enabled.
+    public var kvCacheCompression: KVCacheCompression
     
     var llamaDecodeOverrides: LlamaDecodeOverrides?
+    var llamaPrefillOverrides: LlamaPrefillOverrides?
 
     /// Creates a new model configuration.
     ///
@@ -78,12 +119,38 @@ public struct ModelConfiguration: Sendable {
         maxTokens: Int = 2048,
         contextWindowSize: Int = 4096,
         useMemoryMapping: Bool = true,
-        tokenizerURL: URL? = nil
+        tokenizerURL: URL? = nil,
+        kvCacheCompression: KVCacheCompression = .automatic
     ) {
         self.maxTokens = maxTokens
         self.contextWindowSize = contextWindowSize
         self.useMemoryMapping = useMemoryMapping
         self.tokenizerURL = tokenizerURL
+        self.kvCacheCompression = kvCacheCompression
         self.llamaDecodeOverrides = nil
+        self.llamaPrefillOverrides = nil
+    }
+}
+
+extension ModelConfiguration {
+    static let automaticTurboQuantMinimumContextWindow = 8192
+    static let automaticTurboQuantGateEnv = "EDGERUNNER_ENABLE_TURBOQUANT_AUTOMATIC"
+
+    var resolvedKVCacheCompression: ResolvedKVCacheCompression {
+        switch kvCacheCompression {
+        case .disabled:
+            return .disabled
+        case .automatic:
+            let automaticEnabled =
+                ProcessInfo.processInfo.environment[Self.automaticTurboQuantGateEnv] == "1"
+            guard automaticEnabled, contextWindowSize >= Self.automaticTurboQuantMinimumContextWindow else {
+                return .disabled
+            }
+            return .turboQuantBalanced
+        case .turboQuantBalanced:
+            return .turboQuantBalanced
+        case .turboQuantAggressive:
+            return .turboQuantAggressive
+        }
     }
 }
