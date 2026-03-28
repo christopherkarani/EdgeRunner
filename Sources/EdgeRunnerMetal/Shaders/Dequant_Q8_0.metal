@@ -105,6 +105,7 @@ struct ERFusedQKVParams {
     uint kvRows;         // K/V output rows (numKVHeads * headDim)
     uint cols;           // input columns (dim)
     uint blocksPerRow;   // Q8_0 blocks per row
+    uint tokenCount;     // number of input tokens in the batch
     float rmsEps;        // RMSNorm epsilon
 };
 
@@ -118,7 +119,7 @@ kernel void dequant_q8_0_fused_qkv(
     device half* outV [[buffer(6)]],     // V writes f16 directly to cache
     device const float* normWeight [[buffer(8)]],  // RMSNorm weight [cols]
     constant ERFusedQKVParams& params [[buffer(7)]],
-    uint tgIndex [[threadgroup_position_in_grid]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
@@ -126,10 +127,15 @@ kernel void dequant_q8_0_fused_qkv(
     // Total rows = qRows + kvRows + kvRows. Each threadgroup handles LOCAL_NR consecutive rows
     // across the concatenated Q/K/V output space.
     const uint totalRows = params.qRows + params.kvRows + params.kvRows;
-    const uint row0 = tgIndex * LOCAL_NR;
-    if (row0 >= totalRows) return;
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= totalRows || tokenIndex >= params.tokenCount) return;
 
     const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenOutQ = outQ + tokenIndex * params.qRows;
+    device float* tokenOutK = outK + tokenIndex * params.kvRows;
+    device half* tokenOutV = outV + tokenIndex * params.kvRows;
 
     float sumf[LOCAL_NR] = { 0.f };
 
@@ -157,7 +163,7 @@ kernel void dequant_q8_0_fused_qkv(
     // Each thread sums squares for its assigned blocks, then simd_sum reduces.
     float sumSq = 0.0f;
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         for (short i = 0; i < 32; i++) {
             float v = xb[i];
             sumSq += v * v;
@@ -168,7 +174,7 @@ kernel void dequant_q8_0_fused_qkv(
 
     // === Main GEMV loop with inline RMSNorm ===
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         float xl[32];
         // Apply RMSNorm inline: normed_x = x * rmsScale * normWeight
         for (short i = 0; i < 32; i++) {
@@ -195,11 +201,11 @@ kernel void dequant_q8_0_fused_qkv(
 
             float total = sumf[r];
             if (globalRow < params.qRows) {
-                outQ[globalRow] = total;
+                tokenOutQ[globalRow] = total;
             } else if (globalRow < params.qRows + params.kvRows) {
-                outK[globalRow - params.qRows] = total;
+                tokenOutK[globalRow - params.qRows] = total;
             } else {
-                outV[globalRow - params.qRows - params.kvRows] = half(total);
+                tokenOutV[globalRow - params.qRows - params.kvRows] = half(total);
             }
         }
     }
@@ -731,16 +737,21 @@ kernel void dequant_q8_0_fused_qkv_f16acc(
     device half* outV [[buffer(6)]],
     device const float* normWeight [[buffer(8)]],
     constant ERFusedQKVParams& params [[buffer(7)]],
-    uint tgIndex [[threadgroup_position_in_grid]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
 
     const uint totalRows = params.qRows + params.kvRows + params.kvRows;
-    const uint row0 = tgIndex * LOCAL_NR;
-    if (row0 >= totalRows) return;
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= totalRows || tokenIndex >= params.tokenCount) return;
 
     const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenOutQ = outQ + tokenIndex * params.qRows;
+    device float* tokenOutK = outK + tokenIndex * params.kvRows;
+    device half* tokenOutV = outV + tokenIndex * params.kvRows;
 
     float sumf[LOCAL_NR] = { 0.f };
 
@@ -766,7 +777,7 @@ kernel void dequant_q8_0_fused_qkv_f16acc(
     // === Cooperative RMSNorm: stays in f32 (runs once, not on hot path) ===
     float sumSq = 0.0f;
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         for (short i = 0; i < 32; i++) {
             float v = xb[i];
             sumSq += v * v;
@@ -777,7 +788,7 @@ kernel void dequant_q8_0_fused_qkv_f16acc(
 
     // === Main GEMV loop: f16 inner accumulation ===
     for (short ib = tiisg; ib < nb; ib += 32) {
-        device const float* xb = x + ib * 32;
+        device const float* xb = tokenX + ib * 32;
         half xl[32];
         for (short i = 0; i < 32; i++) {
             xl[i] = half(xb[i] * rmsScale * normWeight[ib * 32 + i]);
@@ -803,11 +814,11 @@ kernel void dequant_q8_0_fused_qkv_f16acc(
 
             float total = sumf[r];
             if (globalRow < params.qRows) {
-                outQ[globalRow] = total;
+                tokenOutQ[globalRow] = total;
             } else if (globalRow < params.qRows + params.kvRows) {
-                outK[globalRow - params.qRows] = total;
+                tokenOutK[globalRow - params.qRows] = total;
             } else {
-                outV[globalRow - params.qRows - params.kvRows] = half(total);
+                tokenOutV[globalRow - params.qRows - params.kvRows] = half(total);
             }
         }
     }

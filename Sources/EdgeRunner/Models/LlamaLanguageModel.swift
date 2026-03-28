@@ -1313,8 +1313,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let turboVCache = turboQuantEnabled ? turboQuantVCaches[layerIndex] : nil
             let turboKCache = turboQuantEnabled ? turboQuantKCaches[layerIndex] : nil
 
-            if useFusedQKV && seqLen == 1 {
-                // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
+            if useFusedQKV {
+                // Fused RMSNorm + Q+K+V: RMSNorm is computed inline for each token, and
+                // V writes directly to the fp16 KV cache to avoid the extra conversion pass.
                 let cacheWriteOffF16 = startPosition * kvDim * halfStride
                 let fusedQKVPSO = fusedQKVPipeline
                 enc.setComputePipelineState(fusedQKVPSO)
@@ -1326,11 +1327,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(allKBuf, offset: 0, index: 5)
                 enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
                 var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim),
-                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim),
+                    tokenCount: UInt32(seqLen), rmsEps: rmsEps)
                 enc.setBytes(&qkvP, length: MemoryLayout<FusedQKVParams>.stride, index: 7)
                 enc.setBuffer(lw.attnNorm, offset: 0, index: 8)  // RMSNorm weight
                 let totalQKVRows = qDim + kvDim + kvDim
-                enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: 1, depth: 1),
+                enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: seqLen, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 // Fallback: separate RMSNorm + QKV (for seqLen > 1 or non-Q8 weights)
@@ -1394,18 +1396,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                     }
 
-                    if turboQuantEnabled {
-                        try encodeTurboQuantRows(
-                            encoder: enc,
-                            sourceBuffer: allVBuf,
-                            sourceBufferOffset: kvOff,
-                            rowCount: numKVHeads,
-                            sourceRowStride: headDim,
-                            destinationRowBase: (t + startPosition) * numKVHeads,
-                            destination: turboVCache!,
-                            signs: turboQuantKernel!.valueSigns
-                        )
-                    } else {
+                    if !turboQuantEnabled {
                         // Convert V from f32 (allVBuf) → f16 (layerVCache)
                         enc.setComputePipelineState(convertF32ToF16PSO)
                         enc.setBuffer(allVBuf, offset: kvOff, index: 0)
@@ -1415,6 +1406,19 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                     }
+                }
+
+                if turboQuantEnabled {
+                    try encodeTurboQuantRows(
+                        encoder: enc,
+                        sourceBuffer: allVBuf,
+                        sourceBufferOffset: 0,
+                        rowCount: seqLen * numKVHeads,
+                        sourceRowStride: headDim,
+                        destinationRowBase: startPosition * numKVHeads,
+                        destination: turboVCache!,
+                        signs: turboQuantKernel!.valueSigns
+                    )
                 }
 
                 // Convert V from f32 → f16 not needed for fused path (writes f16 directly)
@@ -1881,7 +1885,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(allKBuf, offset: 0, index: 5)
                 enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
                 var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim),
-                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+                    cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim),
+                    tokenCount: 1, rmsEps: rmsEps)
                 enc.setBytes(&qkvP, length: MemoryLayout<FusedQKVParams>.stride, index: 7)
                 enc.setBuffer(lw.attnNorm, offset: 0, index: 8)  // RMSNorm weight
                 let totalQKVRows = qDim + kvDim + kvDim
@@ -2327,7 +2332,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         // These constant parameter blocks are tiny. Rewriting them every decode call is
         // cheaper than relying on an uninitialized sentinel in shared memory.
-        var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps)
+        var qkvP = FusedQKVParams(
+            qRows: UInt32(qDim),
+            kvRows: UInt32(kvDim),
+            cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRowDim),
+            tokenCount: 1,
+            rmsEps: rmsEps
+        )
         memcpy(paramsBase, &qkvP, MemoryLayout<FusedQKVParams>.stride)
         var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
         memcpy(paramsBase + 512, &woP, MemoryLayout<ERDequantGEMVParams>.stride)
@@ -2562,7 +2574,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Slot 0: QKV params
         var qkvP = FusedQKVParams(
             qRows: UInt32(qDim), kvRows: UInt32(kvDim),
-            cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim), rmsEps: rmsEps
+            cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim),
+            tokenCount: 1, rmsEps: rmsEps
         )
         let qkvParamsAddr = paramsGPUBase
         memcpy(paramsBase, &qkvP, MemoryLayout<FusedQKVParams>.stride)
@@ -3361,6 +3374,7 @@ private struct FusedQKVParams {
     var kvRows: UInt32         // K/V output rows (numKVHeads * headDim)
     var cols: UInt32           // input columns (dim)
     var blocksPerRow: UInt32   // Q8_0 blocks per row
+    var tokenCount: UInt32     // number of input tokens in the batch
     var rmsEps: Float          // RMSNorm epsilon (for fused RMSNorm+QKV)
 }
 

@@ -139,7 +139,7 @@ struct FusedKernelTests {
         let wvBuf = Self.makeQ8Buffer(device: Self.device, rows: kvDim, cols: dim, values: wvData)
         let cpuQ = Self.cpuQ8GEMV(weight: wqBuf, x: normed, rows: qDim, cols: dim)
         let cpuK = Self.cpuQ8GEMV(weight: wkBuf, x: normed, rows: kvDim, cols: dim)
-        let cpuV = Self.cpuQ8GEMV(weight: wvBuf, x: normed, rows: kvDim, cols: dim)
+        _ = Self.cpuQ8GEMV(weight: wvBuf, x: normed, rows: kvDim, cols: dim)
 
         // GPU fused norm+QKV
         let xBuf = Self.device.makeBuffer(bytes: x, length: dim * 4, options: .storageModeShared)!
@@ -151,9 +151,9 @@ struct FusedKernelTests {
         let registry = try KernelRegistry(device: Self.device)
         let pso = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
 
-        struct Params { var qR: UInt32; var kvR: UInt32; var c: UInt32; var bpr: UInt32; var eps: Float }
+        struct Params { var qR: UInt32; var kvR: UInt32; var c: UInt32; var bpr: UInt32; var tokenCount: UInt32; var eps: Float }
         var params = Params(qR: UInt32(qDim), kvR: UInt32(kvDim), c: UInt32(dim),
-                           bpr: UInt32(dim / 32), eps: eps)
+                           bpr: UInt32(dim / 32), tokenCount: 1, eps: eps)
         let totalRows = qDim + kvDim + kvDim
 
         let cmd = Self.queue.makeCommandBuffer()!
@@ -187,6 +187,92 @@ struct FusedKernelTests {
         for i in 0..<kvDim {
             let relError = abs(gpuK[i] - cpuK[i]) / max(abs(cpuK[i]), 1e-4)
             #expect(relError < 0.05, "K[\(i)]: GPU=\(gpuK[i]) CPU=\(cpuK[i]) relErr=\(relError)")
+        }
+    }
+
+    @Test("Fused Norm+QKV supports batched prompt tokens")
+    func testFusedNormQKVBatched() async throws {
+        let tokenCount = 3
+        let dim = 128, qDim = 64, kvDim = 32
+        let eps: Float = 1e-5
+
+        let x = (0..<(tokenCount * dim)).map { _ in Float.random(in: -1...1) }
+        let normW = (0..<dim).map { _ in Float.random(in: 0.5...1.5) }
+        let wqData = (0..<qDim * dim).map { _ in Float.random(in: -0.3...0.3) }
+        let wkData = (0..<kvDim * dim).map { _ in Float.random(in: -0.3...0.3) }
+        let wvData = (0..<kvDim * dim).map { _ in Float.random(in: -0.3...0.3) }
+
+        let wqBuf = Self.makeQ8Buffer(device: Self.device, rows: qDim, cols: dim, values: wqData)
+        let wkBuf = Self.makeQ8Buffer(device: Self.device, rows: kvDim, cols: dim, values: wkData)
+        let wvBuf = Self.makeQ8Buffer(device: Self.device, rows: kvDim, cols: dim, values: wvData)
+
+        var cpuQ = [Float]()
+        var cpuK = [Float]()
+        var cpuV = [Float]()
+        cpuQ.reserveCapacity(tokenCount * qDim)
+        cpuK.reserveCapacity(tokenCount * kvDim)
+        cpuV.reserveCapacity(tokenCount * kvDim)
+        for tokenIndex in 0..<tokenCount {
+            let start = tokenIndex * dim
+            let end = start + dim
+            let tokenX = Array(x[start..<end])
+            let normed = Self.cpuRMSNorm(tokenX, weight: normW, eps: eps)
+            cpuQ += Self.cpuQ8GEMV(weight: wqBuf, x: normed, rows: qDim, cols: dim)
+            cpuK += Self.cpuQ8GEMV(weight: wkBuf, x: normed, rows: kvDim, cols: dim)
+            cpuV += Self.cpuQ8GEMV(weight: wvBuf, x: normed, rows: kvDim, cols: dim)
+        }
+
+        let xBuf = Self.device.makeBuffer(bytes: x, length: x.count * 4, options: .storageModeShared)!
+        let normBuf = Self.device.makeBuffer(bytes: normW, length: dim * 4, options: .storageModeShared)!
+        let outQ = Self.device.makeBuffer(length: tokenCount * qDim * 4, options: .storageModeShared)!
+        let outK = Self.device.makeBuffer(length: tokenCount * kvDim * 4, options: .storageModeShared)!
+        let outV = Self.device.makeBuffer(length: tokenCount * kvDim * 2, options: .storageModeShared)!
+
+        let registry = try KernelRegistry(device: Self.device)
+        let pso = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
+
+        struct Params { var qR: UInt32; var kvR: UInt32; var c: UInt32; var bpr: UInt32; var tokenCount: UInt32; var eps: Float }
+        var params = Params(qR: UInt32(qDim), kvR: UInt32(kvDim), c: UInt32(dim),
+                           bpr: UInt32(dim / 32), tokenCount: UInt32(tokenCount), eps: eps)
+        let totalRows = qDim + kvDim + kvDim
+
+        let cmd = Self.queue.makeCommandBuffer()!
+        let enc = cmd.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(wqBuf, offset: 0, index: 0)
+        enc.setBuffer(wkBuf, offset: 0, index: 1)
+        enc.setBuffer(wvBuf, offset: 0, index: 2)
+        enc.setBuffer(xBuf, offset: 0, index: 3)
+        enc.setBuffer(outQ, offset: 0, index: 4)
+        enc.setBuffer(outK, offset: 0, index: 5)
+        enc.setBuffer(outV, offset: 0, index: 6)
+        enc.setBytes(&params, length: MemoryLayout<Params>.stride, index: 7)
+        enc.setBuffer(normBuf, offset: 0, index: 8)
+        enc.dispatchThreadgroups(MTLSize(width: (totalRows + 1) / 2, height: tokenCount, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        enc.endEncoding()
+        cmd.commit()
+        await cmd.completed()
+
+        let gpuQ = Array(UnsafeBufferPointer(
+            start: outQ.contents().assumingMemoryBound(to: Float.self), count: tokenCount * qDim))
+        let gpuK = Array(UnsafeBufferPointer(
+            start: outK.contents().assumingMemoryBound(to: Float.self), count: tokenCount * kvDim))
+        let gpuVHalf = Array(UnsafeBufferPointer(
+            start: outV.contents().assumingMemoryBound(to: Float16.self), count: tokenCount * kvDim))
+        let gpuV = gpuVHalf.map(Float.init)
+
+        for i in 0..<gpuQ.count {
+            let relError = abs(gpuQ[i] - cpuQ[i]) / max(abs(cpuQ[i]), 1e-4)
+            #expect(relError < 0.05, "Q[\(i)]: GPU=\(gpuQ[i]) CPU=\(cpuQ[i]) relErr=\(relError)")
+        }
+        for i in 0..<gpuK.count {
+            let relError = abs(gpuK[i] - cpuK[i]) / max(abs(cpuK[i]), 1e-4)
+            #expect(relError < 0.05, "K[\(i)]: GPU=\(gpuK[i]) CPU=\(cpuK[i]) relErr=\(relError)")
+        }
+        for i in 0..<gpuV.count {
+            let relError = abs(gpuV[i] - cpuV[i]) / max(abs(cpuV[i]), 1e-4)
+            #expect(relError < 0.05, "V[\(i)]: GPU=\(gpuV[i]) CPU=\(cpuV[i]) relErr=\(relError)")
         }
     }
 }
