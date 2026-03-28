@@ -44,16 +44,19 @@ kernel void gqa_attention_f32(
     const uint qStride = numHeads * headDim;       // stride between sequence positions for Q/O
     const uint kvStride = numKVHeads * headDim;     // stride between sequence positions for K/V
 
-    threadgroup float kTile[16 * 128];
-    threadgroup float vTile[16 * 128];
-    threadgroup float outputScratch[16 * 128];
+    const uint headDim4 = headDim / 4;
+    const uint maxHeadDim4 = 128 / 4;
+
+    threadgroup float4 kTile[16 * maxHeadDim4];
+    threadgroup float4 vTile[16 * maxHeadDim4];
+    threadgroup float4 outputScratch[16 * maxHeadDim4];
 
     float runningMax = -INFINITY;
     float runningSum = 0.0f;
 
     if (activeQ) {
-        for (uint dim = 0; dim < headDim; dim++) {
-            outputScratch[local_id.x * headDim + dim] = 0.0f;
+        for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+            outputScratch[local_id.x * maxHeadDim4 + dim4] = float4(0.0f);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -68,9 +71,12 @@ kernel void gqa_attention_f32(
         if (local_id.x < kvCount) {
             uint kvPos = kvStart + local_id.x;
             uint kBase = kvPos * kvStride + kvHeadIndex * headDim;
-            for (uint dim = 0; dim < headDim; dim++) {
-                kTile[local_id.x * headDim + dim] = K[kBase + dim];
-                vTile[local_id.x * headDim + dim] = V[kBase + dim];
+            const device float4 *kVec = reinterpret_cast<const device float4 *>(K + kBase);
+            const device float4 *vVec = reinterpret_cast<const device float4 *>(V + kBase);
+            for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+                uint tileIndex = local_id.x * maxHeadDim4 + dim4;
+                kTile[tileIndex] = kVec[dim4];
+                vTile[tileIndex] = vVec[dim4];
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -79,6 +85,7 @@ kernel void gqa_attention_f32(
             float blockMax = -INFINITY;
             float scores[16];
             uint qBase = qRow * qStride + headIndex * headDim;
+            const device float4 *qVec = reinterpret_cast<const device float4 *>(Q + qBase);
             for (uint kvIndex = 0; kvIndex < kvCount; kvIndex++) {
                 if (params.causal != 0 && kvStart + kvIndex > qRow + qOff) {
                     scores[kvIndex] = -INFINITY;
@@ -86,8 +93,9 @@ kernel void gqa_attention_f32(
                 }
 
                 float dot = 0.0f;
-                for (uint dim = 0; dim < headDim; dim++) {
-                    dot += Q[qBase + dim] * kTile[kvIndex * headDim + dim];
+                uint tileBase = kvIndex * maxHeadDim4;
+                for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+                    dot += metal::dot(qVec[dim4], kTile[tileBase + dim4]);
                 }
                 scores[kvIndex] = dot * params.scale;
                 blockMax = max(blockMax, scores[kvIndex]);
@@ -109,12 +117,13 @@ kernel void gqa_attention_f32(
 
             runningSum = runningSum * correction + blockSum;
 
-            for (uint dim = 0; dim < headDim; dim++) {
-                float value = outputScratch[local_id.x * headDim + dim] * correction;
+            uint outBase = local_id.x * maxHeadDim4;
+            for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+                float4 value = outputScratch[outBase + dim4] * correction;
                 for (uint kvIndex = 0; kvIndex < kvCount; kvIndex++) {
-                    value += probs[kvIndex] * vTile[kvIndex * headDim + dim];
+                    value += probs[kvIndex] * vTile[kvIndex * maxHeadDim4 + dim4];
                 }
-                outputScratch[local_id.x * headDim + dim] = value;
+                outputScratch[outBase + dim4] = value;
             }
 
             runningMax = nextMax;
@@ -125,8 +134,10 @@ kernel void gqa_attention_f32(
     if (activeQ) {
         float invSum = runningSum > 0.0f ? 1.0f / runningSum : 0.0f;
         uint oBase = qRow * qStride + headIndex * headDim;
-        for (uint dim = 0; dim < headDim; dim++) {
-            O[oBase + dim] = outputScratch[local_id.x * headDim + dim] * invSum;
+        device float4 *oVec = reinterpret_cast<device float4 *>(O + oBase);
+        uint outBase = local_id.x * maxHeadDim4;
+        for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+            oVec[dim4] = outputScratch[outBase + dim4] * invSum;
         }
     }
 }
@@ -160,16 +171,19 @@ kernel void gqa_attention_f16kv(
     const uint qStride = numHeads * headDim;
     const uint kvStride = numKVHeads * headDim;
 
-    threadgroup float kTile[16 * 128];
-    threadgroup float vTile[16 * 128];
-    threadgroup float outputScratch[16 * 128];
+    const uint headDim4 = headDim / 4;
+    const uint maxHeadDim4 = 128 / 4;
+
+    threadgroup float4 kTile[16 * maxHeadDim4];
+    threadgroup float4 vTile[16 * maxHeadDim4];
+    threadgroup float4 outputScratch[16 * maxHeadDim4];
 
     float runningMax = -INFINITY;
     float runningSum = 0.0f;
 
     if (activeQ) {
-        for (uint dim = 0; dim < headDim; dim++)
-            outputScratch[local_id.x * headDim + dim] = 0.0f;
+        for (uint dim4 = 0; dim4 < headDim4; dim4++)
+            outputScratch[local_id.x * maxHeadDim4 + dim4] = float4(0.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -182,9 +196,12 @@ kernel void gqa_attention_f16kv(
         if (local_id.x < kvCount) {
             uint kvPos = kvStart + local_id.x;
             uint kBase = kvPos * kvStride + kvHeadIndex * headDim;
-            for (uint dim = 0; dim < headDim; dim++) {
-                kTile[local_id.x * headDim + dim] = float(K[kBase + dim]);
-                vTile[local_id.x * headDim + dim] = float(V[kBase + dim]);
+            const device half4 *kVec = reinterpret_cast<const device half4 *>(K + kBase);
+            const device half4 *vVec = reinterpret_cast<const device half4 *>(V + kBase);
+            for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+                uint tileIndex = local_id.x * maxHeadDim4 + dim4;
+                kTile[tileIndex] = float4(kVec[dim4]);
+                vTile[tileIndex] = float4(vVec[dim4]);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -193,14 +210,16 @@ kernel void gqa_attention_f16kv(
             float blockMax = -INFINITY;
             float scores[16];
             uint qBase = qRow * qStride + headIndex * headDim;
+            const device float4 *qVec = reinterpret_cast<const device float4 *>(Q + qBase);
             for (uint kvIndex = 0; kvIndex < kvCount; kvIndex++) {
                 if (params.causal != 0 && kvStart + kvIndex > qRow + qOff) {
                     scores[kvIndex] = -INFINITY;
                     continue;
                 }
                 float dot = 0.0f;
-                for (uint dim = 0; dim < headDim; dim++)
-                    dot += Q[qBase + dim] * kTile[kvIndex * headDim + dim];
+                uint tileBase = kvIndex * maxHeadDim4;
+                for (uint dim4 = 0; dim4 < headDim4; dim4++)
+                    dot += metal::dot(qVec[dim4], kTile[tileBase + dim4]);
                 scores[kvIndex] = dot * params.scale;
                 blockMax = max(blockMax, scores[kvIndex]);
             }
@@ -215,11 +234,12 @@ kernel void gqa_attention_f16kv(
             }
             runningSum = runningSum * correction + blockSum;
 
-            for (uint dim = 0; dim < headDim; dim++) {
-                float value = outputScratch[local_id.x * headDim + dim] * correction;
+            uint outBase = local_id.x * maxHeadDim4;
+            for (uint dim4 = 0; dim4 < headDim4; dim4++) {
+                float4 value = outputScratch[outBase + dim4] * correction;
                 for (uint kvIndex = 0; kvIndex < kvCount; kvIndex++)
-                    value += probs[kvIndex] * vTile[kvIndex * headDim + dim];
-                outputScratch[local_id.x * headDim + dim] = value;
+                    value += probs[kvIndex] * vTile[kvIndex * maxHeadDim4 + dim4];
+                outputScratch[outBase + dim4] = value;
             }
             runningMax = nextMax;
         }
@@ -229,7 +249,9 @@ kernel void gqa_attention_f16kv(
     if (activeQ) {
         float invSum = runningSum > 0.0f ? 1.0f / runningSum : 0.0f;
         uint oBase = qRow * qStride + headIndex * headDim;
-        for (uint dim = 0; dim < headDim; dim++)
-            O[oBase + dim] = outputScratch[local_id.x * headDim + dim] * invSum;
+        device float4 *oVec = reinterpret_cast<device float4 *>(O + oBase);
+        uint outBase = local_id.x * maxHeadDim4;
+        for (uint dim4 = 0; dim4 < headDim4; dim4++)
+            oVec[dim4] = outputScratch[outBase + dim4] * invSum;
     }
 }

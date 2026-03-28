@@ -748,6 +748,9 @@ See benchmarks/experiment_log.md
 - Kept a third exact-path prefill slice that batches the remaining Q8 `wo` and `down` projections:
   - Added a dedicated batched Q8 GEMV kernel for multi-token prompt projections.
   - Routed only multi-token prefill `wo` / `down` work through that kernel; single-token decode stays on the existing tiled and fused-add paths.
+- Kept a fourth exact-path attention slice that vectorizes the shared GQA kernel:
+  - Reworked the exact `gqa_attention_f32` and `gqa_attention_f16kv` kernels around `float4` / `half4` tile loads and `dot(float4, float4)` accumulation instead of scalar head-dimension loops.
+  - Added a direct `f16`-KV correctness test so the cache-backed attention path is checked against the CPU reference, not just the float32 helper path.
 - Verification for the kept batched QKV slice:
   - `swift test -c release --filter FusedKernelTests` passed.
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `221.8 tok/s`.
@@ -759,8 +762,12 @@ See benchmarks/experiment_log.md
   - `swift test -c release --filter FusedKernelTests` passed, including the new batched GEMV correctness case.
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `213.2 tok/s`.
   - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `368.5 tok/s` prompt throughput, `2778.9 ms` TTFT, and `41.85 tok/s` long-context decode.
+- Verification for the kept vectorized GQA slice:
+  - `swift test -c release --filter GQATests` passed, including the new direct `f16`-KV reference case.
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `211.2 tok/s`.
+  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `489.0 tok/s` prompt throughput, `2093.9 ms` TTFT, and `42.26 tok/s` long-context decode.
 - Interpretation:
-  - These are bounded production-safe improvements to exact prefill structure, not the full prefill rewrite.
-  - Prompt throughput and TTFT improved materially, but long-context decode is still effectively unchanged and the MLX gap remains architectural.
+  - These are bounded production-safe improvements to exact prefill structure and exact attention math, not the full prefill rewrite.
+  - Prompt throughput and TTFT have improved materially again, but long-context decode is still effectively unchanged and the MLX gap remains architectural.
 
 # Long-Prompt MLX vs EdgeRunner Benchmark

@@ -747,3 +747,22 @@ The optimization removes redundant float32 weight caches that existed for a pref
     - long-context decode: `41.85 tok/s`
 - **Result:** KEPT. This is another bounded exact-path prefill improvement. It does not change the architecture, but it meaningfully trims prompt-side work while keeping the decode benchmark healthy.
 - **Status:** KEPT
+
+### Experiment 39: Vectorize Exact GQA With `float4` / `half4`
+- **Hypothesis:** The exact prompt/decode attention kernels still walk `headDim` scalarly inside the KV loop. Rewriting the shared GQA kernels around vectorized `float4` / `half4` tile loads and `dot(float4, float4)` accumulation should improve exact attention throughput without changing semantics.
+- **Change:**
+  - Reworked `gqa_attention_f32` and `gqa_attention_f16kv` to store threadgroup tiles as `float4` slabs and accumulate scores / outputs four lanes at a time.
+  - Added a direct `f16`-KV correctness test in `GQATests` so the cache-backed attention path is checked against the CPU reference.
+- **Verification:**
+  - `swift test -c release --filter GQATests` passed, including the new `gqaF16KVMatchesCPUReference` case.
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic token hash `0afae14a84cf0df8` and median decode `211.2 tok/s`.
+  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 1 ...` improved EdgeRunner to:
+    - prompt throughput: `475.7 tok/s`
+    - TTFT: `2152.8 ms`
+    - long-context decode: `42.25 tok/s`
+  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` confirmed EdgeRunner medians:
+    - prompt throughput: `489.0 tok/s`
+    - TTFT: `2093.9 ms`
+    - long-context decode: `42.26 tok/s`
+- **Result:** KEPT. This is the first attention-kernel change in the exact path that produced a clear long-prompt prefill win while preserving deterministic decode behavior.
+- **Status:** KEPT
