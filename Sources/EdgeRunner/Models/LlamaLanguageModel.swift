@@ -1205,96 +1205,29 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
         }
 
-        // Use pre-allocated scratch buffers (zero allocation overhead)
-        let normedBuf = scratch.normed
-        let afterAttnBuf = scratch.afterAttn
-        let ffnNormedBuf = scratch.ffnNormed
-        let outputBufA = scratch.outputA
-        let outputBufB = scratch.outputB
-        let allQBuf = scratch.allQ
-        let allKBuf = scratch.allK
-        let ropeQBuf = scratch.ropeQ
-        let ropeKBuf = scratch.ropeK
-        let attnOutBuf = scratch.attnOut
-        let projBuf = scratch.proj
-        let gateOutBuf = scratch.gateOut
-        let upOutBuf = scratch.upOut
-        let activBuf = scratch.activ
-        let downOutBuf = scratch.downOut
+        let prefillScratch = makePrefillScratchViews()
+        let normedBuf = prefillScratch.normed
+        let afterAttnBuf = prefillScratch.afterAttn
+        let ffnNormedBuf = prefillScratch.ffnNormed
+        let outputBufA = prefillScratch.outputA
+        let outputBufB = prefillScratch.outputB
+        let allQBuf = prefillScratch.allQ
+        let allKBuf = prefillScratch.allK
+        let ropeQBuf = prefillScratch.ropeQ
+        let ropeKBuf = prefillScratch.ropeK
+        let attnOutBuf = prefillScratch.attnOut
+        let projBuf = prefillScratch.proj
+        let gateOutBuf = prefillScratch.gateOut
+        let upOutBuf = prefillScratch.upOut
+        let activBuf = prefillScratch.activ
+        let downOutBuf = prefillScratch.downOut
 
-        // Pre-load ALL weight buffers on first call — eliminates 254 actor hops per subsequent call
-        if !preloadedWeights.isLoaded {
-            var layers = [LayerWeightBuffers]()
-            layers.reserveCapacity(config.layerCount)
-            for i in 0..<config.layerCount {
-                let p = "layers.\(i)"
-                let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
-                let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
-                let wvRaw = makeRawQ8BufferIfAvailable("\(p).attention.wv.weight")
-                let woRaw = makeRawQ8BufferIfAvailable("\(p).attention.wo.weight")
-                let gateRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.gate.weight")
-                let upRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.up.weight")
-                let downRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.down.weight")
-
-                let wqBuf = try await readWeightBufferIfNeeded("\(p).attention.wq.weight", rawBuffer: wqRaw)
-                let wkBuf = try await readWeightBufferIfNeeded("\(p).attention.wk.weight", rawBuffer: wkRaw)
-                let wvBuf = try await readWeightBufferIfNeeded("\(p).attention.wv.weight", rawBuffer: wvRaw)
-                let woBuf = try await readWeightBufferIfNeeded("\(p).attention.wo.weight", rawBuffer: woRaw)
-                let gateBuf = try await readWeightBufferIfNeeded("\(p).feedForward.gate.weight", rawBuffer: gateRaw)
-                let upBuf = try await readWeightBufferIfNeeded("\(p).feedForward.up.weight", rawBuffer: upRaw)
-                let downBuf = try await readWeightBufferIfNeeded("\(p).feedForward.down.weight", rawBuffer: downRaw)
-                let packedPrefillAttention = try await makePackedPrefillAttentionWeightsIfNeeded(
-                    layerPrefix: p,
-                    qDim: qDim,
-                    kvDim: kvDim,
-                    dim: dim
-                )
-                let packedPrefillFFN = try await makePackedPrefillFFNWeightsIfNeeded(
-                    layerPrefix: p,
-                    interDim: interDim,
-                    dim: dim
-                )
-                // Load per-head Q/K norm weights if present (Qwen3)
-                let qNormName = "\(p).attention.qNorm.weight"
-                let kNormName = "\(p).attention.kNorm.weight"
-                let qNormBuf: MTLBuffer? = weights[qNormName] != nil ? try await readWeightBuffer(qNormName) : nil
-                let kNormBuf: MTLBuffer? = weights[kNormName] != nil ? try await readWeightBuffer(kNormName) : nil
-
-                layers.append(LayerWeightBuffers(
-                    attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
-                    wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
-                    packedPrefillAttention: packedPrefillAttention,
-                    qNorm: qNormBuf, kNorm: kNormBuf,
-                    ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
-                    gate: gateBuf, up: upBuf, down: downBuf,
-                    packedPrefillFFN: packedPrefillFFN,
-                    wqRaw: wqRaw, wkRaw: wkRaw, wvRaw: wvRaw, woRaw: woRaw,
-                    gateRaw: gateRaw, upRaw: upRaw, downRaw: downRaw
-                ))
-            }
-            let lmHeadName = tiedEmbeddingWeightName
-            let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
-            let lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
-            let lmHeadCols = dim
-
-            preloadedWeights.load(
-                layers: layers,
-                finalNorm: try await readWeightBuffer("finalNorm.weight"),
-                lmHead: lmHeadBuf,
-                lmHeadRaw: lmHeadRawBuf,
-                lmHeadCols: lmHeadCols
-            )
-
-            // Populate Metal 4 residency set now that all weight buffers are available
-            if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
-                m4.populateResidencySet(
-                    scratch: scratch,
-                    layerKCaches: layerKCaches,
-                    layerVCaches: layerVCaches,
-                    preloadedWeights: preloadedWeights
-                )
-            }
-        }
+        try await ensurePreloadedWeights(
+            qDim: qDim,
+            kvDim: kvDim,
+            dim: dim,
+            interDim: interDim
+        )
 
         // === SINGLE ENCODER for the ENTIRE forward pass ===
         // Metal guarantees sequential execution + implicit barriers between dispatches
@@ -3149,6 +3082,105 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return PackedPrefillWeight(buffer: buffer, rows: rows, cols: cols)
     }
 
+    private func makePrefillScratchViews() -> PrefillScratchViews {
+        PrefillScratchViews(
+            normed: scratch.normed,
+            afterAttn: scratch.afterAttn,
+            ffnNormed: scratch.ffnNormed,
+            outputA: scratch.outputA,
+            outputB: scratch.outputB,
+            allQ: scratch.allQ,
+            allK: scratch.allK,
+            ropeQ: scratch.ropeQ,
+            ropeK: scratch.ropeK,
+            attnOut: scratch.attnOut,
+            proj: scratch.proj,
+            gateOut: scratch.gateOut,
+            upOut: scratch.upOut,
+            activ: scratch.activ,
+            downOut: scratch.downOut
+        )
+    }
+
+    private func ensurePreloadedWeights(
+        qDim: Int,
+        kvDim: Int,
+        dim: Int,
+        interDim: Int
+    ) async throws {
+        guard !preloadedWeights.isLoaded else {
+            return
+        }
+
+        var layers = [LayerWeightBuffers]()
+        layers.reserveCapacity(config.layerCount)
+        for i in 0..<config.layerCount {
+            let p = "layers.\(i)"
+            let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
+            let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
+            let wvRaw = makeRawQ8BufferIfAvailable("\(p).attention.wv.weight")
+            let woRaw = makeRawQ8BufferIfAvailable("\(p).attention.wo.weight")
+            let gateRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.gate.weight")
+            let upRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.up.weight")
+            let downRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.down.weight")
+
+            let wqBuf = try await readWeightBufferIfNeeded("\(p).attention.wq.weight", rawBuffer: wqRaw)
+            let wkBuf = try await readWeightBufferIfNeeded("\(p).attention.wk.weight", rawBuffer: wkRaw)
+            let wvBuf = try await readWeightBufferIfNeeded("\(p).attention.wv.weight", rawBuffer: wvRaw)
+            let woBuf = try await readWeightBufferIfNeeded("\(p).attention.wo.weight", rawBuffer: woRaw)
+            let gateBuf = try await readWeightBufferIfNeeded("\(p).feedForward.gate.weight", rawBuffer: gateRaw)
+            let upBuf = try await readWeightBufferIfNeeded("\(p).feedForward.up.weight", rawBuffer: upRaw)
+            let downBuf = try await readWeightBufferIfNeeded("\(p).feedForward.down.weight", rawBuffer: downRaw)
+            let packedPrefillAttention = try await makePackedPrefillAttentionWeightsIfNeeded(
+                layerPrefix: p,
+                qDim: qDim,
+                kvDim: kvDim,
+                dim: dim
+            )
+            let packedPrefillFFN = try await makePackedPrefillFFNWeightsIfNeeded(
+                layerPrefix: p,
+                interDim: interDim,
+                dim: dim
+            )
+            let qNormName = "\(p).attention.qNorm.weight"
+            let kNormName = "\(p).attention.kNorm.weight"
+            let qNormBuf: MTLBuffer? = weights[qNormName] != nil ? try await readWeightBuffer(qNormName) : nil
+            let kNormBuf: MTLBuffer? = weights[kNormName] != nil ? try await readWeightBuffer(kNormName) : nil
+
+            layers.append(LayerWeightBuffers(
+                attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
+                wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
+                packedPrefillAttention: packedPrefillAttention,
+                qNorm: qNormBuf, kNorm: kNormBuf,
+                ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
+                gate: gateBuf, up: upBuf, down: downBuf,
+                packedPrefillFFN: packedPrefillFFN,
+                wqRaw: wqRaw, wkRaw: wkRaw, wvRaw: wvRaw, woRaw: woRaw,
+                gateRaw: gateRaw, upRaw: upRaw, downRaw: downRaw
+            ))
+        }
+        let lmHeadName = tiedEmbeddingWeightName
+        let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
+        let lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
+
+        preloadedWeights.load(
+            layers: layers,
+            finalNorm: try await readWeightBuffer("finalNorm.weight"),
+            lmHead: lmHeadBuf,
+            lmHeadRaw: lmHeadRawBuf,
+            lmHeadCols: dim
+        )
+
+        if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
+            m4.populateResidencySet(
+                scratch: scratch,
+                layerKCaches: layerKCaches,
+                layerVCaches: layerVCaches,
+                preloadedWeights: preloadedWeights
+            )
+        }
+    }
+
     /// Fills embedding rows directly into the destination buffer, avoiding an intermediate array.
     private func fillEmbeddings(
         tokenIDs: [Int],
@@ -3547,6 +3579,24 @@ private struct PackedPrefillFFNWeights {
     let gate: PackedPrefillWeight
     let up: PackedPrefillWeight
     let down: PackedPrefillWeight
+}
+
+private struct PrefillScratchViews {
+    let normed: MTLBuffer
+    let afterAttn: MTLBuffer
+    let ffnNormed: MTLBuffer
+    let outputA: MTLBuffer
+    let outputB: MTLBuffer
+    let allQ: MTLBuffer
+    let allK: MTLBuffer
+    let ropeQ: MTLBuffer
+    let ropeK: MTLBuffer
+    let attnOut: MTLBuffer
+    let proj: MTLBuffer
+    let gateOut: MTLBuffer
+    let upOut: MTLBuffer
+    let activ: MTLBuffer
+    let downOut: MTLBuffer
 }
 
 /// Thread-safe store for pre-loaded weights. Write-once during first forward pass,
