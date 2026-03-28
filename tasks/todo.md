@@ -68,9 +68,18 @@
   - long-prompt prompt throughput median `489.0 tok/s`
   - long-prompt TTFT median `2093.9 ms`
   - long-prompt decode median `42.26 tok/s`
+- Current kept rewrite checkpoint on top of `de785a1`:
+  - vectorized packed-prefill matmul kernel (`gemm_f32_packed_prefill`) wired into the experimental multi-token QKV/`wo`/FFN/down path under `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1`
+  - publishable decode median `213.3 tok/s`
+  - publishable TTFT `4.0 ms`
+  - publishable hash `0afae14a84cf0df8`
+  - long-prompt prompt throughput median `558.6 tok/s`
+  - long-prompt TTFT median `1833.2 ms`
+  - long-prompt decode median `42.24 tok/s`
 - Dead rewrite branches already measured and reverted:
   - GEMM-backed exact matrix prefill over repacked Q8 weights: regressed long-prompt prompt throughput to `433.3 tok/s`
   - contiguous raw-Q8 prefill bundle views over the GGUF mmap: regressed long-prompt prompt throughput to `469.2 tok/s`
+  - first dedicated exact-matrix execution slice using prompt-wide `gemm_f32` packed QKV/FFN/down inside `exactMatrixPrefillPass`: regressed long-prompt prompt throughput to `451.9 tok/s`, TTFT to `2266.1 ms`, while decode stayed flat at `42.42 tok/s`
 - Implication: the remaining viable path is a larger engine split, not more local substitutions inside the legacy prefill body.
 
 # Mega Fused GQA Kernel Repair
