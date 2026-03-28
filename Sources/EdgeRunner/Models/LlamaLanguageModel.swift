@@ -139,6 +139,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let gemvAddPipeline: MTLComputePipelineState
     private let packedPrefillMatmulPipeline: MTLComputePipelineState
     private let packedDecodeCachePipeline: MTLComputePipelineState
+    private let packedDecodeCachePairPipeline: MTLComputePipelineState
     private let packedLongKVAttentionPipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -248,6 +249,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
         self.packedPrefillMatmulPipeline = try registry.pipeline(for: "gemm_f32_packed_prefill")
         self.packedDecodeCachePipeline = try registry.pipeline(for: "pack_kv_decode_cache_f16")
+        self.packedDecodeCachePairPipeline = try registry.pipeline(for: "pack_kv_decode_cache_pair_f16")
         self.packedLongKVAttentionPipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv")
 
         // Initialize dequant kernels
@@ -1444,17 +1446,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // Convert V from f32 → f16 not needed for fused path (writes f16 directly)
             }
 
-            if usePackedLongKVDecode, let layerVCache, let layerVPackedDecodeCache {
-                encodePackedDecodeCacheWrite(
-                    encoder: enc,
-                    source: layerVCache,
-                    sourceOffset: startPosition * kvDim * halfStride,
-                    destination: layerVPackedDecodeCache,
-                    tokenCount: seqLen,
-                    destinationStartToken: startPosition
-                )
-            }
-
             // 3. FUSED Q/K per-head norm + RoPE Q + RoPE K→f16 (replaces 4-6 dispatches with 1)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             let ropeQOut: MTLBuffer  // used by GQA step below
@@ -1558,12 +1549,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                if usePackedLongKVDecode, let layerKCache, let layerKPackedDecodeCache {
-                    encodePackedDecodeCacheWrite(
+                if usePackedLongKVDecode,
+                   let layerKCache, let layerVCache,
+                   let layerKPackedDecodeCache, let layerVPackedDecodeCache {
+                    encodePackedDecodeCachePairWrite(
                         encoder: enc,
-                        source: layerKCache,
-                        sourceOffset: startPosition * kvDim * halfStride,
-                        destination: layerKPackedDecodeCache,
+                        keySource: layerKCache,
+                        keySourceOffset: startPosition * kvDim * halfStride,
+                        valueSource: layerVCache,
+                        valueSourceOffset: startPosition * kvDim * halfStride,
+                        keyDestination: layerKPackedDecodeCache,
+                        valueDestination: layerVPackedDecodeCache,
                         tokenCount: seqLen,
                         destinationStartToken: startPosition
                     )
@@ -2168,19 +2164,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         )
                     } else {
                         if usePackedLongKVDecode {
-                            encodePackedDecodeCacheWrite(
+                            encodePackedDecodeCachePairWrite(
                                 encoder: enc,
-                                source: layerVCache!,
-                                sourceOffset: cacheWriteOffF16,
-                                destination: layerVPackedDecodeCache!,
-                                tokenCount: 1,
-                                destinationStartToken: currentPos
-                            )
-                            encodePackedDecodeCacheWrite(
-                                encoder: enc,
-                                source: layerKCache!,
-                                sourceOffset: cacheWriteOffF16,
-                                destination: layerKPackedDecodeCache!,
+                                keySource: layerKCache!,
+                                keySourceOffset: cacheWriteOffF16,
+                                valueSource: layerVCache!,
+                                valueSourceOffset: cacheWriteOffF16,
+                                keyDestination: layerKPackedDecodeCache!,
+                                valueDestination: layerVPackedDecodeCache!,
                                 tokenCount: 1,
                                 destinationStartToken: currentPos
                             )
@@ -2575,19 +2566,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.memoryBarrier(scope: .buffers)
                 }
 
-                encodePackedDecodeCacheWrite(
+                encodePackedDecodeCachePairWrite(
                     encoder: enc,
-                    source: layerVCache,
-                    sourceOffset: cacheWriteOffF16,
-                    destination: layerVPackedDecodeCache,
-                    tokenCount: 1,
-                    destinationStartToken: currentPos
-                )
-                encodePackedDecodeCacheWrite(
-                    encoder: enc,
-                    source: layerKCache,
-                    sourceOffset: cacheWriteOffF16,
-                    destination: layerKPackedDecodeCache,
+                    keySource: layerKCache,
+                    keySourceOffset: cacheWriteOffF16,
+                    valueSource: layerVCache,
+                    valueSourceOffset: cacheWriteOffF16,
+                    keyDestination: layerKPackedDecodeCache,
+                    valueDestination: layerVPackedDecodeCache,
                     tokenCount: 1,
                     destinationStartToken: currentPos
                 )
@@ -3533,6 +3519,35 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         encoder.setBuffer(source, offset: sourceOffset, index: 0)
         encoder.setBuffer(destination, offset: 0, index: 1)
         encoder.setBytes(&params, length: 4 * MemoryLayout<UInt32>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: 32, height: config.kvHeadCount, depth: tokenCount),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+        )
+    }
+
+    private func encodePackedDecodeCachePairWrite(
+        encoder: MTLComputeCommandEncoder,
+        keySource: MTLBuffer,
+        keySourceOffset: Int,
+        valueSource: MTLBuffer,
+        valueSourceOffset: Int,
+        keyDestination: MTLBuffer,
+        valueDestination: MTLBuffer,
+        tokenCount: Int,
+        destinationStartToken: Int
+    ) {
+        var params = (
+            UInt32(tokenCount),
+            UInt32(config.kvHeadCount),
+            UInt32(config.headDim),
+            UInt32(destinationStartToken)
+        )
+        encoder.setComputePipelineState(packedDecodeCachePairPipeline)
+        encoder.setBuffer(keySource, offset: keySourceOffset, index: 0)
+        encoder.setBuffer(valueSource, offset: valueSourceOffset, index: 1)
+        encoder.setBuffer(keyDestination, offset: 0, index: 2)
+        encoder.setBuffer(valueDestination, offset: 0, index: 3)
+        encoder.setBytes(&params, length: 4 * MemoryLayout<UInt32>.stride, index: 4)
         encoder.dispatchThreads(
             MTLSize(width: 32, height: config.kvHeadCount, depth: tokenCount),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)

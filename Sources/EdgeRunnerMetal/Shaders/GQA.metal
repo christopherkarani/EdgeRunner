@@ -284,6 +284,34 @@ kernel void pack_kv_decode_cache_f16(
     destination[dstBase + 3] = source[srcBase + lane + 96];
 }
 
+kernel void pack_kv_decode_cache_pair_f16(
+    device const half *keySource [[buffer(0)]],
+    device const half *valueSource [[buffer(1)]],
+    device half *keyDestination [[buffer(2)]],
+    device half *valueDestination [[buffer(3)]],
+    constant ERPackKVDecodeCacheParams &params [[buffer(4)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint lane = gid.x;
+    uint kvHead = gid.y;
+    uint token = gid.z;
+    if (lane >= 32 || kvHead >= params.numKVHeads || token >= params.tokenCount) return;
+
+    uint srcBase = (token * params.numKVHeads + kvHead) * params.headDim;
+    uint dstToken = params.destinationStartToken + token;
+    uint dstBase = (dstToken * params.numKVHeads + kvHead) * params.headDim + lane * 4;
+
+    keyDestination[dstBase + 0] = keySource[srcBase + lane];
+    keyDestination[dstBase + 1] = keySource[srcBase + lane + 32];
+    keyDestination[dstBase + 2] = keySource[srcBase + lane + 64];
+    keyDestination[dstBase + 3] = keySource[srcBase + lane + 96];
+
+    valueDestination[dstBase + 0] = valueSource[srcBase + lane];
+    valueDestination[dstBase + 1] = valueSource[srcBase + lane + 32];
+    valueDestination[dstBase + 2] = valueSource[srcBase + lane + 64];
+    valueDestination[dstBase + 3] = valueSource[srcBase + lane + 96];
+}
+
 struct ERPackedDecodeGQAParams {
     uint numHeads;
     uint numKVHeads;

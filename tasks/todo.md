@@ -77,13 +77,13 @@
   - long-prompt TTFT median `1833.2 ms`
   - long-prompt decode median `42.24 tok/s`
 - New kept decode rewrite candidate behind `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
-  - dedicated packed decode KV views plus exact long-KV attention kernel
-  - publishable decode median `221.5 tok/s`
+  - dedicated packed decode KV views plus exact long-KV attention kernel, with K/V repack collapsed into one dispatch
+  - publishable decode median `220.3 tok/s`
   - publishable TTFT `3.9 ms`
   - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `518.0 tok/s`
-  - long-prompt TTFT median `1976.8 ms`
-  - long-prompt decode median `59.46 tok/s`
+  - long-prompt prompt throughput median `526.8 tok/s`
+  - long-prompt TTFT median `1943.9 ms`
+  - long-prompt decode median `60.29 tok/s`
 - Dead rewrite branches already measured and reverted:
   - GEMM-backed exact matrix prefill over repacked Q8 weights: regressed long-prompt prompt throughput to `433.3 tok/s`
   - contiguous raw-Q8 prefill bundle views over the GGUF mmap: regressed long-prompt prompt throughput to `469.2 tok/s`
