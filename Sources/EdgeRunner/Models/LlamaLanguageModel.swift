@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalPerformanceShaders
 import Synchronization
 import Accelerate
 import EdgeRunnerCore
@@ -1271,7 +1272,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Metal guarantees sequential execution + implicit barriers between dispatches
         // within the same encoder. Using 1 encoder instead of 422 eliminates encoder
         // creation overhead (~10μs × 422 = 4.2ms per forward pass).
-        guard let enc = cmdBuf.makeComputeCommandEncoder() else {
+        guard var enc = cmdBuf.makeComputeCommandEncoder() else {
             throw GenerationError.modelLoadFailed(reason: "Failed to create compute encoder")
         }
 
@@ -1360,9 +1361,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
                 // 2. Q/K/V projections
                 if usePackedExperimental, let packedAttention = lw.packedPrefillAttention {
-                    encodePackedPrefillAttentionProjections(
-                        encoder: enc,
-                        pipeline: packedPrefillMatmulPSO,
+                    enc.endEncoding()
+                    encodePackedPrefillAttentionProjectionsMPS(
+                        commandBuffer: cmdBuf,
                         packed: packedAttention,
                         normalizedHidden: normedBuf,
                         allQ: allQBuf,
@@ -1370,6 +1371,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         allV: allVBuf,
                         seqLen: seqLen
                     )
+                    guard let resumedEncoder = cmdBuf.makeComputeCommandEncoder() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to recreate compute encoder after packed QKV MPS")
+                    }
+                    enc = resumedEncoder
                     if !usePromptFlashAttention {
                         enc.setComputePipelineState(convertF32ToF16PSO)
                         enc.setBuffer(allVBuf, offset: 0, index: 0)
@@ -3502,6 +3507,38 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         )
     }
 
+    private func encodePackedPrefillAttentionProjectionsMPS(
+        commandBuffer: MTLCommandBuffer,
+        packed: PackedPrefillAttentionWeights,
+        normalizedHidden: MTLBuffer,
+        allQ: MTLBuffer,
+        allK: MTLBuffer,
+        allV: MTLBuffer,
+        seqLen: Int
+    ) {
+        encodePackedPrefillMatmulMPS(
+            commandBuffer: commandBuffer,
+            lhs: normalizedHidden,
+            rhs: packed.wq,
+            output: allQ,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmulMPS(
+            commandBuffer: commandBuffer,
+            lhs: normalizedHidden,
+            rhs: packed.wk,
+            output: allK,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmulMPS(
+            commandBuffer: commandBuffer,
+            lhs: normalizedHidden,
+            rhs: packed.wv,
+            output: allV,
+            rows: seqLen
+        )
+    }
+
     private func encodePackedPrefillFFNProjections(
         encoder: MTLComputeCommandEncoder,
         pipeline: MTLComputePipelineState,
@@ -3556,6 +3593,48 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             MTLSize(width: rhs.rows, height: rows, depth: 1),
             threadsPerThreadgroup: MTLSize(width: tgWidth, height: tgHeight, depth: 1)
         )
+    }
+
+    private func encodePackedPrefillMatmulMPS(
+        commandBuffer: MTLCommandBuffer,
+        lhs: MTLBuffer,
+        rhs: PackedPrefillWeight,
+        output: MTLBuffer,
+        rows: Int
+    ) {
+        let lhsDesc = MPSMatrixDescriptor(
+            rows: rows,
+            columns: rhs.cols,
+            rowBytes: rhs.cols * MemoryLayout<Float>.stride,
+            dataType: .float32
+        )
+        let rhsDesc = MPSMatrixDescriptor(
+            rows: rhs.cols,
+            columns: rhs.rows,
+            rowBytes: rhs.rows * MemoryLayout<Float>.stride,
+            dataType: .float32
+        )
+        let outDesc = MPSMatrixDescriptor(
+            rows: rows,
+            columns: rhs.rows,
+            rowBytes: rhs.rows * MemoryLayout<Float>.stride,
+            dataType: .float32
+        )
+
+        let lhsMatrix = MPSMatrix(buffer: lhs, descriptor: lhsDesc)
+        let rhsMatrix = MPSMatrix(buffer: rhs.buffer, descriptor: rhsDesc)
+        let outMatrix = MPSMatrix(buffer: output, descriptor: outDesc)
+        let op = MPSMatrixMultiplication(
+            device: device,
+            transposeLeft: false,
+            transposeRight: false,
+            resultRows: rows,
+            resultColumns: rhs.rows,
+            interiorColumns: rhs.cols,
+            alpha: 1.0,
+            beta: 0.0
+        )
+        op.encode(commandBuffer: commandBuffer, leftMatrix: lhsMatrix, rightMatrix: rhsMatrix, resultMatrix: outMatrix)
     }
 
     private func encodePackedDecodeCacheWrite(
