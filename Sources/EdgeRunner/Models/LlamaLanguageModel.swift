@@ -137,6 +137,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let convertF32ToF16Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEPipeline: MTLComputePipelineState
+    private let fusedQKNormRoPEHalfPrefillPipeline: MTLComputePipelineState
     private let fusedNormRoPEGQAPipeline: MTLComputePipelineState
     private let fusedFinalNormGemvPipeline: MTLComputePipelineState
     private let gemvAddPipeline: MTLComputePipelineState
@@ -249,6 +250,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
         self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
+        self.fusedQKNormRoPEHalfPrefillPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox_prefill_f16in")
         self.fusedNormRoPEGQAPipeline = try registry.pipeline(for: "fused_qk_norm_rope_gqa")
         self.fusedFinalNormGemvPipeline = try registry.pipeline(for: "dequant_q8_0_fused_final_norm_gemv")
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
@@ -340,6 +342,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         // Pre-allocate scratch buffers for max seqLen
         let maxSeq = effectiveMaxSeq
         let fs = MemoryLayout<Float>.stride
+        let hs = MemoryLayout<Float16>.stride
         let qDim = config.headCount * config.headDim
         let kvDim = config.kvHeadCount * config.headDim
         let dim = config.embeddingDim
@@ -357,12 +360,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         self.scratch = try ScratchBuffers(
             normed: allocBuffer(maxSeq * dim * fs),
+            normedHalf: allocBuffer(maxSeq * dim * hs),
             afterAttn: allocBuffer(maxSeq * dim * fs),
             ffnNormed: allocBuffer(maxSeq * dim * fs),
             outputA: allocBuffer(maxSeq * dim * fs),
             outputB: allocBuffer(maxSeq * dim * fs),
             allQ: allocBuffer(maxSeq * qDim * fs),
+            allQHalf: allocBuffer(maxSeq * qDim * hs),
             allK: allocBuffer(maxSeq * kvDim * fs),
+            allKHalf: allocBuffer(maxSeq * kvDim * hs),
             allV: allocBuffer(maxSeq * kvDim * fs),
             ropeQ: allocBuffer(maxSeq * qDim * fs),
             ropeK: allocBuffer(maxSeq * kvDim * fs),
@@ -676,12 +682,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private func zeroScratchBuffers() {
         let buffers = [
             scratch.normed,
+            scratch.normedHalf,
             scratch.afterAttn,
             scratch.ffnNormed,
             scratch.outputA,
             scratch.outputB,
             scratch.allQ,
+            scratch.allQHalf,
             scratch.allK,
+            scratch.allKHalf,
             scratch.allV,
             scratch.ropeQ,
             scratch.ropeK,
@@ -1050,7 +1059,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 startPosition: startPosition
             )
         }
-
         return try await fusedPrefillPass(
             hiddenBuf: hiddenBuf,
             seqLen: seqLen,
@@ -1256,12 +1264,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let prefillScratch = makePrefillScratchViews()
         let normedBuf = prefillScratch.normed
+        let normedHalfBuf = prefillScratch.normedHalf
         let afterAttnBuf = prefillScratch.afterAttn
         let ffnNormedBuf = prefillScratch.ffnNormed
         let outputBufA = prefillScratch.outputA
         let outputBufB = prefillScratch.outputB
         let allQBuf = prefillScratch.allQ
+        let allQHalfBuf = prefillScratch.allQHalf
         let allKBuf = prefillScratch.allK
+        let allKHalfBuf = prefillScratch.allKHalf
         let ropeQBuf = prefillScratch.ropeQ
         let ropeKBuf = prefillScratch.ropeK
         let attnOutBuf = prefillScratch.attnOut
@@ -1298,6 +1309,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
         let convertF32ToF16PSO = convertF32ToF16Pipeline
+        let fusedQKNormRoPEHalfPrefillPSO = fusedQKNormRoPEHalfPrefillPipeline
         let halfStride = MemoryLayout<Float16>.stride
         let rmsEps = Float(config.rmsNormEpsilon)
         let ropeTheta = Float(config.ropeFreqBase)
@@ -1325,6 +1337,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let useQ8Fused = lw.wqRaw != nil
             let useFusedQKV = useQ8Fused && !turboQuantEnabled && !usePackedExperimental
             let blocksPerRowDim = dim / 32  // Q8_0: 32 elements per block
+            var usedPackedHalfPromptAttention = false
             let layerVCache = turboQuantEnabled ? nil : layerVCaches[layerIndex]
             let layerKCache = turboQuantEnabled ? nil : layerKCaches[layerIndex]
             let layerVPackedDecodeCache = turboQuantEnabled ? nil : layerVPackedDecodeCaches[layerIndex]
@@ -1369,7 +1382,55 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
 
                 // 2. Q/K/V projections
-                if usePackedExperimental, let packedAttention = lw.packedPrefillAttention {
+                if usePackedExperimental,
+                   usePromptFlashAttention,
+                   let packedAttentionHalfQKV = lw.packedPrefillAttentionHalfQKV {
+                    usedPackedHalfPromptAttention = true
+                    enc.setComputePipelineState(convertF32ToF16PSO)
+                    enc.setBuffer(normedBuf, offset: 0, index: 0)
+                    enc.setBuffer(normedHalfBuf, offset: 0, index: 1)
+                    var normedHalfCount = ERElementwiseParams(elementCount: UInt32(seqLen * dim))
+                    enc.setBytes(&normedHalfCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    enc.dispatchThreads(
+                        MTLSize(width: seqLen * dim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(
+                            width: min(seqLen * dim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup),
+                            height: 1,
+                            depth: 1
+                        )
+                    )
+
+                    enc.endEncoding()
+                    encodePackedPrefillMatmulHalfInputMPS(
+                        commandBuffer: cmdBuf,
+                        lhs: normedHalfBuf,
+                        rhs: packedAttentionHalfQKV.wq,
+                        output: allQHalfBuf,
+                        rows: seqLen,
+                        outputDataType: .float16
+                    )
+                    encodePackedPrefillMatmulHalfInputMPS(
+                        commandBuffer: cmdBuf,
+                        lhs: normedHalfBuf,
+                        rhs: packedAttentionHalfQKV.wk,
+                        output: allKHalfBuf,
+                        rows: seqLen,
+                        outputDataType: .float16
+                    )
+                    encodePackedPrefillMatmulHalfInputMPS(
+                        commandBuffer: cmdBuf,
+                        lhs: normedHalfBuf,
+                        rhs: packedAttentionHalfQKV.wv,
+                        output: layerVCache!,
+                        rows: seqLen,
+                        outputDataType: .float16,
+                        outputOffset: startPosition * kvDim * halfStride
+                    )
+                    guard let resumedEncoder = cmdBuf.makeComputeCommandEncoder() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to recreate compute encoder after packed half QKV MPS")
+                    }
+                    enc = resumedEncoder
+                } else if usePackedExperimental, let packedAttention = lw.packedPrefillAttention {
                     enc.endEncoding()
                     encodePackedPrefillAttentionProjectionsMPS(
                         commandBuffer: cmdBuf,
@@ -1472,7 +1533,32 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             // 3. FUSED Q/K per-head norm + RoPE Q + RoPE K→f16 (replaces 4-6 dispatches with 1)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             let ropeQOut: MTLBuffer  // used by GQA step below
-            if hasQKNorm && seqLen == 1 && !turboQuantEnabled {
+            if usedPackedHalfPromptAttention && hasQKNorm {
+                var p = ERFusedNormRoPEPrefillParams(
+                    seqLen: UInt32(seqLen),
+                    numHeads: UInt32(numHeads),
+                    numKVHeads: UInt32(numKVHeads),
+                    headDim: UInt32(headDim),
+                    startPos: UInt32(startPosition),
+                    theta: ropeTheta,
+                    scalingFactor: 1,
+                    rmsEps: rmsEps
+                )
+                enc.setComputePipelineState(fusedQKNormRoPEHalfPrefillPSO)
+                enc.setBuffer(allQHalfBuf, offset: 0, index: 0)
+                enc.setBuffer(allKHalfBuf, offset: 0, index: 1)
+                enc.setBuffer(lw.qNorm!, offset: 0, index: 2)
+                enc.setBuffer(lw.kNorm!, offset: 0, index: 3)
+                enc.setBuffer(ropeQBuf, offset: 0, index: 4)
+                enc.setBuffer(layerKCache!, offset: startPosition * kvDim * halfStride, index: 5)
+                enc.setBytes(&p, length: MemoryLayout<ERFusedNormRoPEPrefillParams>.stride, index: 6)
+                let halfDim = headDim / 2
+                enc.dispatchThreads(
+                    MTLSize(width: halfDim, height: numHeads + numKVHeads, depth: seqLen),
+                    threadsPerThreadgroup: MTLSize(width: halfDim, height: 1, depth: 1)
+                )
+                ropeQOut = ropeQBuf
+            } else if hasQKNorm && seqLen == 1 && !turboQuantEnabled {
                 // MEGA-FUSED: Q/K norm + RoPE + GQA all in one dispatch
                 let megaPSO = fusedNormRoPEGQAPipeline
                 enc.setComputePipelineState(megaPSO)
@@ -1611,20 +1697,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 } else if usePromptFlashAttention {
                     let groupSize = numHeads / numKVHeads
                     let cacheWriteOffset = startPosition * kvDim * halfStride
-                    enc.setComputePipelineState(convertF32ToF16PSO)
-                    enc.setBuffer(allVBuf, offset: 0, index: 0)
-                    enc.setBuffer(layerVCache!, offset: cacheWriteOffset, index: 1)
-                    var vConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                    enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    if !usedPackedHalfPromptAttention {
+                        enc.setComputePipelineState(convertF32ToF16PSO)
+                        enc.setBuffer(allVBuf, offset: 0, index: 0)
+                        enc.setBuffer(layerVCache!, offset: cacheWriteOffset, index: 1)
+                        var vConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                        enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
 
-                    enc.setBuffer(hasQKNorm ? allKBuf : ropeKBuf, offset: 0, index: 0)
-                    enc.setBuffer(layerKCache!, offset: cacheWriteOffset, index: 1)
-                    var kConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                    enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                        enc.setBuffer(hasQKNorm ? allKBuf : ropeKBuf, offset: 0, index: 0)
+                        enc.setBuffer(layerKCache!, offset: cacheWriteOffset, index: 1)
+                        var kConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                        enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    }
 
                     var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
                         numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
@@ -3333,6 +3421,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return PackedPrefillAttentionWeights(wq: wq, wk: wk, wv: wv, wo: wo)
     }
 
+    private func makePackedPrefillAttentionHalfQKVWeightsIfNeeded(
+        layerPrefix: String,
+        qDim: Int,
+        kvDim: Int,
+        dim: Int
+    ) async throws -> PackedPrefillAttentionHalfQKVWeights? {
+        guard let wq = try await makePackedPrefillHalfWeightIfNeeded("\(layerPrefix).attention.wq.weight", rows: qDim, cols: dim),
+              let wk = try await makePackedPrefillHalfWeightIfNeeded("\(layerPrefix).attention.wk.weight", rows: kvDim, cols: dim),
+              let wv = try await makePackedPrefillHalfWeightIfNeeded("\(layerPrefix).attention.wv.weight", rows: kvDim, cols: dim) else {
+            return nil
+        }
+        return PackedPrefillAttentionHalfQKVWeights(wq: wq, wk: wk, wv: wv)
+    }
+
     private func makePackedPrefillFFNWeightsIfNeeded(
         layerPrefix: String,
         interDim: Int,
@@ -3374,15 +3476,46 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return PackedPrefillWeight(buffer: buffer, rows: rows, cols: cols)
     }
 
+    private func makePackedPrefillHalfWeightIfNeeded(
+        _ name: String,
+        rows: Int,
+        cols: Int
+    ) async throws -> PackedPrefillHalfWeight? {
+        guard prefillDebugOptions.prefersExperimentalExactMatrixPrefillPath else {
+            return nil
+        }
+
+        let floats = try await dequantizeToFloatArray(weights[name]!)
+        var transposed = [Float](repeating: 0, count: floats.count)
+        transposed.withUnsafeMutableBufferPointer { dst in
+            floats.withUnsafeBufferPointer { src in
+                guard let srcBase = src.baseAddress, let dstBase = dst.baseAddress else { return }
+                vDSP_mtrans(srcBase, 1, dstBase, 1, vDSP_Length(cols), vDSP_Length(rows))
+            }
+        }
+        let packedHalf = transposed.map(Float16.init)
+        guard let buffer = device.makeBuffer(
+            bytes: packedHalf,
+            length: packedHalf.count * MemoryLayout<Float16>.stride,
+            options: .storageModeShared
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create packed half prefill weight buffer for \(name)")
+        }
+        return PackedPrefillHalfWeight(buffer: buffer, rows: rows, cols: cols)
+    }
+
     private func makePrefillScratchViews() -> PrefillScratchViews {
         PrefillScratchViews(
             normed: scratch.normed,
+            normedHalf: scratch.normedHalf,
             afterAttn: scratch.afterAttn,
             ffnNormed: scratch.ffnNormed,
             outputA: scratch.outputA,
             outputB: scratch.outputB,
             allQ: scratch.allQ,
+            allQHalf: scratch.allQHalf,
             allK: scratch.allK,
+            allKHalf: scratch.allKHalf,
             ropeQ: scratch.ropeQ,
             ropeK: scratch.ropeK,
             attnOut: scratch.attnOut,
@@ -3429,6 +3562,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 kvDim: kvDim,
                 dim: dim
             )
+            let packedPrefillAttentionHalfQKV = try await makePackedPrefillAttentionHalfQKVWeightsIfNeeded(
+                layerPrefix: p,
+                qDim: qDim,
+                kvDim: kvDim,
+                dim: dim
+            )
             let packedPrefillFFN = try await makePackedPrefillFFNWeightsIfNeeded(
                 layerPrefix: p,
                 interDim: interDim,
@@ -3443,6 +3582,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 attnNorm: try await readWeightBuffer("\(p).attentionNorm.weight"),
                 wq: wqBuf, wk: wkBuf, wv: wvBuf, wo: woBuf,
                 packedPrefillAttention: packedPrefillAttention,
+                packedPrefillAttentionHalfQKV: packedPrefillAttentionHalfQKV,
                 qNorm: qNormBuf, kNorm: kNormBuf,
                 ffnNorm: try await readWeightBuffer("\(p).ffnNorm.weight"),
                 gate: gateBuf, up: upBuf, down: downBuf,
@@ -3652,6 +3792,51 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let lhsMatrix = MPSMatrix(buffer: lhs, descriptor: lhsDesc)
         let rhsMatrix = MPSMatrix(buffer: rhs.buffer, descriptor: rhsDesc)
         let outMatrix = MPSMatrix(buffer: output, descriptor: outDesc)
+        let op = MPSMatrixMultiplication(
+            device: device,
+            transposeLeft: false,
+            transposeRight: false,
+            resultRows: rows,
+            resultColumns: rhs.rows,
+            interiorColumns: rhs.cols,
+            alpha: 1.0,
+            beta: 0.0
+        )
+        op.encode(commandBuffer: commandBuffer, leftMatrix: lhsMatrix, rightMatrix: rhsMatrix, resultMatrix: outMatrix)
+    }
+
+    private func encodePackedPrefillMatmulHalfInputMPS(
+        commandBuffer: MTLCommandBuffer,
+        lhs: MTLBuffer,
+        rhs: PackedPrefillHalfWeight,
+        output: MTLBuffer,
+        rows: Int,
+        outputDataType: MPSDataType = .float32,
+        outputOffset: Int = 0
+    ) {
+        let lhsDesc = MPSMatrixDescriptor(
+            rows: rows,
+            columns: rhs.cols,
+            rowBytes: rhs.cols * MemoryLayout<Float16>.stride,
+            dataType: .float16
+        )
+        let rhsDesc = MPSMatrixDescriptor(
+            rows: rhs.cols,
+            columns: rhs.rows,
+            rowBytes: rhs.rows * MemoryLayout<Float16>.stride,
+            dataType: .float16
+        )
+        let outputElementStride = outputDataType == .float16 ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride
+        let outDesc = MPSMatrixDescriptor(
+            rows: rows,
+            columns: rhs.rows,
+            rowBytes: rhs.rows * outputElementStride,
+            dataType: outputDataType
+        )
+
+        let lhsMatrix = MPSMatrix(buffer: lhs, descriptor: lhsDesc)
+        let rhsMatrix = MPSMatrix(buffer: rhs.buffer, descriptor: rhsDesc)
+        let outMatrix = MPSMatrix(buffer: output, offset: outputOffset, descriptor: outDesc)
         let op = MPSMatrixMultiplication(
             device: device,
             transposeLeft: false,
@@ -4066,12 +4251,15 @@ private final class Metal4State: @unchecked Sendable {
 /// MTLBuffer contents are mutated by GPU kernels (not Swift), synchronized via command buffer ordering.
 private struct ScratchBuffers: @unchecked Sendable {
     let normed: MTLBuffer
+    let normedHalf: MTLBuffer
     let afterAttn: MTLBuffer
     let ffnNormed: MTLBuffer
     let outputA: MTLBuffer
     let outputB: MTLBuffer
     let allQ: MTLBuffer
+    let allQHalf: MTLBuffer
     let allK: MTLBuffer
+    let allKHalf: MTLBuffer
     let allV: MTLBuffer
     let ropeQ: MTLBuffer
     let ropeK: MTLBuffer
@@ -4108,6 +4296,17 @@ private struct DequantQ8GEMVBatchParams {
 }
 
 private struct ERFusedNormRoPEParams {
+    var numHeads: UInt32
+    var numKVHeads: UInt32
+    var headDim: UInt32
+    var startPos: UInt32
+    var theta: Float
+    var scalingFactor: Float
+    var rmsEps: Float
+}
+
+private struct ERFusedNormRoPEPrefillParams {
+    var seqLen: UInt32
     var numHeads: UInt32
     var numKVHeads: UInt32
     var headDim: UInt32
@@ -4166,6 +4365,7 @@ private struct LayerWeightBuffers {
     let wv: MTLBuffer!
     let wo: MTLBuffer!
     let packedPrefillAttention: PackedPrefillAttentionWeights?
+    let packedPrefillAttentionHalfQKV: PackedPrefillAttentionHalfQKVWeights?
     let qNorm: MTLBuffer?  // Per-head Q RMSNorm weight [headDim] (Qwen3)
     let kNorm: MTLBuffer?  // Per-head K RMSNorm weight [headDim] (Qwen3)
     let ffnNorm: MTLBuffer
@@ -4197,6 +4397,18 @@ private struct PackedPrefillAttentionWeights {
     let wo: PackedPrefillWeight
 }
 
+private struct PackedPrefillHalfWeight {
+    let buffer: MTLBuffer
+    let rows: Int
+    let cols: Int
+}
+
+private struct PackedPrefillAttentionHalfQKVWeights {
+    let wq: PackedPrefillHalfWeight
+    let wk: PackedPrefillHalfWeight
+    let wv: PackedPrefillHalfWeight
+}
+
 private struct PackedPrefillFFNWeights {
     let gate: PackedPrefillWeight
     let up: PackedPrefillWeight
@@ -4205,12 +4417,15 @@ private struct PackedPrefillFFNWeights {
 
 private struct PrefillScratchViews {
     let normed: MTLBuffer
+    let normedHalf: MTLBuffer
     let afterAttn: MTLBuffer
     let ffnNormed: MTLBuffer
     let outputA: MTLBuffer
     let outputB: MTLBuffer
     let allQ: MTLBuffer
+    let allQHalf: MTLBuffer
     let allK: MTLBuffer
+    let allKHalf: MTLBuffer
     let ropeQ: MTLBuffer
     let ropeK: MTLBuffer
     let attnOut: MTLBuffer

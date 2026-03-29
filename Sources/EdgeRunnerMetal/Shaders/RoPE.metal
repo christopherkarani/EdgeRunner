@@ -81,6 +81,17 @@ struct ERFusedNormRoPEParams {
     float rmsEps;
 };
 
+struct ERFusedNormRoPEPrefillParams {
+    uint seqLen;
+    uint numHeads;
+    uint numKVHeads;
+    uint headDim;
+    uint startPos;
+    float theta;
+    float scalingFactor;
+    float rmsEps;
+};
+
 kernel void fused_qk_norm_rope_neox(
     device const float *Q [[buffer(0)]],
     device const float *K [[buffer(1)]],
@@ -134,6 +145,67 @@ kernel void fused_qk_norm_rope_neox(
     } else {
         outK[hb + dimPair] = half(o0);
         outK[hb + dimPair + halfDim] = half(o1);
+    }
+}
+
+kernel void fused_qk_norm_rope_neox_prefill_f16in(
+    device const half *Q [[buffer(0)]],
+    device const half *K [[buffer(1)]],
+    device const float *qNormW [[buffer(2)]],
+    device const float *kNormW [[buffer(3)]],
+    device float *outQ [[buffer(4)]],
+    device half *outK [[buffer(5)]],
+    constant ERFusedNormRoPEPrefillParams &p [[buffer(6)]],
+    uint3 tid [[thread_position_in_grid]],
+    uint3 tgTid [[thread_position_in_threadgroup]]
+) {
+    uint dimPair = tid.x;
+    uint headIdx = tid.y;
+    uint seq = tid.z;
+    uint halfDim = p.headDim / 2;
+    uint totalHeads = p.numHeads + p.numKVHeads;
+    if (dimPair >= halfDim || headIdx >= totalHeads || seq >= p.seqLen) return;
+
+    bool isQ = headIdx < p.numHeads;
+    uint head = isQ ? headIdx : (headIdx - p.numHeads);
+    uint inputHeadCount = isQ ? p.numHeads : p.numKVHeads;
+    uint base = (seq * inputHeadCount + head) * p.headDim;
+    device const half *src = isQ ? Q : K;
+    device const float *nw = isQ ? qNormW : kNormW;
+
+    float raw0 = float(src[base + dimPair]);
+    float raw1 = float(src[base + dimPair + halfDim]);
+
+    float pairSq = raw0 * raw0 + raw1 * raw1;
+    float sumSq = simd_sum(pairSq);
+    threadgroup float tgSq[2];
+    uint sgIdx = tgTid.x / 32;
+    if ((tgTid.x % 32) == 0) {
+        tgSq[sgIdx] = sumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumSq = tgSq[0] + tgSq[1];
+
+    float rs = rsqrt(sumSq / float(p.headDim) + p.rmsEps);
+    float x0 = raw0 * rs * nw[dimPair];
+    float x1 = raw1 * rs * nw[dimPair + halfDim];
+
+    float exp = float(2 * dimPair) / float(p.headDim);
+    float freq = 1.0f / pow(p.theta, exp);
+    float angle = float(seq + p.startPos) * (freq / p.scalingFactor);
+    float c = cos(angle);
+    float s = sin(angle);
+    float o0 = x0 * c - x1 * s;
+    float o1 = x0 * s + x1 * c;
+
+    if (isQ) {
+        uint outBase = (seq * p.numHeads + head) * p.headDim;
+        outQ[outBase + dimPair] = o0;
+        outQ[outBase + dimPair + halfDim] = o1;
+    } else {
+        uint outBase = (seq * p.numKVHeads + head) * p.headDim;
+        outK[outBase + dimPair] = half(o0);
+        outK[outBase + dimPair + halfDim] = half(o1);
     }
 }
 
@@ -231,6 +303,28 @@ kernel void fused_qk_norm_rope_gqa(
     uint kvHead = headIdx / (p.numHeads / p.numKVHeads);  // GQA grouping
     uint kvStride = p.numKVHeads * p.headDim;
 
+    // The newest K slice is written by separate K threadgroups in this same dispatch.
+    // Metal provides no cross-threadgroup barrier, so Q threadgroups must not read that
+    // just-written position back out of global cache. Instead, each Q head recomputes the
+    // current-token K vector for its shared kvHead locally and uses that value only for the
+    // current position; K threadgroups still write the canonical cache slice for future steps.
+    uint kvBaseCurrent = kvHead * p.headDim;
+    float raw_k_a0 = K[kvBaseCurrent + dimIdx];
+    float raw_k_a1 = K[kvBaseCurrent + dimIdx + halfDim];
+    float raw_k_b0 = K[kvBaseCurrent + dimIdx + 32];
+    float raw_k_b1 = K[kvBaseCurrent + dimIdx + 32 + halfDim];
+    float kSq = raw_k_a0 * raw_k_a0 + raw_k_a1 * raw_k_a1 + raw_k_b0 * raw_k_b0 + raw_k_b1 * raw_k_b1;
+    float kSumSq = simd_sum(kSq);
+    float kRs = rsqrt(kSumSq / float(p.headDim) + p.rmsEps);
+    float k_a0 = raw_k_a0 * kRs * kNormW[dimIdx];
+    float k_a1 = raw_k_a1 * kRs * kNormW[dimIdx + halfDim];
+    float k_b0 = raw_k_b0 * kRs * kNormW[dimIdx + 32];
+    float k_b1 = raw_k_b1 * kRs * kNormW[dimIdx + 32 + halfDim];
+    float current_k_a0 = k_a0 * ca - k_a1 * sa;
+    float current_k_a1 = k_a0 * sa + k_a1 * ca;
+    float current_k_b0 = k_b0 * cb - k_b1 * sb;
+    float current_k_b1 = k_b0 * sb + k_b1 * cb;
+
     float runMax = -INFINITY;
     float runSum = 0.0f;
     float acc_a0 = 0.0f, acc_a1 = 0.0f, acc_b0 = 0.0f, acc_b1 = 0.0f;
@@ -239,10 +333,21 @@ kernel void fused_qk_norm_rope_gqa(
         uint kvBase = kv * kvStride + kvHead * p.headDim;
 
         // Dot product: Q[head] . K[kv, kvHead] — 4 elements per thread
-        float dk_a0 = float(kCache[kvBase + dimIdx]);
-        float dk_a1 = float(kCache[kvBase + dimIdx + halfDim]);
-        float dk_b0 = float(kCache[kvBase + dimIdx + 32]);
-        float dk_b1 = float(kCache[kvBase + dimIdx + 32 + halfDim]);
+        float dk_a0;
+        float dk_a1;
+        float dk_b0;
+        float dk_b1;
+        if (kv == p.startPos) {
+            dk_a0 = current_k_a0;
+            dk_a1 = current_k_a1;
+            dk_b0 = current_k_b0;
+            dk_b1 = current_k_b1;
+        } else {
+            dk_a0 = float(kCache[kvBase + dimIdx]);
+            dk_a1 = float(kCache[kvBase + dimIdx + halfDim]);
+            dk_b0 = float(kCache[kvBase + dimIdx + 32]);
+            dk_b1 = float(kCache[kvBase + dimIdx + 32 + halfDim]);
+        }
 
         float partial = q_a0 * dk_a0 + q_a1 * dk_a1 + q_b0 * dk_b0 + q_b1 * dk_b1;
         float score = simd_sum(partial) * p.attnScale;  // full dot product, NO barrier!
