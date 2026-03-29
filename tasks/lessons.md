@@ -23,6 +23,7 @@
 - The aggressive decode kernel benefits from a small strided tile because it reduces how often online-softmax has to rescale 128-dim partial outputs. A 4-row tile improved both the isolated decode kernel and the real 512/1024 benchmarks; pushing that tile deeper to 8 rows improved the microbenchmark but regressed the real benchmark.
 - Parallelizing the aggressive decode Hadamard transforms across the 16-lane decode threadgroup regressed the kernel on this GPU. Keep the decode-threadgroup Hadamards lane-0 serial unless a change beats the isolated breakdown harness and the real smoke/benchmark gates.
 - Shortening the aggressive pack code in lane 0 is not enough evidence for a keep. A direct fixed-plane pack rewrite reduced the fused quantizer microbenchmark but still regressed the real 512/1024 TurboQuant runs, so microbenchmark wins on the pack stage must clear the real long-context benchmark before they count.
+- In the tiled aggressive decode kernel, online-softmax max updates should not immediately rescale all 128 partial output channels. Tracking a per-lane accumulation scale and folding it into the final reduction improved the isolated decode kernel and survived the real 512/1024 benchmark plus exact smoke.
 
 ## 2026-03-16
 - Verify the actual milestone baseline from the repo before starting execution. This workspace is mid-M2, so M3/M4 implementation prompts must be deferred until M2 is complete and verified locally.

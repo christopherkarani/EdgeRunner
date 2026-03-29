@@ -1084,6 +1084,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     threadgroup float laneMax[kDecodeThreads];
     threadgroup float laneSum[kDecodeThreads];
     threadgroup float laneScale[kDecodeThreads];
+    threadgroup float laneAccumulationScale[kDecodeThreads];
     threadgroup float reductionScratch[kDecodeThreads];
     threadgroup float globalMax;
     threadgroup float globalSum;
@@ -1114,6 +1115,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
 
     float runningMax = -INFINITY;
     float runningSum = 0.0;
+    float accumulationScale = 1.0;
 
     for (uint kvBase = lane; kvBase < kvLimit; kvBase += kDecodeThreads * kTileRows) {
         float tileScores[kTileRows];
@@ -1174,6 +1176,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
         }
 
         float nextMax = max(runningMax, tileMax);
+        bool maxAdvanced = tileMax > runningMax;
         float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
         float tileSum = 0.0;
         for (uint tile = 0; tile < kTileRows; ++tile) {
@@ -1190,9 +1193,15 @@ kernel void gqa_attention_turboquant_decode_aggressive(
         runningSum = runningSum * correction + tileSum;
         runningMax = nextMax;
 
-        for (uint dim = 0; dim < 128; ++dim) {
-            laneOutputMSE[dim] *= correction;
-            laneOutputResidual[dim] *= correction;
+        if (maxAdvanced && runningSum > tileSum) {
+            accumulationScale *= correction;
+            if (accumulationScale < 1.0e-6f) {
+                for (uint dim = 0; dim < 128; ++dim) {
+                    laneOutputMSE[dim] *= accumulationScale;
+                    laneOutputResidual[dim] *= accumulationScale;
+                }
+                accumulationScale = 1.0f;
+            }
         }
 
         for (uint tile = 0; tile < kTileRows; ++tile) {
@@ -1206,8 +1215,8 @@ kernel void gqa_attention_turboquant_decode_aggressive(
             device const float *vMetaRow = VMetadata + rowIndex * 2;
             float valueRowNorm = vMetaRow[0];
             float valueResidualNorm = vMetaRow[1];
-            float mseScale = prob * valueRowNorm;
-            float residualScale = prob * valueRowNorm * valueResidualNorm;
+            float mseScale = (prob * valueRowNorm) / accumulationScale;
+            float residualScale = (prob * valueRowNorm * valueResidualNorm) / accumulationScale;
 
             for (uint block = 0; block < 4; ++block) {
                 uint signWord = vSignRow[block];
@@ -1253,6 +1262,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
 
     float localScale = runningSum > 0.0 ? exp(runningMax - globalMax) : 0.0;
     laneScale[lane] = localScale;
+    laneAccumulationScale[lane] = accumulationScale;
     reductionScratch[lane] = runningSum * localScale;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1271,7 +1281,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
         float mseAccum = 0.0;
         float residualAccum = 0.0;
         for (uint worker = 0; worker < kDecodeThreads; ++worker) {
-            float workerScale = laneScale[worker];
+            float workerScale = laneScale[worker] * laneAccumulationScale[worker];
             mseAccum += partialMSE[worker * 128 + dim] * workerScale;
             residualAccum += partialResidual[worker * 128 + dim] * workerScale;
         }

@@ -810,14 +810,38 @@ See benchmarks/experiment_log.md
   - benchmark case selector (`fp16` vs `aggressive` isolation)
   - aggressive small-row decode quantizer (`32` threads)
   - fused aggressive decode-time K/V quantize dispatch
+  - lazy aggressive decode-output rescaling, so max advances no longer force a 128-dim accumulator rescale on every tiled step
 - Rejected:
   - aggressive decode-native `11`-word runtime row
   - aggressive prefill fast path / specialized prefill kernel variants
   - `64`-thread aggressive small-row quantizer
 - Current isolated benchmark points:
   - `prompt_len=16`, `decode_tokens=1`: `20.38 tok/s`, `437.40 ms` TTFT
-  - `prompt_len=512`, `decode_tokens=4`: `14.60 tok/s`, `4637.16 ms` TTFT
-  - `prompt_len=1024`, `decode_tokens=4`: `11.21 tok/s`, `8726.37 ms` TTFT
+  - `prompt_len=512`, `decode_tokens=4`: `15.49 tok/s`, `5496.40 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.33 tok/s`, `8957.69 ms` TTFT
+
+## TurboQuant Decode Lazy Rescale
+
+## Plan
+- [x] Remove unconditional per-tile 128-dim rescaling from the aggressive tiled decode kernel.
+- [x] Preserve exact online-softmax math by tracking a per-lane accumulation scale and folding it into the final reduction.
+- [x] Re-run parity, exact smoke, isolated breakdown, and long-context aggressive benchmarks.
+
+## Review
+- `gqa_attention_turboquant_decode_aggressive` now tracks a per-lane accumulation scale instead of multiplying all 128 partial outputs whenever the running max advances.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Isolated breakdown point:
+  - `turboquant_decode_attention_ms=1.004`
+  - `turboquant_small_quantize_kv_ms=0.780`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `15.49 tok/s`, `5496.40 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.33 tok/s`, `8957.69 ms` TTFT
+- Current conclusion: this is a real decode-side keep. It does not unlock the paper’s claims, but it materially reduces the remaining aggressive decode tax and keeps the exact smoke trace intact.
 # Exact Path Rewrite Program
 
 ## Goal
