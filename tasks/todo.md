@@ -836,8 +836,13 @@ See benchmarks/experiment_log.md
   - `swift build -c release` passed.
   - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8`, median decode `218.8 tok/s`, and median TTFT `3.8 ms`.
   - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner median `1910.0 tok/s` prompt throughput, `536.1 ms` TTFT, and `60.31 tok/s` long-context decode.
+- Verification for the kept split-KV packed decode slice:
+  - `swift build -c release` passed.
+  - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8`, median decode `211.9 tok/s`, and median TTFT `4.1 ms`.
+  - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner median `1926.9 tok/s` prompt throughput, `531.4 ms` TTFT, and `150.91 tok/s` long-context decode.
 - Interpretation:
   - These are bounded production-safe improvements to exact prefill structure and exact attention math, not the full prefill rewrite.
-  - Prompt throughput and TTFT have improved materially again, and the packed long-KV decode path remains stable around `60 tok/s`, but the remaining MLX gap is still architectural.
+  - Prompt throughput and TTFT have improved materially again, and the long-KV exact decode path now has a real architectural win instead of a marginal kernel tweak.
+  - The remaining MLX gap is now primarily prompt-side throughput and TTFT, with decode still behind but much closer than before.
 
 # Long-Prompt MLX vs EdgeRunner Benchmark

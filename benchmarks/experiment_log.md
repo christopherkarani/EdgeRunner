@@ -782,3 +782,19 @@ The optimization removes redundant float32 weight caches that existed for a pref
     - long-context decode: `60.31 tok/s`
 - **Result:** KEPT. This is a production-safe prompt-side bandwidth win: prompt throughput improved again and TTFT dropped, while long-KV decode stayed flat and the canonical short-decode benchmark remained deterministic.
 - **Status:** KEPT
+
+### Experiment 41: Split-KV Packed Long-Context Decode
+- **Hypothesis:** The packed long-KV decode kernel still uses one simdgroup per head and scans the entire KV cache serially, which caps decode around `60 tok/s`. Splitting the KV range into per-head blocks, computing exact partial softmax state per block, then reducing those blocks in a second pass should unlock much more KV parallelism without changing semantics.
+- **Change:**
+  - Added `gqa_decode_attention_packed_f16kv_partial` and `gqa_decode_attention_packed_f16kv_reduce`, a two-pass exact packed long-KV decode path.
+  - Added persistent scratch buffers for packed long-KV partial maxima, sums, and weighted-value accumulators.
+  - Routed the packed long-KV decode helper to use the split-KV path for large contexts while preserving the existing one-pass kernel for smaller KV lengths.
+- **Verification:**
+  - `swift build -c release` passed.
+  - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic token hash `0afae14a84cf0df8`, median decode `211.9 tok/s`, and median TTFT `4.1 ms`.
+  - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner medians:
+    - prompt throughput: `1926.9 tok/s`
+    - TTFT: `531.4 ms`
+    - long-context decode: `150.91 tok/s`
+- **Result:** KEPT. This is the first large decode-side architectural win on the long-prompt benchmark: long-context decode jumped by roughly `2.5x` while the prompt-side gains were preserved and the canonical short benchmark remained deterministic.
+- **Status:** KEPT

@@ -102,6 +102,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // @unchecked Sendable: Metal device/queue are thread-safe; KVCache uses Mutex internally.
 
     public static let modelIdentifier = "llama"
+    private static let packedLongKVSplitBlockSize = 128
+    private static let packedLongKVSplitThreshold = 512
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
@@ -141,6 +143,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let packedDecodeCachePipeline: MTLComputePipelineState
     private let packedDecodeCachePairPipeline: MTLComputePipelineState
     private let packedLongKVAttentionPipeline: MTLComputePipelineState
+    private let packedLongKVAttentionPartialPipeline: MTLComputePipelineState
+    private let packedLongKVAttentionReducePipeline: MTLComputePipelineState
     private let promptFlashGQAF16KVPipeline: MTLComputePipelineState
 
     // Dequantization kernels
@@ -251,6 +255,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.packedDecodeCachePipeline = try registry.pipeline(for: "pack_kv_decode_cache_f16")
         self.packedDecodeCachePairPipeline = try registry.pipeline(for: "pack_kv_decode_cache_pair_f16")
         self.packedLongKVAttentionPipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv")
+        self.packedLongKVAttentionPartialPipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv_partial")
+        self.packedLongKVAttentionReducePipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv_reduce")
         self.promptFlashGQAF16KVPipeline = try registry.pipeline(for: "flash_attention_gqa_simd_qf32_kvf16")
 
         // Initialize dequant kernels
@@ -346,6 +352,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             return buf
         }
 
+        let maxPackedLongKVBlocks = (effectiveMaxSeq + Self.packedLongKVSplitBlockSize - 1) / Self.packedLongKVSplitBlockSize
+        let packedLongKVPartialCount = maxPackedLongKVBlocks * config.headCount
+
         self.scratch = try ScratchBuffers(
             normed: allocBuffer(maxSeq * dim * fs),
             afterAttn: allocBuffer(maxSeq * dim * fs),
@@ -365,7 +374,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             downOut: allocBuffer(maxSeq * dim * fs),
             finalOut: allocBuffer(maxSeq * dim * fs),
             logits: allocBuffer(config.vocabSize * fs),
-            decodeHidden: allocBuffer(dim * fs)
+            decodeHidden: allocBuffer(dim * fs),
+            packedLongKVPartialMax: allocBuffer(packedLongKVPartialCount * fs),
+            packedLongKVPartialSum: allocBuffer(packedLongKVPartialCount * fs),
+            packedLongKVPartialAcc: allocBuffer(packedLongKVPartialCount * config.headDim * fs)
         )
 
         // Initialize Metal 4 state if available (macOS 26+)
@@ -1989,7 +2001,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
-        let packedLongKVGQAPSO = packedLongKVAttentionPipeline
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
         let convertF32ToF16PSO = convertF32ToF16Pipeline
@@ -2250,22 +2261,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                             if !decodeDebugOptions.disableKVCacheBarrier {
                                 enc.memoryBarrier(scope: .buffers)
                             }
-                            var p = (
-                                UInt32(numHeads),
-                                UInt32(numKVHeads),
-                                UInt32(headDim),
-                                UInt32(totalKVLen),
-                                Float(1.0 / sqrt(Float(headDim)))
-                            )
-                            enc.setComputePipelineState(packedLongKVGQAPSO)
-                            enc.setBuffer(ropeQOutput, offset: 0, index: 0)
-                            enc.setBuffer(layerKPackedDecodeCache!, offset: 0, index: 1)
-                            enc.setBuffer(layerVPackedDecodeCache!, offset: 0, index: 2)
-                            enc.setBuffer(attnOutBuf, offset: 0, index: 3)
-                            enc.setBytes(&p, length: 4 * MemoryLayout<UInt32>.stride + MemoryLayout<Float>.stride, index: 4)
-                            enc.dispatchThreads(
-                                MTLSize(width: 32, height: numHeads, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                            encodePackedLongKVAttention(
+                                encoder: enc,
+                                query: ropeQOutput,
+                                keyCache: layerKPackedDecodeCache!,
+                                valueCache: layerVPackedDecodeCache!,
+                                output: attnOutBuf,
+                                totalKVLen: totalKVLen
                             )
                         } else {
                             let groupSize = numHeads / numKVHeads
@@ -2493,7 +2495,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         let fusedQKVPSO = fusedQKVPipeline
         let megaPSO = fusedNormRoPEGQAPipeline
-        let packedLongKVGQAPSO = packedLongKVAttentionPipeline
         let gemvAddPSO = gemvAddPipeline
         let fusedGUSPSO = fusedGateUpSiluPipeline
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
@@ -2654,21 +2655,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.memoryBarrier(scope: .buffers)
                 }
 
-                var packedP = (
-                    UInt32(numHeads),
-                    UInt32(numKVHeads),
-                    UInt32(headDim),
-                    UInt32(totalKVLen),
-                    Float(1.0 / sqrt(Float(headDim)))
+                encodePackedLongKVAttention(
+                    encoder: enc,
+                    query: allQBuf,
+                    keyCache: layerKPackedDecodeCache,
+                    valueCache: layerVPackedDecodeCache,
+                    output: attnOutBuf,
+                    totalKVLen: totalKVLen
                 )
-                enc.setComputePipelineState(packedLongKVGQAPSO)
-                enc.setBuffer(allQBuf, offset: 0, index: 0)
-                enc.setBuffer(layerKPackedDecodeCache, offset: 0, index: 1)
-                enc.setBuffer(layerVPackedDecodeCache, offset: 0, index: 2)
-                enc.setBuffer(attnOutBuf, offset: 0, index: 3)
-                enc.setBytes(&packedP, length: 4 * MemoryLayout<UInt32>.stride + MemoryLayout<Float>.stride, index: 4)
-                enc.dispatchThreads(MTLSize(width: 32, height: numHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             } else {
                 enc.setComputePipelineState(megaPSO)
                 enc.setBuffer(allQBuf, offset: 0, index: 0)
@@ -3731,6 +3725,76 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         currentPos >= 256
     }
 
+    private func shouldUseSplitPackedLongKVDecode(totalKVLen: Int) -> Bool {
+        totalKVLen >= Self.packedLongKVSplitThreshold
+    }
+
+    private func encodePackedLongKVAttention(
+        encoder: MTLComputeCommandEncoder,
+        query: MTLBuffer,
+        keyCache: MTLBuffer,
+        valueCache: MTLBuffer,
+        output: MTLBuffer,
+        totalKVLen: Int
+    ) {
+        if shouldUseSplitPackedLongKVDecode(totalKVLen: totalKVLen) {
+            let blockCount = (totalKVLen + Self.packedLongKVSplitBlockSize - 1) / Self.packedLongKVSplitBlockSize
+            var params = (
+                UInt32(config.headCount),
+                UInt32(config.kvHeadCount),
+                UInt32(config.headDim),
+                UInt32(totalKVLen),
+                UInt32(Self.packedLongKVSplitBlockSize),
+                UInt32(blockCount),
+                Float(1.0 / sqrt(Float(config.headDim)))
+            )
+            encoder.setComputePipelineState(packedLongKVAttentionPartialPipeline)
+            encoder.setBuffer(query, offset: 0, index: 0)
+            encoder.setBuffer(keyCache, offset: 0, index: 1)
+            encoder.setBuffer(valueCache, offset: 0, index: 2)
+            encoder.setBuffer(scratch.packedLongKVPartialMax, offset: 0, index: 3)
+            encoder.setBuffer(scratch.packedLongKVPartialSum, offset: 0, index: 4)
+            encoder.setBuffer(scratch.packedLongKVPartialAcc, offset: 0, index: 5)
+            encoder.setBytes(&params, length: 6 * MemoryLayout<UInt32>.stride + MemoryLayout<Float>.stride, index: 6)
+            encoder.dispatchThreads(
+                MTLSize(width: 32, height: config.headCount, depth: blockCount),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+            )
+            if !decodeDebugOptions.disableKVCacheBarrier {
+                encoder.memoryBarrier(scope: .buffers)
+            }
+            encoder.setComputePipelineState(packedLongKVAttentionReducePipeline)
+            encoder.setBuffer(scratch.packedLongKVPartialMax, offset: 0, index: 0)
+            encoder.setBuffer(scratch.packedLongKVPartialSum, offset: 0, index: 1)
+            encoder.setBuffer(scratch.packedLongKVPartialAcc, offset: 0, index: 2)
+            encoder.setBuffer(output, offset: 0, index: 3)
+            encoder.setBytes(&params, length: 6 * MemoryLayout<UInt32>.stride + MemoryLayout<Float>.stride, index: 4)
+            encoder.dispatchThreads(
+                MTLSize(width: 32, height: config.headCount, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+            )
+            return
+        }
+
+        var params = (
+            UInt32(config.headCount),
+            UInt32(config.kvHeadCount),
+            UInt32(config.headDim),
+            UInt32(totalKVLen),
+            Float(1.0 / sqrt(Float(config.headDim)))
+        )
+        encoder.setComputePipelineState(packedLongKVAttentionPipeline)
+        encoder.setBuffer(query, offset: 0, index: 0)
+        encoder.setBuffer(keyCache, offset: 0, index: 1)
+        encoder.setBuffer(valueCache, offset: 0, index: 2)
+        encoder.setBuffer(output, offset: 0, index: 3)
+        encoder.setBytes(&params, length: 4 * MemoryLayout<UInt32>.stride + MemoryLayout<Float>.stride, index: 4)
+        encoder.dispatchThreads(
+            MTLSize(width: 32, height: config.headCount, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+        )
+    }
+
     /// Fills embedding rows directly into the destination buffer, avoiding an intermediate array.
     private func fillEmbeddings(
         tokenIDs: [Int],
@@ -3936,7 +4000,8 @@ private final class Metal4State: @unchecked Sendable {
             scratch.outputA, scratch.outputB, scratch.allQ, scratch.allK,
             scratch.allV, scratch.ropeQ, scratch.attnOut, scratch.proj,
             scratch.gateOut, scratch.upOut, scratch.activ, scratch.downOut,
-            scratch.finalOut, scratch.logits, scratch.decodeHidden
+            scratch.finalOut, scratch.logits, scratch.decodeHidden,
+            scratch.packedLongKVPartialMax, scratch.packedLongKVPartialSum, scratch.packedLongKVPartialAcc
         ]
         for buf in scratchBuffers {
             residencySet.addAllocation(buf)
@@ -4019,6 +4084,9 @@ private struct ScratchBuffers: @unchecked Sendable {
     let finalOut: MTLBuffer
     let logits: MTLBuffer
     let decodeHidden: MTLBuffer  // Pre-allocated embedding buffer for decode (dim × float)
+    let packedLongKVPartialMax: MTLBuffer
+    let packedLongKVPartialSum: MTLBuffer
+    let packedLongKVPartialAcc: MTLBuffer
 }
 
 // MARK: - Fused QKV Params (matches Metal ERFusedQKVParams layout)

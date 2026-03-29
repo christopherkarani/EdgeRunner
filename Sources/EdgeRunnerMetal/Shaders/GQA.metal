@@ -320,6 +320,16 @@ struct ERPackedDecodeGQAParams {
     float scale;
 };
 
+struct ERPackedDecodeSplitKVParams {
+    uint numHeads;
+    uint numKVHeads;
+    uint headDim;
+    uint kvSeqLen;
+    uint kvBlockSize;
+    uint blockCount;
+    float scale;
+};
+
 kernel void gqa_decode_attention_packed_f16kv(
     device const float *Q [[buffer(0)]],
     device const half *K [[buffer(1)]],
@@ -379,6 +389,128 @@ kernel void gqa_decode_attention_packed_f16kv(
         acc3 = acc3 * correction + prob * float(packedV[3]);
     }
 
+    float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
+    O[qBase + lane] = acc0 * invSum;
+    O[qBase + lane + 32] = acc1 * invSum;
+    O[qBase + lane + 64] = acc2 * invSum;
+    O[qBase + lane + 96] = acc3 * invSum;
+}
+
+kernel void gqa_decode_attention_packed_f16kv_partial(
+    device const float *Q [[buffer(0)]],
+    device const half *K [[buffer(1)]],
+    device const half *V [[buffer(2)]],
+    device float *partialMax [[buffer(3)]],
+    device float *partialSum [[buffer(4)]],
+    device float *partialAcc [[buffer(5)]],
+    constant ERPackedDecodeSplitKVParams &params [[buffer(6)]],
+    uint3 tid [[thread_position_in_grid]]
+) {
+    uint lane = tid.x;
+    uint headIndex = tid.y;
+    uint blockIndex = tid.z;
+    if (lane >= 32 || headIndex >= params.numHeads || blockIndex >= params.blockCount) return;
+
+    uint groupSize = params.numHeads / params.numKVHeads;
+    uint kvHeadIndex = headIndex / groupSize;
+    uint qBase = headIndex * params.headDim;
+    uint blockStart = blockIndex * params.kvBlockSize;
+    uint blockEnd = min(blockStart + params.kvBlockSize, params.kvSeqLen);
+
+    float q0 = Q[qBase + lane];
+    float q1 = Q[qBase + lane + 32];
+    float q2 = Q[qBase + lane + 64];
+    float q3 = Q[qBase + lane + 96];
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+
+    for (uint kv = blockStart; kv < blockEnd; ++kv) {
+        uint kvBase = (kv * params.numKVHeads + kvHeadIndex) * params.headDim + lane * 4;
+        half4 packedK = *reinterpret_cast<const device half4 *>(K + kvBase);
+        float partial = q0 * float(packedK[0]) +
+            q1 * float(packedK[1]) +
+            q2 * float(packedK[2]) +
+            q3 * float(packedK[3]);
+        float score = simd_sum(partial) * params.scale;
+
+        float nextRunMax = runMax;
+        float nextRunSum = runSum;
+        float correction = 1.0f;
+        float prob = 0.0f;
+        if (lane == 0) {
+            float oldMax = runMax;
+            nextRunMax = max(runMax, score);
+            correction = exp(oldMax - nextRunMax);
+            prob = exp(score - nextRunMax);
+            nextRunSum = runSum * correction + prob;
+        }
+        runMax = simd_broadcast_first(nextRunMax);
+        runSum = simd_broadcast_first(nextRunSum);
+        correction = simd_broadcast_first(correction);
+        prob = simd_broadcast_first(prob);
+
+        half4 packedV = *reinterpret_cast<const device half4 *>(V + kvBase);
+        acc0 = acc0 * correction + prob * float(packedV[0]);
+        acc1 = acc1 * correction + prob * float(packedV[1]);
+        acc2 = acc2 * correction + prob * float(packedV[2]);
+        acc3 = acc3 * correction + prob * float(packedV[3]);
+    }
+
+    uint partialIndex = blockIndex * params.numHeads + headIndex;
+    uint partialBase = partialIndex * params.headDim;
+    partialAcc[partialBase + lane] = acc0;
+    partialAcc[partialBase + lane + 32] = acc1;
+    partialAcc[partialBase + lane + 64] = acc2;
+    partialAcc[partialBase + lane + 96] = acc3;
+    if (lane == 0) {
+        partialMax[partialIndex] = runMax;
+        partialSum[partialIndex] = runSum;
+    }
+}
+
+kernel void gqa_decode_attention_packed_f16kv_reduce(
+    device const float *partialMax [[buffer(0)]],
+    device const float *partialSum [[buffer(1)]],
+    device const float *partialAcc [[buffer(2)]],
+    device float *O [[buffer(3)]],
+    constant ERPackedDecodeSplitKVParams &params [[buffer(4)]],
+    uint2 tid [[thread_position_in_grid]]
+) {
+    uint lane = tid.x;
+    uint headIndex = tid.y;
+    if (lane >= 32 || headIndex >= params.numHeads) return;
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+
+    for (uint blockIndex = 0; blockIndex < params.blockCount; ++blockIndex) {
+        uint partialIndex = blockIndex * params.numHeads + headIndex;
+        uint partialBase = partialIndex * params.headDim;
+        float blockMax = partialMax[partialIndex];
+        float blockSum = partialSum[partialIndex];
+
+        float nextRunMax = max(runMax, blockMax);
+        float correction = exp(runMax - nextRunMax);
+        float blockCorrection = exp(blockMax - nextRunMax);
+
+        acc0 = acc0 * correction + partialAcc[partialBase + lane] * blockCorrection;
+        acc1 = acc1 * correction + partialAcc[partialBase + lane + 32] * blockCorrection;
+        acc2 = acc2 * correction + partialAcc[partialBase + lane + 64] * blockCorrection;
+        acc3 = acc3 * correction + partialAcc[partialBase + lane + 96] * blockCorrection;
+        runSum = runSum * correction + blockSum * blockCorrection;
+        runMax = nextRunMax;
+    }
+
+    uint qBase = headIndex * params.headDim;
     float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
     O[qBase + lane] = acc0 * invSum;
     O[qBase + lane + 32] = acc1 * invSum;
