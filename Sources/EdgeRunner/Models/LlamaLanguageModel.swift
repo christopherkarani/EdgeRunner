@@ -138,6 +138,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEHalfPrefillPipeline: MTLComputePipelineState
+    private let fusedQKNormRoPEHalfPrefillPackedKPipeline: MTLComputePipelineState
     private let fusedNormRoPEGQAPipeline: MTLComputePipelineState
     private let fusedFinalNormGemvPipeline: MTLComputePipelineState
     private let gemvAddPipeline: MTLComputePipelineState
@@ -147,6 +148,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let packedLongKVAttentionPartialPipeline: MTLComputePipelineState
     private let packedLongKVAttentionReducePipeline: MTLComputePipelineState
     private let promptFlashGQAF16KVPipeline: MTLComputePipelineState
+    private let promptFlashGQAPackedKF16VPipeline: MTLComputePipelineState
+    private let promptFlashGQAKVPackedPipeline: MTLComputePipelineState
 
     // Dequantization kernels
     private let dequantQ4_0: DequantQ4_0Kernel
@@ -251,6 +254,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
         self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
         self.fusedQKNormRoPEHalfPrefillPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox_prefill_f16in")
+        self.fusedQKNormRoPEHalfPrefillPackedKPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox_prefill_f16in_kpacked")
         self.fusedNormRoPEGQAPipeline = try registry.pipeline(for: "fused_qk_norm_rope_gqa")
         self.fusedFinalNormGemvPipeline = try registry.pipeline(for: "dequant_q8_0_fused_final_norm_gemv")
         self.gemvAddPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_add")
@@ -260,6 +264,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.packedLongKVAttentionPartialPipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv_partial")
         self.packedLongKVAttentionReducePipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv_reduce")
         self.promptFlashGQAF16KVPipeline = try registry.pipeline(for: "flash_attention_gqa_simd_qf32_kvf16")
+        self.promptFlashGQAPackedKF16VPipeline = try registry.pipeline(for: "flash_attention_gqa_simd_qf32_kpacked_vf16")
+        self.promptFlashGQAKVPackedPipeline = try registry.pipeline(for: "flash_attention_gqa_simd_qf32_kvpacked")
 
         // Initialize dequant kernels
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
@@ -1310,6 +1316,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let addPSO = addPipeline
         let convertF32ToF16PSO = convertF32ToF16Pipeline
         let fusedQKNormRoPEHalfPrefillPSO = fusedQKNormRoPEHalfPrefillPipeline
+        let fusedQKNormRoPEHalfPrefillPackedKPSO = fusedQKNormRoPEHalfPrefillPackedKPipeline
+        let promptFlashGQAPackedKF16VPSO = promptFlashGQAPackedKF16VPipeline
+        let promptFlashGQAKVPackedPSO = promptFlashGQAKVPackedPipeline
         let halfStride = MemoryLayout<Float16>.stride
         let rmsEps = Float(config.rmsNormEpsilon)
         let ropeTheta = Float(config.ropeFreqBase)
@@ -1345,6 +1354,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let turboVCache = turboQuantEnabled ? turboQuantVCaches[layerIndex] : nil
             let turboKCache = turboQuantEnabled ? turboQuantKCaches[layerIndex] : nil
             let usePackedLongKVDecode = shouldUsePackedLongKVDecode(currentPos: startPosition + seqLen - 1)
+            let usePackedKPromptFlash =
+                usePackedLongKVDecode &&
+                usePromptFlashAttention &&
+                startPosition == 0 &&
+                layerKPackedDecodeCache != nil &&
+                layerVPackedDecodeCache != nil
 
             if useFusedQKV {
                 // Fused RMSNorm + Q+K+V: RMSNorm is computed inline for each token, and
@@ -1544,13 +1559,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     scalingFactor: 1,
                     rmsEps: rmsEps
                 )
-                enc.setComputePipelineState(fusedQKNormRoPEHalfPrefillPSO)
+                enc.setComputePipelineState(usePackedKPromptFlash ? fusedQKNormRoPEHalfPrefillPackedKPSO : fusedQKNormRoPEHalfPrefillPSO)
                 enc.setBuffer(allQHalfBuf, offset: 0, index: 0)
                 enc.setBuffer(allKHalfBuf, offset: 0, index: 1)
                 enc.setBuffer(lw.qNorm!, offset: 0, index: 2)
                 enc.setBuffer(lw.kNorm!, offset: 0, index: 3)
                 enc.setBuffer(ropeQBuf, offset: 0, index: 4)
-                enc.setBuffer(layerKCache!, offset: startPosition * kvDim * halfStride, index: 5)
+                enc.setBuffer(
+                    usePackedKPromptFlash ? layerKPackedDecodeCache! : layerKCache!,
+                    offset: startPosition * kvDim * halfStride,
+                    index: 5
+                )
                 enc.setBytes(&p, length: MemoryLayout<ERFusedNormRoPEPrefillParams>.stride, index: 6)
                 let halfDim = headDim / 2
                 enc.dispatchThreads(
@@ -1695,6 +1714,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         qOffset: startPosition
                     )
                 } else if usePromptFlashAttention {
+                    let usePackedKPromptFlashAttention = usePackedKPromptFlash && usedPackedHalfPromptAttention
+                    let usePackedKVPromptFlashAttention = usePackedKPromptFlashAttention && layerVPackedDecodeCache != nil
                     let groupSize = numHeads / numKVHeads
                     let cacheWriteOffset = startPosition * kvDim * halfStride
                     if !usedPackedHalfPromptAttention {
@@ -1710,8 +1731,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBuffer(layerKCache!, offset: cacheWriteOffset, index: 1)
                         var kConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
                         enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                            enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    } else if usePackedKVPromptFlashAttention {
+                        encodePackedDecodeCacheWrite(
+                            encoder: enc,
+                            source: layerVCache!,
+                            sourceOffset: cacheWriteOffset,
+                            destination: layerVPackedDecodeCache!,
+                            tokenCount: seqLen,
+                            destinationStartToken: startPosition
+                        )
                     }
 
                     var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
@@ -1719,10 +1749,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
                         causal: 1, kvBlockSize: 0, qBlockSize: 0,
                         kvSeqLen: UInt32(totalKVSeqLen), qOffset: UInt32(startPosition))
-                    enc.setComputePipelineState(promptFlashGQAF16KVPSO)
+                    enc.setComputePipelineState(
+                        usePackedKVPromptFlashAttention
+                            ? promptFlashGQAKVPackedPSO
+                            : (usePackedKPromptFlashAttention ? promptFlashGQAPackedKF16VPSO : promptFlashGQAF16KVPSO)
+                    )
                     enc.setBuffer(ropeQOut, offset: 0, index: 0)
-                    enc.setBuffer(layerKCache!, offset: 0, index: 1)
-                    enc.setBuffer(layerVCache!, offset: 0, index: 2)
+                    enc.setBuffer(usePackedKPromptFlashAttention ? layerKPackedDecodeCache! : layerKCache!, offset: 0, index: 1)
+                    enc.setBuffer(usePackedKVPromptFlashAttention ? layerVPackedDecodeCache! : layerVCache!, offset: 0, index: 2)
                     enc.setBuffer(attnOutBuf, offset: 0, index: 3)
                     enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
                     enc.dispatchThreads(MTLSize(width: 32, height: numHeads, depth: seqLen),
@@ -1731,17 +1765,30 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     if usePackedLongKVDecode,
                        let layerKCache, let layerVCache,
                        let layerKPackedDecodeCache, let layerVPackedDecodeCache {
-                        encodePackedDecodeCachePairWrite(
-                            encoder: enc,
-                            keySource: layerKCache,
-                            keySourceOffset: startPosition * kvDim * halfStride,
-                            valueSource: layerVCache,
-                            valueSourceOffset: startPosition * kvDim * halfStride,
-                            keyDestination: layerKPackedDecodeCache,
-                            valueDestination: layerVPackedDecodeCache,
-                            tokenCount: seqLen,
-                            destinationStartToken: startPosition
-                        )
+                        if usePackedKVPromptFlashAttention {
+                            // V was packed before attention; K was written directly in packed layout.
+                        } else if usePackedKPromptFlashAttention {
+                            encodePackedDecodeCacheWrite(
+                                encoder: enc,
+                                source: layerVCache,
+                                sourceOffset: startPosition * kvDim * halfStride,
+                                destination: layerVPackedDecodeCache,
+                                tokenCount: seqLen,
+                                destinationStartToken: startPosition
+                            )
+                        } else {
+                            encodePackedDecodeCachePairWrite(
+                                encoder: enc,
+                                keySource: layerKCache,
+                                keySourceOffset: startPosition * kvDim * halfStride,
+                                valueSource: layerVCache,
+                                valueSourceOffset: startPosition * kvDim * halfStride,
+                                keyDestination: layerKPackedDecodeCache,
+                                valueDestination: layerVPackedDecodeCache,
+                                tokenCount: seqLen,
+                                destinationStartToken: startPosition
+                            )
+                        }
                     }
                 } else {
                     let groupSize = numHeads / numKVHeads

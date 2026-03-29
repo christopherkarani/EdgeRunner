@@ -209,6 +209,73 @@ kernel void fused_qk_norm_rope_neox_prefill_f16in(
     }
 }
 
+kernel void fused_qk_norm_rope_neox_prefill_f16in_kpacked(
+    device const half *Q [[buffer(0)]],
+    device const half *K [[buffer(1)]],
+    device const float *qNormW [[buffer(2)]],
+    device const float *kNormW [[buffer(3)]],
+    device float *outQ [[buffer(4)]],
+    device half *outK [[buffer(5)]],
+    constant ERFusedNormRoPEPrefillParams &p [[buffer(6)]],
+    uint3 tid [[thread_position_in_grid]],
+    uint3 tgTid [[thread_position_in_threadgroup]]
+) {
+    uint dimPair = tid.x;
+    uint headIdx = tid.y;
+    uint seq = tid.z;
+    uint halfDim = p.headDim / 2;
+    uint totalHeads = p.numHeads + p.numKVHeads;
+    if (dimPair >= halfDim || headIdx >= totalHeads || seq >= p.seqLen) return;
+
+    bool isQ = headIdx < p.numHeads;
+    uint head = isQ ? headIdx : (headIdx - p.numHeads);
+    uint inputHeadCount = isQ ? p.numHeads : p.numKVHeads;
+    uint base = (seq * inputHeadCount + head) * p.headDim;
+    device const half *src = isQ ? Q : K;
+    device const float *nw = isQ ? qNormW : kNormW;
+
+    float raw0 = float(src[base + dimPair]);
+    float raw1 = float(src[base + dimPair + halfDim]);
+
+    float pairSq = raw0 * raw0 + raw1 * raw1;
+    float sumSq = simd_sum(pairSq);
+    threadgroup float tgSq[2];
+    uint sgIdx = tgTid.x / 32;
+    if ((tgTid.x % 32) == 0) {
+        tgSq[sgIdx] = sumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumSq = tgSq[0] + tgSq[1];
+
+    float rs = rsqrt(sumSq / float(p.headDim) + p.rmsEps);
+    float x0 = raw0 * rs * nw[dimPair];
+    float x1 = raw1 * rs * nw[dimPair + halfDim];
+
+    float exp = float(2 * dimPair) / float(p.headDim);
+    float freq = 1.0f / pow(p.theta, exp);
+    float angle = float(seq + p.startPos) * (freq / p.scalingFactor);
+    float c = cos(angle);
+    float s = sin(angle);
+    float o0 = x0 * c - x1 * s;
+    float o1 = x0 * s + x1 * c;
+
+    if (isQ) {
+        uint outBase = (seq * p.numHeads + head) * p.headDim;
+        outQ[outBase + dimPair] = o0;
+        outQ[outBase + dimPair + halfDim] = o1;
+    } else {
+        uint lane = dimPair % 32;
+        uint outBase = (seq * p.numKVHeads + head) * p.headDim + lane * 4;
+        if (dimPair < 32) {
+            outK[outBase + 0] = half(o0);
+            outK[outBase + 2] = half(o1);
+        } else {
+            outK[outBase + 1] = half(o0);
+            outK[outBase + 3] = half(o1);
+        }
+    }
+}
+
 /// Fused Q/K norm + RoPE + GQA in a SINGLE dispatch.
 /// Replaces norm+RoPE + GQA = 2 dispatches per layer with 1.
 /// Phase 1: Q/K heads compute norm + RoPE

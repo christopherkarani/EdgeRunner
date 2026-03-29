@@ -262,3 +262,150 @@ kernel void flash_attention_gqa_simd_qf32_kvf16(
     O[qBase + lane + 64] = acc2 * invSum;
     O[qBase + lane + 96] = acc3 * invSum;
 }
+
+kernel void flash_attention_gqa_simd_qf32_kpacked_vf16(
+    device const float *Q [[buffer(0)]],
+    device const half *K [[buffer(1)]],
+    device const half *V [[buffer(2)]],
+    device float *O [[buffer(3)]],
+    constant ERFlashGQAParams &params [[buffer(4)]],
+    uint3 tid [[thread_position_in_grid]]
+) {
+    uint lane = tid.x;
+    uint headIndex = tid.y;
+    uint qRow = tid.z;
+    if (lane >= 32 || headIndex >= params.numHeads || qRow >= params.seqLen) return;
+
+    uint kvSeqLen = params.kvSeqLen > 0 ? params.kvSeqLen : params.seqLen;
+    uint qPosition = qRow + params.qOffset;
+    uint kvHeadIndex = headIndex / params.groupSize;
+    uint qStride = params.numHeads * params.headDim;
+    uint kvStride = params.numKVHeads * params.headDim;
+    uint qBase = qRow * qStride + headIndex * params.headDim;
+
+    float q0 = Q[qBase + lane];
+    float q1 = Q[qBase + lane + 32];
+    float q2 = Q[qBase + lane + 64];
+    float q3 = Q[qBase + lane + 96];
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+
+    for (uint kv = 0; kv < kvSeqLen; ++kv) {
+        if (params.causal != 0 && kv > qPosition) break;
+
+        uint packedKBase = (kv * params.numKVHeads + kvHeadIndex) * params.headDim + lane * 4;
+        uint vBase = kv * kvStride + kvHeadIndex * params.headDim;
+        half4 packedK = *reinterpret_cast<const device half4 *>(K + packedKBase);
+        float partial =
+            q0 * float(packedK[0]) +
+            q1 * float(packedK[1]) +
+            q2 * float(packedK[2]) +
+            q3 * float(packedK[3]);
+        float score = simd_sum(partial) * params.scale;
+
+        float nextRunMax = runMax;
+        float nextRunSum = runSum;
+        float correction = 1.0f;
+        float prob = 0.0f;
+        if (lane == 0) {
+            float oldMax = runMax;
+            nextRunMax = max(runMax, score);
+            correction = exp(oldMax - nextRunMax);
+            prob = exp(score - nextRunMax);
+            nextRunSum = runSum * correction + prob;
+        }
+        runMax = simd_broadcast_first(nextRunMax);
+        runSum = simd_broadcast_first(nextRunSum);
+        correction = simd_broadcast_first(correction);
+        prob = simd_broadcast_first(prob);
+
+        acc0 = acc0 * correction + prob * float(V[vBase + lane]);
+        acc1 = acc1 * correction + prob * float(V[vBase + lane + 32]);
+        acc2 = acc2 * correction + prob * float(V[vBase + lane + 64]);
+        acc3 = acc3 * correction + prob * float(V[vBase + lane + 96]);
+    }
+
+    float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
+    O[qBase + lane] = acc0 * invSum;
+    O[qBase + lane + 32] = acc1 * invSum;
+    O[qBase + lane + 64] = acc2 * invSum;
+    O[qBase + lane + 96] = acc3 * invSum;
+}
+
+kernel void flash_attention_gqa_simd_qf32_kvpacked(
+    device const float *Q [[buffer(0)]],
+    device const half *K [[buffer(1)]],
+    device const half *V [[buffer(2)]],
+    device float *O [[buffer(3)]],
+    constant ERFlashGQAParams &params [[buffer(4)]],
+    uint3 tid [[thread_position_in_grid]]
+) {
+    uint lane = tid.x;
+    uint headIndex = tid.y;
+    uint qRow = tid.z;
+    if (lane >= 32 || headIndex >= params.numHeads || qRow >= params.seqLen) return;
+
+    uint kvSeqLen = params.kvSeqLen > 0 ? params.kvSeqLen : params.seqLen;
+    uint qPosition = qRow + params.qOffset;
+    uint kvHeadIndex = headIndex / params.groupSize;
+    uint qStride = params.numHeads * params.headDim;
+    uint qBase = qRow * qStride + headIndex * params.headDim;
+
+    float q0 = Q[qBase + lane];
+    float q1 = Q[qBase + lane + 32];
+    float q2 = Q[qBase + lane + 64];
+    float q3 = Q[qBase + lane + 96];
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+
+    for (uint kv = 0; kv < kvSeqLen; ++kv) {
+        if (params.causal != 0 && kv > qPosition) break;
+
+        uint packedBase = (kv * params.numKVHeads + kvHeadIndex) * params.headDim + lane * 4;
+        half4 packedK = *reinterpret_cast<const device half4 *>(K + packedBase);
+        float partial =
+            q0 * float(packedK[0]) +
+            q1 * float(packedK[1]) +
+            q2 * float(packedK[2]) +
+            q3 * float(packedK[3]);
+        float score = simd_sum(partial) * params.scale;
+
+        float nextRunMax = runMax;
+        float nextRunSum = runSum;
+        float correction = 1.0f;
+        float prob = 0.0f;
+        if (lane == 0) {
+            float oldMax = runMax;
+            nextRunMax = max(runMax, score);
+            correction = exp(oldMax - nextRunMax);
+            prob = exp(score - nextRunMax);
+            nextRunSum = runSum * correction + prob;
+        }
+        runMax = simd_broadcast_first(nextRunMax);
+        runSum = simd_broadcast_first(nextRunSum);
+        correction = simd_broadcast_first(correction);
+        prob = simd_broadcast_first(prob);
+
+        half4 packedV = *reinterpret_cast<const device half4 *>(V + packedBase);
+        acc0 = acc0 * correction + prob * float(packedV[0]);
+        acc1 = acc1 * correction + prob * float(packedV[1]);
+        acc2 = acc2 * correction + prob * float(packedV[2]);
+        acc3 = acc3 * correction + prob * float(packedV[3]);
+    }
+
+    float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
+    O[qBase + lane] = acc0 * invSum;
+    O[qBase + lane + 32] = acc1 * invSum;
+    O[qBase + lane + 64] = acc2 * invSum;
+    O[qBase + lane + 96] = acc3 * invSum;
+}
