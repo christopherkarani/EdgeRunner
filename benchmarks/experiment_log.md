@@ -628,3 +628,9 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Change:** Added benchmark-only phase splits for the aggressive small-row quantizer, confirmed that outlier selection dominated the quantizer front half, then replaced the serial top-32 selection in `tq_quantize_small_aggressive_row` with an exact parallel bitonic selector.
 - **Result:** KEPT. Exact breakdown improved from `small_quantize_kv=0.816 ms` to `0.531 ms`, while real long-context aggressive TurboQuant moved to `22.20 tok/s` at prompt `512` and `16.47 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `250.8 tok/s`.
 - **Status:** KEPT
+
+### Experiment 34: TurboQuant Aggressive Word-Aligned Base Decode
+- **Hypothesis:** After fixing outlier selection, the aggressive decode kernel is still overpaying to read the fixed 2-bit base plane through generic `tq_extract_code` calls. Iterating the 8 base-code words sequentially should reduce hot-loop extraction cost for both K scoring and V accumulation.
+- **Change:** Rewrote the aggressive decode kernel to decode base-plane codes as sequential 2-bit words for the fixed `128 x 2-bit` layout, while keeping the existing sideband/outlier path unchanged.
+- **Result:** KEPT. Exact breakdown improved from `decode_attention=1.055 ms` to `0.964 ms`, `small_quantize_kv=0.531 ms` to `0.471 ms`, and real long-context aggressive TurboQuant moved to `22.58 tok/s` at prompt `512` and `17.33 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `254.8 tok/s`.
+- **Status:** KEPT

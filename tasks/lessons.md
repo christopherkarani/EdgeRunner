@@ -30,6 +30,7 @@
 - In the current TurboQuant decode path, fused small-row K/V append quantization is not materially better or worse than running separate small-row K and V quantize dispatches (`~0.806 ms` vs `~0.792 ms` in the exact breakdown harness). That rules out “split the fused quantizer” as a likely breakthrough direction on this GPU.
 - When the aggressive small-row TurboQuant quantizer is still too expensive, split it further before guessing. On this GPU, the real front-half tax was not the Hadamard itself (`~0.17 ms`) but the exact top-32 outlier selection (`~0.45 ms`) inside the quantizer.
 - For the aggressive `headDim == 128` path, an exact parallel bitonic top-32 selector beats the old serial lane-0 scan by a wide margin and survives parity plus real long-context benchmarks. In the kept path it cut `small_quantize_kv` from `~0.82 ms` to `~0.53 ms` and moved 512/1024 TurboQuant decode to `22.20` and `16.47 tok/s`.
+- After the bitonic-selector keep, the next decode win came from respecting the aggressive base plane as a fixed word-aligned 2-bit format. Replacing generic `tq_extract_code` calls with sequential word decode in `gqa_attention_turboquant_decode_aggressive` improved `decode_attention` from `~1.06 ms` to `~0.96 ms` and moved 1024-token TurboQuant decode to `17.33 tok/s`.
 
 ## 2026-03-16
 - Verify the actual milestone baseline from the repo before starting execution. This workspace is mid-M2, so M3/M4 implementation prompts must be deferred until M2 is complete and verified locally.

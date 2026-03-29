@@ -950,6 +950,36 @@ See benchmarks/experiment_log.md
     - `3.3 ms` median TTFT
     - token hash `0afae14a84cf0df8`
 - Current conclusion: the next major TurboQuant gain came from the quantizer’s outlier-channel selection, not another attention-kernel tweak. On this GPU, exact parallel top-32 selection is a production keep.
+
+## TurboQuant Aggressive Word-Aligned Base Decode
+
+## Plan
+- [x] Re-run the exact TurboQuant decode breakdown after the bitonic selector keep and identify the next dominant stage.
+- [x] Remove generic fixed-2-bit base-plane extraction overhead from the aggressive decode kernel by decoding the 8 base-code words sequentially instead of calling `tq_extract_code` 128 times per K row and 128 times per V row.
+- [x] Re-run attention parity, exact smoke, exact decode breakdown, 512/1024 aggressive long-context benchmarks, and the default publishable benchmark before deciding whether to keep it.
+
+## Review
+- Updated `gqa_attention_turboquant_decode_aggressive` in `TurboQuant.metal` to iterate the aggressive base plane as word-aligned 2-bit streams for both K scoring and V accumulation.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Updated kept points:
+  - Exact breakdown:
+    - `turboquant_small_quantize_kv_ms=0.471`
+    - `turboquant_decode_attention_ms=0.964`
+    - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.699`
+  - Long-context aggressive:
+    - `prompt_len=512`, `decode_tokens=4`: `22.58 tok/s`, `6841.89 ms` TTFT
+    - `prompt_len=1024`, `decode_tokens=4`: `17.33 tok/s`, `12533.22 ms` TTFT
+  - Default publishable benchmark remained deterministic and clean:
+    - `254.8 tok/s` median decode
+    - `3.4 ms` median TTFT
+    - token hash `0afae14a84cf0df8`
+- Current conclusion: once the aggressive outlier selector was fixed, the next decode win came from treating the fixed 2-bit base plane as a real word-aligned format instead of routing it through generic code extraction in the hot loop.
 # Exact Path Rewrite Program
 
 ## Goal

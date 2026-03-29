@@ -1559,9 +1559,19 @@ kernel void gqa_attention_turboquant_decode_aggressive(
             float residualDot = 0.0;
             for (uint block = 0; block < 4; ++block) {
                 uint signWord = kSignRow[block];
-                for (uint bit = 0; bit < 32; ++bit) {
+                uint packedCodes0 = kCodeRow[block * 2];
+                uint packedCodes1 = kCodeRow[block * 2 + 1];
+                for (uint bit = 0; bit < 16; ++bit) {
                     uint dim = block * 32 + bit;
-                    uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
+                    uint baseCode = packedCodes0 & 0x3u;
+                    packedCodes0 >>= 2u;
+                    mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
+                    residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
+                for (uint bit = 16; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes1 & 0x3u;
+                    packedCodes1 >>= 2u;
                     mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
                     residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
                 }
@@ -1633,9 +1643,19 @@ kernel void gqa_attention_turboquant_decode_aggressive(
 
             for (uint block = 0; block < 4; ++block) {
                 uint signWord = vSignRow[block];
-                for (uint bit = 0; bit < 32; ++bit) {
+                uint packedCodes0 = vCodeRow[block * 2];
+                uint packedCodes1 = vCodeRow[block * 2 + 1];
+                for (uint bit = 0; bit < 16; ++bit) {
                     uint dim = block * 32 + bit;
-                    uint baseCode = tq_extract_code(vCodeRow, dim * kRegularBits, kRegularBits);
+                    uint baseCode = packedCodes0 & 0x3u;
+                    packedCodes0 >>= 2u;
+                    laneOutputMSE[dim] += mseScale * tq_centroid_2bit(baseCode);
+                    laneOutputResidual[dim] += residualScale * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
+                for (uint bit = 16; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes1 & 0x3u;
+                    packedCodes1 >>= 2u;
                     laneOutputMSE[dim] += mseScale * tq_centroid_2bit(baseCode);
                     laneOutputResidual[dim] += residualScale * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
                 }
