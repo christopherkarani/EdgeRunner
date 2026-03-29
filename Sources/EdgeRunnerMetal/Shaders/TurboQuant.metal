@@ -1943,7 +1943,22 @@ kernel void gqa_attention_turboquant_decode_aggressive_k_f16v(
             laneOutput[dim] *= correction;
         }
 
+        bool ultraTop1Only = kvLimit >= kValueAccumUltraSeqThreshold;
+        uint bestTile = UINT_MAX;
+        if (ultraTop1Only) {
+            float bestProb = 0.0f;
+            for (uint tile = 0; tile < kTileRows; ++tile) {
+                if (tilePositions[tile] >= kvLimit) { continue; }
+                float prob = tileProbs[tile];
+                if (prob > bestProb) {
+                    bestProb = prob;
+                    bestTile = tile;
+                }
+            }
+        }
+
         for (uint tile = 0; tile < kTileRows; ++tile) {
+            if (ultraTop1Only && tile != bestTile) { continue; }
             uint kvPos = tilePositions[tile];
             float prob = tileProbs[tile];
             float activeProbCutoff = 0.0f;
