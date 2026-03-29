@@ -865,6 +865,30 @@ See benchmarks/experiment_log.md
   - `prompt_len=512`, `decode_tokens=4`: `15.43 tok/s`, `4448.79 ms` TTFT
   - `prompt_len=1024`, `decode_tokens=4`: `12.50 tok/s`, `8633.14 ms` TTFT
 - Current conclusion: the first TurboQuant-side KV barrier was redundant on the decode path. Removing it is a safe keep and improves long-context latency while preserving exact greedy output.
+
+## TurboQuant Decode Fused QKV Restore
+
+## Plan
+- [x] Restore a TurboQuant-specific fused Q8 `RMSNorm + Q/K/V` decode path instead of forcing TurboQuant through the separate RMSNorm + three GEMV fallback.
+- [x] Keep the fused kernel semantics identical except for writing `V` into the existing float scratch buffer used for TurboQuant packing.
+- [x] Re-run parity, exact smoke, decode breakdown, and long-context aggressive benchmarks before deciding whether to keep it.
+
+## Review
+- Added `dequant_q8_0_fused_qkv_turbo` and routed TurboQuant decode through it when Q8 raw weights are available.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark` (repeated twice)
+- Breakdown point after the restore:
+  - `turboquant_decode_attention_ms=1.041`
+  - `turboquant_small_quantize_kv_ms=1.187`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `16.77 tok/s`, `6195.07 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `13.14 tok/s`, `9486.02 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4` confirmation: `13.25 tok/s`, `9175.76 ms` TTFT
+- Current conclusion: TurboQuant had been carrying an unnecessary dense-path fallback in decode. Restoring fused Q8 Q/K/V is a real decode-throughput keep, but it shifts cost toward the fused tiny-row K/V quantizer and does not improve TTFT on this checkout.
 # Exact Path Rewrite Program
 
 ## Goal

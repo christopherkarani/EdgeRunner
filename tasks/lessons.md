@@ -25,6 +25,7 @@
 - Shortening the aggressive pack code in lane 0 is not enough evidence for a keep. A direct fixed-plane pack rewrite reduced the fused quantizer microbenchmark but still regressed the real 512/1024 TurboQuant runs, so microbenchmark wins on the pack stage must clear the real long-context benchmark before they count.
 - In the tiled aggressive decode kernel, online-softmax max updates should not immediately rescale all 128 partial output channels. Tracking a per-lane accumulation scale and folding it into the final reduction improved the isolated decode kernel and survived the real 512/1024 benchmark plus exact smoke.
 - In TurboQuant decode, do not blindly inherit every dense-KV cache barrier. The early barrier after V-cache writes in `fusedDecodePass` was redundant for the packed TurboQuant path because attention only consumes those buffers after the later explicit barrier; removing it improved real long-context latency without changing the greedy trace.
+- Do not force TurboQuant decode off the fused Q8 `RMSNorm + Q/K/V` path just because `V` is ultimately packed instead of written to the FP16 cache. A TurboQuant-specific fused kernel that writes `V` to float scratch recovered real decode throughput and exposed the fused tiny-row K/V quantizer as the next bottleneck.
 
 ## 2026-03-16
 - Verify the actual milestone baseline from the repo before starting execution. This workspace is mid-M2, so M3/M4 implementation prompts must be deferred until M2 is complete and verified locally.

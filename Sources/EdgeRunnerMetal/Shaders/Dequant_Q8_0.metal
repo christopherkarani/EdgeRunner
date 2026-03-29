@@ -730,6 +730,106 @@ kernel void dequant_q8_0_gemv_f16acc(
     }
 }
 
+// TurboQuant decode variant: same fused RMSNorm + Q/K/V projection, but V stays in f32
+// so it can be packed into TurboQuant immediately after RoPE(K) without falling back to
+// separate RMSNorm + Q/K/V GEMV dispatches.
+kernel void dequant_q8_0_fused_qkv_turbo(
+    device const uchar* wq [[buffer(0)]],
+    device const uchar* wk [[buffer(1)]],
+    device const uchar* wv [[buffer(2)]],
+    device const float* x [[buffer(3)]],
+    device float* outQ [[buffer(4)]],
+    device float* outK [[buffer(5)]],
+    device float* outV [[buffer(6)]],
+    device const float* normWeight [[buffer(8)]],
+    constant ERFusedQKVParams& params [[buffer(7)]],
+    uint2 tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+
+    const uint totalRows = params.qRows + params.kvRows + params.kvRows;
+    const uint row0 = tgIndex.x * LOCAL_NR;
+    const uint tokenIndex = tgIndex.y;
+    if (row0 >= totalRows || tokenIndex >= params.tokenCount) return;
+
+    const short nb = params.blocksPerRow;
+    device const float* tokenX = x + tokenIndex * params.cols;
+    device float* tokenOutQ = outQ + tokenIndex * params.qRows;
+    device float* tokenOutK = outK + tokenIndex * params.kvRows;
+    device float* tokenOutV = outV + tokenIndex * params.kvRows;
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    device const uchar* ax[LOCAL_NR];
+    for (short r = 0; r < LOCAL_NR; r++) {
+        uint globalRow = row0 + r;
+        if (globalRow >= totalRows) { ax[r] = wq; continue; }
+        uint localRow;
+        device const uchar* weights;
+        if (globalRow < params.qRows) {
+            localRow = globalRow;
+            weights = wq;
+        } else if (globalRow < params.qRows + params.kvRows) {
+            localRow = globalRow - params.qRows;
+            weights = wk;
+        } else {
+            localRow = globalRow - params.qRows - params.kvRows;
+            weights = wv;
+        }
+        ax[r] = weights + localRow * nb * q8_0BlockBytes;
+    }
+
+    float sumSq = 0.0f;
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = tokenX + ib * 32;
+        for (short i = 0; i < 32; i++) {
+            float v = xb[i];
+            sumSq += v * v;
+        }
+    }
+    sumSq = simd_sum(sumSq);
+    float rmsScale = rsqrt(sumSq / float(params.cols) + params.rmsEps);
+
+    for (short ib = tiisg; ib < nb; ib += 32) {
+        device const float* xb = tokenX + ib * 32;
+        float xl[32];
+        for (short i = 0; i < 32; i++) {
+            xl[i] = xb[i] * rmsScale * normWeight[ib * 32 + i];
+        }
+
+        for (short r = 0; r < LOCAL_NR; r++) {
+            if (row0 + r >= totalRows) break;
+            device const uchar* block = ax[r] + ib * q8_0BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)block));
+            device const char* qs = (device const char*)(block + 2);
+            float sumq = 0.f;
+            for (short i = 0; i < 32; i++) sumq += float(qs[i]) * xl[i];
+            sumf[r] += sumq * scale;
+        }
+    }
+
+    for (short r = 0; r < LOCAL_NR; r++) {
+        sumf[r] = simd_sum(sumf[r]);
+    }
+
+    if (tiisg == 0) {
+        for (short r = 0; r < LOCAL_NR; r++) {
+            uint globalRow = row0 + r;
+            if (globalRow >= totalRows) break;
+
+            float total = sumf[r];
+            if (globalRow < params.qRows) {
+                tokenOutQ[globalRow] = total;
+            } else if (globalRow < params.qRows + params.kvRows) {
+                tokenOutK[globalRow - params.qRows] = total;
+            } else {
+                tokenOutV[globalRow - params.qRows - params.kvRows] = total;
+            }
+        }
+    }
+}
+
 // --- 2. dequant_q8_0_fused_qkv_f16acc ---
 kernel void dequant_q8_0_fused_qkv_f16acc(
     device const uchar* wq [[buffer(0)]],

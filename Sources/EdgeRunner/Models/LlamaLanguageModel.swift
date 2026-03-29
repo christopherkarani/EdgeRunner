@@ -126,6 +126,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let fusedQ8GemvTiledPipeline: MTLComputePipelineState  // Exp 35: Tile-based with coalesced access
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
+    private let fusedQKVTurboPipeline: MTLComputePipelineState
     private let fusedGateUpSiluPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
@@ -230,6 +231,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.fusedQ8GemvTiledPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_tiled")
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
+        self.fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
         self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
@@ -1952,11 +1954,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             // 1+2. FUSED RMSNorm + Q/K/V projections (saves 1 dispatch per layer)
             let useQ8Fused = lw.wqRaw != nil
             let useFusedQKV = useQ8Fused && !turboQuantEnabled
+            let useTurboFusedQKV = useQ8Fused && turboQuantEnabled
             let blocksPerRowDim = dim / 32
 
-            if useFusedQKV {
+            if useFusedQKV || useTurboFusedQKV {
                 // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
-                let fusedQKVPSO = fusedQKVPipeline
+                let fusedQKVPSO = useTurboFusedQKV ? fusedQKVTurboPipeline : fusedQKVPipeline
                 enc.setComputePipelineState(fusedQKVPSO)
                 enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
                 enc.setBuffer(lw.wkRaw!, offset: 0, index: 1)
@@ -1964,7 +1967,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(currentHidden, offset: 0, index: 3)  // raw hidden (RMSNorm applied inline)
                 enc.setBuffer(allQBuf, offset: 0, index: 4)
                 enc.setBuffer(allKBuf, offset: 0, index: 5)
-                enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
+                if useTurboFusedQKV {
+                    enc.setBuffer(allVBuf, offset: 0, index: 6)
+                } else {
+                    enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
+                }
                 var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim),
                     cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim),
                     tokenCount: 1, rmsEps: rmsEps)
