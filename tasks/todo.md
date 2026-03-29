@@ -101,6 +101,7 @@
   - packed long-KV decode forced onto short contexts (`kvLen < 256`): broke canonical publishable prefix (`[1, 1479, 6222]` instead of `[1, 1479, 35]`), so the new packed attention path remains long-KV-only
   - direct float-to-packed decode-cache writes in the flash-prompt prefill path: preserved correctness but regressed publishable decode to `212.5 tok/s` and slipped the long-prompt checkpoint to about `1160.8 tok/s` prompt throughput, `882.3 ms` TTFT, and `59.36 tok/s` long-context decode versus the kept `88ccdbd` floor
   - prompt-flash Q/K/V via `MPSMatrixMultiplication`: KEPT. 3-run long-prompt median improved from about `1159.0 tok/s`, `883.5 ms`, `59.9 tok/s` to about `1356.0 tok/s`, `755.2 ms`, `59.2 tok/s`; publishable benchmark stayed deterministic with hash `0afae14a84cf0df8`
+  - extend `MPSMatrixMultiplication` to packed `wo`, `gate`, `up`, and `down`: KEPT. 3-run long-prompt median improved again to about `1748.3 tok/s`, `585.7 ms`, `60.3 tok/s`; publishable benchmark stayed deterministic and improved to about `213.9 tok/s`
 - Implication: the remaining viable path is a larger engine split, not more local substitutions inside the legacy prefill body.
 
 # Mega Fused GQA Kernel Repair

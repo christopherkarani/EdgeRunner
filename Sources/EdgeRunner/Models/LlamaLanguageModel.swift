@@ -1680,14 +1680,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             } else {
                 // Fallback: separate projection + add (for seqLen > 1 or non-Q8)
                 if usePackedExperimental, let packedAttention = lw.packedPrefillAttention {
-                    encodePackedPrefillMatmul(
-                        encoder: enc,
-                        pipeline: packedPrefillMatmulPSO,
+                    enc.endEncoding()
+                    encodePackedPrefillMatmulMPS(
+                        commandBuffer: cmdBuf,
                         lhs: attnOutBuf,
                         rhs: packedAttention.wo,
                         output: projBuf,
                         rows: seqLen
                     )
+                    guard let resumedEncoder = cmdBuf.makeComputeCommandEncoder() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to recreate compute encoder after packed WO MPS")
+                    }
+                    enc = resumedEncoder
                 } else if useQ8Fused, let woRaw = lw.woRaw {
                     enc.setComputePipelineState(fusedQ8BatchedPSO)
                     var p = DequantQ8GEMVBatchParams(
@@ -1756,15 +1760,19 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
                 // Gate + Up projections
                 if usePackedExperimental, let packedFFN = lw.packedPrefillFFN {
-                    encodePackedPrefillFFNProjections(
-                        encoder: enc,
-                        pipeline: packedPrefillMatmulPSO,
+                    enc.endEncoding()
+                    encodePackedPrefillFFNProjectionsMPS(
+                        commandBuffer: cmdBuf,
                         packed: packedFFN,
                         normalizedHidden: ffnNormedBuf,
                         gateOut: gateOutBuf,
                         upOut: upOutBuf,
                         seqLen: seqLen
                     )
+                    guard let resumedEncoder = cmdBuf.makeComputeCommandEncoder() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to recreate compute encoder after packed FFN MPS")
+                    }
+                    enc = resumedEncoder
                 } else {
                     for t in 0..<seqLen {
                         let tokOff = t * dim * floatStride
@@ -1828,14 +1836,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             } else {
                 // Fallback: separate down + add (for seqLen > 1 or non-Q8)
                 if usePackedExperimental, let packedFFN = lw.packedPrefillFFN {
-                    encodePackedPrefillMatmul(
-                        encoder: enc,
-                        pipeline: packedPrefillMatmulPSO,
+                    enc.endEncoding()
+                    encodePackedPrefillMatmulMPS(
+                        commandBuffer: cmdBuf,
                         lhs: activBuf,
                         rhs: packedFFN.down,
                         output: downOutBuf,
                         rows: seqLen
                     )
+                    guard let resumedEncoder = cmdBuf.makeComputeCommandEncoder() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to recreate compute encoder after packed down MPS")
+                    }
+                    enc = resumedEncoder
                 } else if useQ8Fused, let downRaw = lw.downRaw {
                     enc.setComputePipelineState(fusedQ8BatchedPSO)
                     var p = DequantQ8GEMVBatchParams(
@@ -3559,6 +3571,30 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         encodePackedPrefillMatmul(
             encoder: encoder,
             pipeline: pipeline,
+            lhs: normalizedHidden,
+            rhs: packed.up,
+            output: upOut,
+            rows: seqLen
+        )
+    }
+
+    private func encodePackedPrefillFFNProjectionsMPS(
+        commandBuffer: MTLCommandBuffer,
+        packed: PackedPrefillFFNWeights,
+        normalizedHidden: MTLBuffer,
+        gateOut: MTLBuffer,
+        upOut: MTLBuffer,
+        seqLen: Int
+    ) {
+        encodePackedPrefillMatmulMPS(
+            commandBuffer: commandBuffer,
+            lhs: normalizedHidden,
+            rhs: packed.gate,
+            output: gateOut,
+            rows: seqLen
+        )
+        encodePackedPrefillMatmulMPS(
+            commandBuffer: commandBuffer,
             lhs: normalizedHidden,
             rhs: packed.up,
             output: upOut,
