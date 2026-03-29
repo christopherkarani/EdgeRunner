@@ -2055,7 +2055,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // KV cache buffers disable hazard tracking, so decode must insert an explicit
             // barrier before GQA consumes the freshly-written K/V slices.
-            if !decodeDebugOptions.disableKVCacheBarrier {
+            if !turboQuantEnabled && !decodeDebugOptions.disableKVCacheBarrier {
                 enc.memoryBarrier(scope: .buffers)
             }
 

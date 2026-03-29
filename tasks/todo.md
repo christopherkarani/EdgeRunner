@@ -839,9 +839,32 @@ See benchmarks/experiment_log.md
   - `turboquant_decode_attention_ms=1.004`
   - `turboquant_small_quantize_kv_ms=0.780`
 - Updated benchmark points:
-  - `prompt_len=512`, `decode_tokens=4`: `15.49 tok/s`, `5496.40 ms` TTFT
-  - `prompt_len=1024`, `decode_tokens=4`: `12.33 tok/s`, `8957.69 ms` TTFT
+  - `prompt_len=512`, `decode_tokens=4`: `15.43 tok/s`, `4448.79 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.50 tok/s`, `8633.14 ms` TTFT
 - Current conclusion: this is a real decode-side keep. It does not unlock the paper’s claims, but it materially reduces the remaining aggressive decode tax and keeps the exact smoke trace intact.
+
+## TurboQuant Redundant Barrier Removal
+
+## Plan
+- [x] Remove the early decode-path KV cache barrier for TurboQuant only, while leaving the dense FP16 path unchanged.
+- [x] Keep the later pre-attention barrier so packed K/V writes still become visible before TurboQuant attention reads them.
+- [x] Re-run parity, exact smoke, breakdown, and long-context aggressive benchmarks.
+
+## Review
+- `fusedDecodePass` no longer inserts the first KV cache `memoryBarrier(scope: .buffers)` on the TurboQuant path. TurboQuant already pays the later barrier immediately before attention consumes packed K/V.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Breakdown point:
+  - `turboquant_decode_attention_ms=0.993`
+  - `turboquant_small_quantize_kv_ms=0.757`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `15.43 tok/s`, `4448.79 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.50 tok/s`, `8633.14 ms` TTFT
+- Current conclusion: the first TurboQuant-side KV barrier was redundant on the decode path. Removing it is a safe keep and improves long-context latency while preserving exact greedy output.
 # Exact Path Rewrite Program
 
 ## Goal
