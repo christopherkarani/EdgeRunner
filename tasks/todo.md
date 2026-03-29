@@ -84,12 +84,21 @@
   - long-prompt prompt throughput median `526.8 tok/s`
   - long-prompt TTFT median `1943.9 ms`
   - long-prompt decode median `60.29 tok/s`
+- New kept prompt rewrite candidate with `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1` + `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
+  - prompt-local flash-style GQA over f32 K/V slabs before cache conversion
+  - publishable decode median `218.1 tok/s`
+  - publishable TTFT `3.8 ms`
+  - publishable hash `0afae14a84cf0df8`
+  - long-prompt prompt throughput median `1169.6 tok/s`
+  - long-prompt TTFT median `875.5 ms`
+  - long-prompt decode median `60.09 tok/s`
 - Dead rewrite branches already measured and reverted:
   - GEMM-backed exact matrix prefill over repacked Q8 weights: regressed long-prompt prompt throughput to `433.3 tok/s`
   - contiguous raw-Q8 prefill bundle views over the GGUF mmap: regressed long-prompt prompt throughput to `469.2 tok/s`
   - first dedicated exact-matrix execution slice using prompt-wide `gemm_f32` packed QKV/FFN/down inside `exactMatrixPrefillPass`: regressed long-prompt prompt throughput to `451.9 tok/s`, TTFT to `2266.1 ms`, while decode stayed flat at `42.42 tok/s`
   - tiled `gemm_f32_packed_prefill` threadgroup rewrite: improved publishable decode to `223.2 tok/s` but regressed the target long-prompt workload to `549.8 tok/s` prompt throughput, `1862.3 ms` TTFT, and `37.34 tok/s` long-context decode
   - mega decode kernel block-softmax chunking in `fused_qk_norm_rope_gqa`: improved prompt throughput/TTFT to `608.8 tok/s` / `1681.9 ms` in the long-prompt harness but regressed long-context decode to `37.19 tok/s` and publishable decode to `203.2 tok/s`
+  - packed long-KV decode forced onto short contexts (`kvLen < 256`): broke canonical publishable prefix (`[1, 1479, 6222]` instead of `[1, 1479, 35]`), so the new packed attention path remains long-KV-only
 - Implication: the remaining viable path is a larger engine split, not more local substitutions inside the legacy prefill body.
 
 # Mega Fused GQA Kernel Repair

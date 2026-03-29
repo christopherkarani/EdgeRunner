@@ -141,6 +141,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let packedDecodeCachePipeline: MTLComputePipelineState
     private let packedDecodeCachePairPipeline: MTLComputePipelineState
     private let packedLongKVAttentionPipeline: MTLComputePipelineState
+    private let promptFlashGQAPipeline: MTLComputePipelineState
 
     // Dequantization kernels
     private let dequantQ4_0: DequantQ4_0Kernel
@@ -251,6 +252,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.packedDecodeCachePipeline = try registry.pipeline(for: "pack_kv_decode_cache_f16")
         self.packedDecodeCachePairPipeline = try registry.pipeline(for: "pack_kv_decode_cache_pair_f16")
         self.packedLongKVAttentionPipeline = try registry.pipeline(for: "gqa_decode_attention_packed_f16kv")
+        self.promptFlashGQAPipeline = try registry.pipeline(for: "flash_attention_gqa_simd_f32")
 
         // Initialize dequant kernels
         self.dequantQ4_0 = try DequantQ4_0Kernel(device: device)
@@ -1280,6 +1282,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedQ8BatchedPSO = fusedQ8GemvBatchedPipeline
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let packedPrefillMatmulPSO = packedPrefillMatmulPipeline
+        let promptFlashGQAPSO = promptFlashGQAPipeline
         let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -1303,6 +1306,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 !turboQuantEnabled &&
                 lw.packedPrefillAttention != nil &&
                 lw.packedPrefillFFN != nil
+            let usePromptFlashAttention =
+                usePackedExperimental &&
+                startPosition == 0 &&
+                headDim == 128
 
             // 1+2. FUSED RMSNorm + Q/K/V projections (saves 1 dispatch per layer)
             let useQ8Fused = lw.wqRaw != nil
@@ -1363,13 +1370,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         allV: allVBuf,
                         seqLen: seqLen
                     )
-                    enc.setComputePipelineState(convertF32ToF16PSO)
-                    enc.setBuffer(allVBuf, offset: 0, index: 0)
-                    enc.setBuffer(layerVCache!, offset: startPosition * kvDim * halfStride, index: 1)
-                    var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                    enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    if !usePromptFlashAttention {
+                        enc.setComputePipelineState(convertF32ToF16PSO)
+                        enc.setBuffer(allVBuf, offset: 0, index: 0)
+                        enc.setBuffer(layerVCache!, offset: startPosition * kvDim * halfStride, index: 1)
+                        var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                        enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    }
                 } else {
                     for t in 0..<seqLen {
                         let tokOff = t * dim * floatStride
@@ -1540,16 +1549,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     )
                 } else {
                     // Convert the full RoPE'd K slab from f32 -> f16 in one dispatch.
-                    let dstOff = startPosition * kvDim * halfStride
-                    enc.setComputePipelineState(convertF32ToF16PSO)
-                    enc.setBuffer(ropeKOut, offset: 0, index: 0)
-                    enc.setBuffer(layerKCache!, offset: dstOff, index: 1)
-                    var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                    enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    if !usePromptFlashAttention {
+                        let dstOff = startPosition * kvDim * halfStride
+                        enc.setComputePipelineState(convertF32ToF16PSO)
+                        enc.setBuffer(ropeKOut, offset: 0, index: 0)
+                        enc.setBuffer(layerKCache!, offset: dstOff, index: 1)
+                        var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                        enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    }
                 }
-                if usePackedLongKVDecode,
+                if usePackedLongKVDecode && !usePromptFlashAttention,
                    let layerKCache, let layerVCache,
                    let layerKPackedDecodeCache, let layerVPackedDecodeCache {
                     encodePackedDecodeCachePairWrite(
@@ -1583,6 +1594,52 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         kvSeqLen: totalKVSeqLen,
                         qOffset: startPosition
                     )
+                } else if usePromptFlashAttention {
+                    let groupSize = numHeads / numKVHeads
+                    var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
+                        numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
+                        groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
+                        causal: 1, kvBlockSize: 0, qBlockSize: 0,
+                        kvSeqLen: UInt32(totalKVSeqLen), qOffset: UInt32(startPosition))
+                    enc.setComputePipelineState(promptFlashGQAPSO)
+                    enc.setBuffer(ropeQOut, offset: 0, index: 0)
+                    enc.setBuffer(hasQKNorm ? allKBuf : ropeKBuf, offset: 0, index: 1)
+                    enc.setBuffer(allVBuf, offset: 0, index: 2)
+                    enc.setBuffer(attnOutBuf, offset: 0, index: 3)
+                    enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                    enc.dispatchThreads(MTLSize(width: 32, height: numHeads, depth: seqLen),
+                        threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+                    enc.setComputePipelineState(convertF32ToF16PSO)
+                    enc.setBuffer(allVBuf, offset: 0, index: 0)
+                    enc.setBuffer(layerVCache!, offset: startPosition * kvDim * halfStride, index: 1)
+                    var vConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                    enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+
+                    enc.setBuffer(hasQKNorm ? allKBuf : ropeKBuf, offset: 0, index: 0)
+                    enc.setBuffer(layerKCache!, offset: startPosition * kvDim * halfStride, index: 1)
+                    var kConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                    enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+
+                    if usePackedLongKVDecode,
+                       let layerKCache, let layerVCache,
+                       let layerKPackedDecodeCache, let layerVPackedDecodeCache {
+                        encodePackedDecodeCachePairWrite(
+                            encoder: enc,
+                            keySource: layerKCache,
+                            keySourceOffset: startPosition * kvDim * halfStride,
+                            valueSource: layerVCache,
+                            valueSourceOffset: startPosition * kvDim * halfStride,
+                            keyDestination: layerKPackedDecodeCache,
+                            valueDestination: layerVPackedDecodeCache,
+                            tokenCount: seqLen,
+                            destinationStartToken: startPosition
+                        )
+                    }
                 } else {
                     let groupSize = numHeads / numKVHeads
                     var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),

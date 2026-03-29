@@ -297,4 +297,73 @@ struct GQATests {
         }
     }
 
+    @Test func promptFlashGQAMatchesCPUReference() async throws {
+        let seqLen = 8
+        let headDim = 128
+        let numHeads = 4
+        let numKVHeads = 2
+        let groupSize = numHeads / numKVHeads
+        let q = (0..<(seqLen * numHeads * headDim)).map { _ in Float.random(in: -0.25...0.25) }
+        let k = (0..<(seqLen * numKVHeads * headDim)).map { _ in Float.random(in: -0.25...0.25) }
+        let v = (0..<(seqLen * numKVHeads * headDim)).map { _ in Float.random(in: -0.25...0.25) }
+        let expected = cpuGQA(
+            q: q,
+            k: k,
+            v: v,
+            seqLen: seqLen,
+            headDim: headDim,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            causal: true
+        )
+
+        let registry = try KernelRegistry(device: device)
+        let pipeline = try registry.pipeline(for: "flash_attention_gqa_simd_f32")
+        let qBuffer = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        let kBuffer = device.makeBuffer(bytes: k, length: k.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        let vBuffer = device.makeBuffer(bytes: v, length: v.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+        let outputBuffer = device.makeBuffer(length: q.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
+
+        var params = ERGQAParams(
+            seqLen: UInt32(seqLen),
+            headDim: UInt32(headDim),
+            numHeads: UInt32(numHeads),
+            numKVHeads: UInt32(numKVHeads),
+            groupSize: UInt32(groupSize),
+            scale: 1.0 / sqrt(Float(headDim)),
+            causal: 1,
+            kvBlockSize: 0,
+            qBlockSize: 0,
+            kvSeqLen: UInt32(seqLen),
+            qOffset: 0
+        )
+
+        let commandBuffer = commandQueue.makeCommandBuffer()!
+        let encoder = commandBuffer.makeComputeCommandEncoder()!
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(kBuffer, offset: 0, index: 1)
+        encoder.setBuffer(vBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
+        encoder.setBytes(&params, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+        encoder.dispatchThreads(
+            MTLSize(width: 32, height: numHeads, depth: seqLen),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        await commandBuffer.completed()
+
+        let result = Array(
+            UnsafeBufferPointer(
+                start: outputBuffer.contents().assumingMemoryBound(to: Float.self),
+                count: expected.count
+            )
+        )
+
+        for index in 0..<result.count {
+            #expect(abs(result[index] - expected[index]) < 2e-3)
+        }
+    }
+
 }
