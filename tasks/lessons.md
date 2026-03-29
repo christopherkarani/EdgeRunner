@@ -27,6 +27,7 @@
 - In TurboQuant decode, do not blindly inherit every dense-KV cache barrier. The early barrier after V-cache writes in `fusedDecodePass` was redundant for the packed TurboQuant path because attention only consumes those buffers after the later explicit barrier; removing it improved real long-context latency without changing the greedy trace.
 - Do not force TurboQuant decode off the fused Q8 `RMSNorm + Q/K/V` path just because `V` is ultimately packed instead of written to the FP16 cache. A TurboQuant-specific fused kernel that writes `V` to float scratch recovered real decode throughput and exposed the fused tiny-row K/V quantizer as the next bottleneck.
 - Add exact stage-composition benchmarks before overfitting to one hot loop. On the kept fused TurboQuant decode baseline, `fused_qkv` was only about `0.17 ms/op`, while `small_quantize_kv` and `decode_attention` were roughly `0.80` and `0.99 ms/op`; that changed the next optimization target and prevented more low-value projection work.
+- In the current TurboQuant decode path, fused small-row K/V append quantization is not materially better or worse than running separate small-row K and V quantize dispatches (`~0.806 ms` vs `~0.792 ms` in the exact breakdown harness). That rules out “split the fused quantizer” as a likely breakthrough direction on this GPU.
 
 ## 2026-03-16
 - Verify the actual milestone baseline from the repo before starting execution. This workspace is mid-M2, so M3/M4 implementation prompts must be deferred until M2 is complete and verified locally.

@@ -911,6 +911,7 @@ See benchmarks/experiment_log.md
   - Fused QKV is no longer the dominant stage.
   - The remaining wall is split between the fused tiny-row K/V append quantizer and decode attention.
   - A follow-up attempt to parallelize the aggressive pack stage cleared parity but regressed the breakdown badly, so the quantizer tax is not explained by the final pack loop alone.
+  - A follow-up comparison of fused K/V append quantization versus two separate small-row K and V dispatches showed they are nearly identical on this GPU (`0.806 ms` fused vs `0.792 ms` separate), so the remaining quantizer cost is not explained by the fused-vs-separate dispatch structure either.
 # Exact Path Rewrite Program
 
 ## Goal

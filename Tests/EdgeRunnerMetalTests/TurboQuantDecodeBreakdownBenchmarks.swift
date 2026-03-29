@@ -141,6 +141,37 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             }
         }
 
+        let separateQuantizeKV = try await benchmark(name: "turboquant_quantize_small_aggressive_separate_kv", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(kernel.quantizeAggressiveSmallPipeline)
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(fusedK.codes, offset: 0, index: 1)
+                $0.setBuffer(fusedK.residualSigns, offset: 0, index: 2)
+                $0.setBuffer(fusedK.outlierMask, offset: 0, index: 3)
+                $0.setBuffer(fusedK.metadata, offset: 0, index: 4)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 5)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 6)
+                $0.setBuffer(kernel.keySigns.residual, offset: 0, index: 7)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+
+                $0.setBuffer(vSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(fusedV.codes, offset: 0, index: 1)
+                $0.setBuffer(fusedV.residualSigns, offset: 0, index: 2)
+                $0.setBuffer(fusedV.outlierMask, offset: 0, index: 3)
+                $0.setBuffer(fusedV.metadata, offset: 0, index: 4)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 5)
+                $0.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 6)
+                $0.setBuffer(kernel.valueSigns.residual, offset: 0, index: 7)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
         let fusedQKV = try await benchmark(name: "dequant_q8_0_fused_qkv_turbo", warmup: 3, iterations: 20) {
             try encodeAndWait {
                 $0.setComputePipelineState(fusedQKVTurboPipeline)
@@ -188,6 +219,7 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let fusedQKVMs = String(format: "%.3f", fusedQKV.perIterationMs)
         let singleQuantizeMs = String(format: "%.3f", singleQuantize.perIterationMs)
         let fusedQuantizeMs = String(format: "%.3f", fusedQuantize.perIterationMs)
+        let separateQuantizeKVms = String(format: "%.3f", separateQuantizeKV.perIterationMs)
         let decodeAttentionMs = String(format: "%.3f", decodeAttention.perIterationMs)
         let fusedPlusQuantize = fusedQKV.perIterationMs + fusedQuantize.perIterationMs
         let fusedPlusQuantizeMs = String(format: "%.3f", fusedPlusQuantize)
@@ -203,15 +235,21 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             format: "%.2f",
             fusedQuantize.perIterationMs / max(fusedQKV.perIterationMs, 1e-9)
         )
+        let fusedVsSeparateKV = String(
+            format: "%.2f",
+            fusedQuantize.perIterationMs / max(separateQuantizeKV.perIterationMs, 1e-9)
+        )
 
         print("BENCHMARK: turboquant_fused_qkv_ms \(fusedQKVMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_ms \(singleQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_kv_ms \(fusedQuantizeMs) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_separate_kv_ms \(separateQuantizeKVms) ms/op")
         print("BENCHMARK: turboquant_decode_attention_ms \(decodeAttentionMs) ms/op")
         print("BENCHMARK: turboquant_fused_qkv_plus_small_quantize_kv_ms \(fusedPlusQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize \(decodeVsSingle)x")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize_kv \(decodeVsFused)x")
         print("BENCHMARK: turboquant_small_quantize_kv_vs_fused_qkv \(quantizeVsFusedQKV)x")
+        print("BENCHMARK: turboquant_small_quantize_kv_vs_separate_kv \(fusedVsSeparateKV)x")
     }
 
     private func encodeAndWait(
