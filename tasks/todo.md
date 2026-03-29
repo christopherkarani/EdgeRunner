@@ -889,6 +889,28 @@ See benchmarks/experiment_log.md
   - `prompt_len=1024`, `decode_tokens=4`: `13.14 tok/s`, `9486.02 ms` TTFT
   - `prompt_len=1024`, `decode_tokens=4` confirmation: `13.25 tok/s`, `9175.76 ms` TTFT
 - Current conclusion: TurboQuant had been carrying an unnecessary dense-path fallback in decode. Restoring fused Q8 Q/K/V is a real decode-throughput keep, but it shifts cost toward the fused tiny-row K/V quantizer and does not improve TTFT on this checkout.
+
+## TurboQuant Exact Decode Breakdown
+
+## Plan
+- [x] Extend the TurboQuant breakdown harness so it measures fused TurboQuant QKV projection, fused tiny-row K/V append quantization, and decode attention in the same benchmark.
+- [x] Use that breakdown to identify whether the next win is still in projection composition, the packed K/V append quantizer, or decode attention.
+- [x] Reject low-signal shader experiments against the new harness before spending full 512/1024 benchmark time.
+
+## Review
+- `TurboQuantDecodeBreakdownBenchmarks` now measures:
+  - `dequant_q8_0_fused_qkv_turbo`
+  - `turboquant_quantize_rows_small_aggressive_kv`
+  - `gqa_attention_turboquant_decode_aggressive`
+- Current composition on the kept fused-decode baseline:
+  - `turboquant_fused_qkv_ms=0.172`
+  - `turboquant_small_quantize_kv_ms=0.804`
+  - `turboquant_decode_attention_ms=0.994`
+  - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.976`
+- Interpretation:
+  - Fused QKV is no longer the dominant stage.
+  - The remaining wall is split between the fused tiny-row K/V append quantizer and decode attention.
+  - A follow-up attempt to parallelize the aggressive pack stage cleared parity but regressed the breakdown badly, so the quantizer tax is not explained by the final pack loop alone.
 # Exact Path Rewrite Program
 
 ## Goal

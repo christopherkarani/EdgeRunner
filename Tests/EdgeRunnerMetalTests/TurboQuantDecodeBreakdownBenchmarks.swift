@@ -26,18 +26,34 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         }
 
         let kernel = try TurboQuantKernel(device: device)
+        let registry = try KernelRegistry(device: device)
+        let fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
         let layout = try TurboQuantLayout(preset: .aggressive)
         let rowCount = 8
         let sourceRowStride = 128
         let destinationRowBase = 0
+        let dim = 1024
+        let qRows = 2048
+        let kvRows = 1024
+        let blocksPerRow = dim / 32
 
         let kSource = makeRows(rowCount: rowCount, phase: 0.11)
         let vSource = makeRows(rowCount: rowCount, phase: 0.47)
         let q = makeQuery(headCount: 16)
+        let hidden = makeHidden(dim: dim, phase: 0.19)
+        let norm = makeNorm(dim: dim)
 
         let kSourceBuffer = device.makeBuffer(bytes: kSource, length: kSource.count * MemoryLayout<Float>.stride)!
         let vSourceBuffer = device.makeBuffer(bytes: vSource, length: vSource.count * MemoryLayout<Float>.stride)!
         let qBuffer = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride)!
+        let hiddenBuffer = device.makeBuffer(bytes: hidden, length: hidden.count * MemoryLayout<Float>.stride)!
+        let normBuffer = device.makeBuffer(bytes: norm, length: norm.count * MemoryLayout<Float>.stride)!
+        let wqBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: qRows, blocksPerRow: blocksPerRow, phase: 0x11), length: qRows * blocksPerRow * 34)!
+        let wkBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: kvRows, blocksPerRow: blocksPerRow, phase: 0x31), length: kvRows * blocksPerRow * 34)!
+        let wvBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: kvRows, blocksPerRow: blocksPerRow, phase: 0x51), length: kvRows * blocksPerRow * 34)!
+        let fusedQOutput = device.makeBuffer(length: qRows * MemoryLayout<Float>.stride)!
+        let fusedKOutput = device.makeBuffer(length: kvRows * MemoryLayout<Float>.stride)!
+        let fusedVOutput = device.makeBuffer(length: kvRows * MemoryLayout<Float>.stride)!
 
         let singleK = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let fusedK = try makeTurboBuffers(rowCount: rowCount, layout: layout)
@@ -53,6 +69,14 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             highPrecisionBits: 3,
             highPrecisionChannelCount: 32,
             reserved: 0
+        )
+        var fusedQKVParams = FusedQKVParamsBench(
+            qRows: UInt32(qRows),
+            kvRows: UInt32(kvRows),
+            cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRow),
+            tokenCount: 1,
+            rmsEps: 1e-6
         )
         var attentionParams = TurboQuantAttentionParamsBench(
             seqLen: 1,
@@ -117,6 +141,25 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             }
         }
 
+        let fusedQKV = try await benchmark(name: "dequant_q8_0_fused_qkv_turbo", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(fusedQKVTurboPipeline)
+                $0.setBuffer(wqBuffer, offset: 0, index: 0)
+                $0.setBuffer(wkBuffer, offset: 0, index: 1)
+                $0.setBuffer(wvBuffer, offset: 0, index: 2)
+                $0.setBuffer(hiddenBuffer, offset: 0, index: 3)
+                $0.setBuffer(fusedQOutput, offset: 0, index: 4)
+                $0.setBuffer(fusedKOutput, offset: 0, index: 5)
+                $0.setBuffer(fusedVOutput, offset: 0, index: 6)
+                $0.setBytes(&fusedQKVParams, length: MemoryLayout<FusedQKVParamsBench>.stride, index: 7)
+                $0.setBuffer(normBuffer, offset: 0, index: 8)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: (qRows + kvRows + kvRows + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
         let decodeAttention = try await benchmark(name: "gqa_attention_turboquant_decode_aggressive", warmup: 3, iterations: 20) {
             try encodeAndWait {
                 $0.setComputePipelineState(kernel.decodeAttentionAggressivePipeline)
@@ -142,9 +185,12 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             }
         }
 
+        let fusedQKVMs = String(format: "%.3f", fusedQKV.perIterationMs)
         let singleQuantizeMs = String(format: "%.3f", singleQuantize.perIterationMs)
         let fusedQuantizeMs = String(format: "%.3f", fusedQuantize.perIterationMs)
         let decodeAttentionMs = String(format: "%.3f", decodeAttention.perIterationMs)
+        let fusedPlusQuantize = fusedQKV.perIterationMs + fusedQuantize.perIterationMs
+        let fusedPlusQuantizeMs = String(format: "%.3f", fusedPlusQuantize)
         let decodeVsSingle = String(
             format: "%.2f",
             decodeAttention.perIterationMs / max(singleQuantize.perIterationMs, 1e-9)
@@ -153,12 +199,19 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             format: "%.2f",
             decodeAttention.perIterationMs / max(fusedQuantize.perIterationMs, 1e-9)
         )
+        let quantizeVsFusedQKV = String(
+            format: "%.2f",
+            fusedQuantize.perIterationMs / max(fusedQKV.perIterationMs, 1e-9)
+        )
 
+        print("BENCHMARK: turboquant_fused_qkv_ms \(fusedQKVMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_ms \(singleQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_kv_ms \(fusedQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_decode_attention_ms \(decodeAttentionMs) ms/op")
+        print("BENCHMARK: turboquant_fused_qkv_plus_small_quantize_kv_ms \(fusedPlusQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize \(decodeVsSingle)x")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize_kv \(decodeVsFused)x")
+        print("BENCHMARK: turboquant_small_quantize_kv_vs_fused_qkv \(quantizeVsFusedQKV)x")
     }
 
     private func encodeAndWait(
@@ -233,11 +286,42 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         }
     }
 
+    private func makeHidden(dim: Int, phase: Float) -> [Float] {
+        (0..<dim).map { index in
+            let x = Float(index)
+            return sin(x * 0.021 + phase) + 0.4 * cos(x * 0.017 - phase)
+        }
+    }
+
+    private func makeNorm(dim: Int) -> [Float] {
+        (0..<dim).map { index in
+            0.92 + Float(index % 11) * 0.007
+        }
+    }
+
     private func makeSignal(phase: Float) -> [Float] {
         (0..<128).map { index in
             let x = Float(index)
             return sin(x * 0.15 + phase) + 0.35 * cos(x * 0.05 - phase)
         }
+    }
+
+    private func makeQ8Weights(rows: Int, blocksPerRow: Int, phase: UInt8) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: rows * blocksPerRow * 34)
+        for row in 0..<rows {
+            for block in 0..<blocksPerRow {
+                let base = (row * blocksPerRow + block) * 34
+                let scale = Float16(0.03125 + Double((row + block) % 13) * 0.002)
+                let rawScale = scale.bitPattern
+                bytes[base] = UInt8(rawScale & 0x00ff)
+                bytes[base + 1] = UInt8((rawScale >> 8) & 0x00ff)
+                for i in 0..<32 {
+                    let v = Int8(bitPattern: UInt8(truncatingIfNeeded: row &+ block &+ i &+ Int(phase)))
+                    bytes[base + 2 + i] = UInt8(bitPattern: v)
+                }
+            }
+        }
+        return bytes
     }
 }
 
@@ -268,4 +352,13 @@ private struct TurboQuantAttentionParamsBench {
     var regularBits: UInt32
     var highPrecisionBits: UInt32
     var reserved: UInt32
+}
+
+private struct FusedQKVParamsBench {
+    var qRows: UInt32
+    var kvRows: UInt32
+    var cols: UInt32
+    var blocksPerRow: UInt32
+    var tokenCount: UInt32
+    var rmsEps: Float
 }
