@@ -28,6 +28,11 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let kernel = try TurboQuantKernel(device: device)
         let registry = try KernelRegistry(device: device)
         let fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
+        let phase1Pipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_phase1")
+        let rotateOnlyPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_rotate_only")
+        let selectOnlyPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_select_only")
+        let selectOnlyBitonicPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_select_only_bitonic")
+        let phase2Pipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_phase2")
         let layout = try TurboQuantLayout(preset: .aggressive)
         let rowCount = 8
         let sourceRowStride = 128
@@ -59,6 +64,10 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let fusedK = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let fusedV = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let attentionOutput = device.makeBuffer(length: 16 * 128 * MemoryLayout<Float>.stride)!
+        let phaseNormalized = device.makeBuffer(length: rowCount * 128 * MemoryLayout<Float>.stride)!
+        let phaseRotated = device.makeBuffer(length: rowCount * 128 * MemoryLayout<Float>.stride)!
+        let phaseOutlierMask = device.makeBuffer(length: rowCount * 4 * MemoryLayout<UInt32>.stride)!
+        let phaseRowNorm = device.makeBuffer(length: rowCount * MemoryLayout<Float>.stride)!
 
         var quantizeParams = TurboQuantQuantizeParamsBench(
             rowCount: UInt32(rowCount),
@@ -134,6 +143,85 @@ struct TurboQuantDecodeBreakdownBenchmarks {
                 $0.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
                 $0.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
                 $0.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let quantizePhase1 = try await benchmark(name: "turboquant_quantize_small_aggressive_phase1", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(phase1Pipeline)
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(phaseNormalized, offset: 0, index: 1)
+                $0.setBuffer(phaseRotated, offset: 0, index: 2)
+                $0.setBuffer(phaseOutlierMask, offset: 0, index: 3)
+                $0.setBuffer(phaseRowNorm, offset: 0, index: 4)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 5)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 6)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let quantizeRotateOnly = try await benchmark(name: "turboquant_quantize_small_aggressive_rotate_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(rotateOnlyPipeline)
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(phaseRotated, offset: 0, index: 1)
+                $0.setBuffer(phaseRowNorm, offset: 0, index: 2)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 3)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 4)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let quantizeSelectOnly = try await benchmark(name: "turboquant_quantize_small_aggressive_select_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(selectOnlyPipeline)
+                $0.setBuffer(phaseRotated, offset: 0, index: 0)
+                $0.setBuffer(phaseOutlierMask, offset: 0, index: 1)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 2)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let quantizeSelectOnlyBitonic = try await benchmark(name: "turboquant_quantize_small_aggressive_select_only_bitonic", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(selectOnlyBitonicPipeline)
+                $0.setBuffer(phaseRotated, offset: 0, index: 0)
+                $0.setBuffer(phaseOutlierMask, offset: 0, index: 1)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 2)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let quantizePhase2 = try await benchmark(name: "turboquant_quantize_small_aggressive_phase2", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(phase2Pipeline)
+                $0.setBuffer(phaseNormalized, offset: 0, index: 0)
+                $0.setBuffer(phaseRotated, offset: 0, index: 1)
+                $0.setBuffer(phaseOutlierMask, offset: 0, index: 2)
+                $0.setBuffer(phaseRowNorm, offset: 0, index: 3)
+                $0.setBuffer(singleK.codes, offset: 0, index: 4)
+                $0.setBuffer(singleK.residualSigns, offset: 0, index: 5)
+                $0.setBuffer(singleK.outlierMask, offset: 0, index: 6)
+                $0.setBuffer(singleK.metadata, offset: 0, index: 7)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 8)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 9)
+                $0.setBuffer(kernel.keySigns.residual, offset: 0, index: 10)
                 $0.dispatchThreadgroups(
                     MTLSize(width: rowCount, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
@@ -219,6 +307,11 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let fusedQKVMs = String(format: "%.3f", fusedQKV.perIterationMs)
         let singleQuantizeMs = String(format: "%.3f", singleQuantize.perIterationMs)
         let fusedQuantizeMs = String(format: "%.3f", fusedQuantize.perIterationMs)
+        let phase1Ms = String(format: "%.3f", quantizePhase1.perIterationMs)
+        let rotateOnlyMs = String(format: "%.3f", quantizeRotateOnly.perIterationMs)
+        let selectOnlyMs = String(format: "%.3f", quantizeSelectOnly.perIterationMs)
+        let selectOnlyBitonicMs = String(format: "%.3f", quantizeSelectOnlyBitonic.perIterationMs)
+        let phase2Ms = String(format: "%.3f", quantizePhase2.perIterationMs)
         let separateQuantizeKVms = String(format: "%.3f", separateQuantizeKV.perIterationMs)
         let decodeAttentionMs = String(format: "%.3f", decodeAttention.perIterationMs)
         let fusedPlusQuantize = fusedQKV.perIterationMs + fusedQuantize.perIterationMs
@@ -243,6 +336,11 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         print("BENCHMARK: turboquant_fused_qkv_ms \(fusedQKVMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_ms \(singleQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_kv_ms \(fusedQuantizeMs) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_phase1_ms \(phase1Ms) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_rotate_only_ms \(rotateOnlyMs) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_select_only_ms \(selectOnlyMs) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_select_only_bitonic_ms \(selectOnlyBitonicMs) ms/op")
+        print("BENCHMARK: turboquant_small_quantize_phase2_ms \(phase2Ms) ms/op")
         print("BENCHMARK: turboquant_small_quantize_separate_kv_ms \(separateQuantizeKVms) ms/op")
         print("BENCHMARK: turboquant_decode_attention_ms \(decodeAttentionMs) ms/op")
         print("BENCHMARK: turboquant_fused_qkv_plus_small_quantize_kv_ms \(fusedPlusQuantizeMs) ms/op")

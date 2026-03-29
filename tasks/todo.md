@@ -912,6 +912,44 @@ See benchmarks/experiment_log.md
   - The remaining wall is split between the fused tiny-row K/V append quantizer and decode attention.
   - A follow-up attempt to parallelize the aggressive pack stage cleared parity but regressed the breakdown badly, so the quantizer tax is not explained by the final pack loop alone.
   - A follow-up comparison of fused K/V append quantization versus two separate small-row K and V dispatches showed they are nearly identical on this GPU (`0.806 ms` fused vs `0.792 ms` separate), so the remaining quantizer cost is not explained by the fused-vs-separate dispatch structure either.
+
+## TurboQuant Bitonic Top-32 Selection
+
+## Plan
+- [x] Split the aggressive small-row quantizer into benchmark-only front-half and back-half stages.
+- [x] Split the front half again to isolate `normalize + Hadamard` from the outlier-channel top-32 selection step.
+- [x] Replace the serial lane-0 outlier picker with an exact parallel bitonic selector in the real aggressive small-row quantizer if it preserves parity and improves the fused tiny-row K/V append path.
+- [x] Re-run attention parity, exact smoke, exact decode breakdown, 512/1024 aggressive long-context benchmarks, and the default publishable benchmark before keeping the change.
+
+## Review
+- Added benchmark-only aggressive quantizer splits in `TurboQuant.metal` plus `TurboQuantDecodeBreakdownBenchmarks.swift`.
+- The deeper breakdown showed the front half of the aggressive small-row quantizer was dominant, and that the serial top-32 picker itself was the main front-half tax:
+  - `turboquant_small_quantize_phase1_ms=0.466`
+  - `turboquant_small_quantize_rotate_only_ms=0.171`
+  - `turboquant_small_quantize_select_only_ms=0.451`
+  - `turboquant_small_quantize_select_only_bitonic_ms=0.197`
+- Replaced the serial lane-0 top-32 selection inside `tq_quantize_small_aggressive_row` with an exact parallel bitonic selector.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Updated kept points:
+  - Exact breakdown:
+    - `turboquant_small_quantize_ms=0.646`
+    - `turboquant_small_quantize_kv_ms=0.531`
+    - `turboquant_decode_attention_ms=1.055`
+    - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.732`
+  - Long-context aggressive:
+    - `prompt_len=512`, `decode_tokens=4`: `22.20 tok/s`, `4195.15 ms` TTFT
+    - `prompt_len=1024`, `decode_tokens=4`: `16.47 tok/s`, `8357.66 ms` TTFT
+  - Default publishable benchmark remained deterministic and clean:
+    - `250.8 tok/s` median decode
+    - `3.3 ms` median TTFT
+    - token hash `0afae14a84cf0df8`
+- Current conclusion: the next major TurboQuant gain came from the quantizer’s outlier-channel selection, not another attention-kernel tweak. On this GPU, exact parallel top-32 selection is a production keep.
 # Exact Path Rewrite Program
 
 ## Goal

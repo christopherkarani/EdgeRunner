@@ -1,17 +1,17 @@
 {
   "context_window" : 2048,
   "decode_throughput" : {
-    "max" : 209.82023392074768,
-    "mean" : 202.13371853385991,
-    "median" : 199.53994510187897,
-    "min" : 198.38046561613533,
-    "stddev" : 4.978478299617656
+    "max" : 252.9230324821562,
+    "mean" : 250.05695945693623,
+    "median" : 250.75702212214975,
+    "min" : 246.75041123044662,
+    "stddev" : 2.684127697560649
   },
   "deterministic" : true,
   "device" : "Apple Silicon",
   "e2e_throughput" : {
-    "mean" : 202.41329566516049,
-    "median" : 199.84606918972557
+    "mean" : 250.37065728573438,
+    "median" : 251.00473420225273
   },
   "greedy_prefix" : [
     1,
@@ -21,80 +21,80 @@
   "is_canonical_run" : true,
   "lm_head_avg_ms" : null,
   "memory_mb" : {
-    "model_load" : 84.46875,
-    "peak_rss" : 310.734375
+    "model_load" : 294.328125,
+    "peak_rss" : 520
   },
   "model" : "Qwen3-0.6B-Q8_0",
   "model_file_size_bytes" : 639446688,
   "model_path" : "\/tmp\/edgerunner-models\/Qwen3-0.6B-Q8_0.gguf",
   "num_runs" : 5,
   "per_token_latency_ms" : {
-    "median" : 4.9868750000000004,
-    "p90" : 5.6556250000000006,
-    "p99" : 6.2437500000000004
+    "median" : 3.9871250000000003,
+    "p90" : 4.5624580000000003,
+    "p99" : 4.7667920000000006
   },
   "runs" : [
     {
-      "decode_tok_per_sec" : 209.82023392074768,
+      "decode_tok_per_sec" : 247.78862069781275,
       "decode_token_count" : 127,
-      "decode_total_ms" : 605.28004200000009,
-      "e2e_tok_per_sec" : 210.17005507727956,
+      "decode_total_ms" : 512.53362500000003,
+      "e2e_tok_per_sec" : 248.08942073058461,
       "has_nan" : false,
       "run" : 0,
       "token_count" : 129,
-      "total_ms" : 609.0306250000001,
-      "ttft_ms" : 3.7492920000000005
+      "total_ms" : 515.94299999999998,
+      "ttft_ms" : 3.4078750000000002
     },
     {
-      "decode_tok_per_sec" : 204.49273468631637,
+      "decode_tok_per_sec" : 246.75041123044662,
       "decode_token_count" : 127,
-      "decode_total_ms" : 621.04895900000008,
-      "e2e_tok_per_sec" : 204.82165636722831,
+      "decode_total_ms" : 514.69012500000008,
+      "e2e_tok_per_sec" : 247.0935939358429,
       "has_nan" : false,
       "run" : 1,
       "token_count" : 129,
-      "total_ms" : 624.93391700000006,
-      "ttft_ms" : 3.8842500000000002
+      "total_ms" : 518.022333,
+      "ttft_ms" : 3.3319160000000001
     },
     {
-      "decode_tok_per_sec" : 199.53994510187897,
+      "decode_tok_per_sec" : 252.9230324821562,
       "decode_token_count" : 127,
-      "decode_total_ms" : 636.46404200000006,
-      "e2e_tok_per_sec" : 199.84606918972557,
+      "decode_total_ms" : 502.12904200000003,
+      "e2e_tok_per_sec" : 253.25712003505836,
       "has_nan" : false,
       "run" : 2,
       "token_count" : 129,
-      "total_ms" : 640.49295800000004,
-      "ttft_ms" : 4.0272079999999999
+      "total_ms" : 505.41520800000006,
+      "ttft_ms" : 3.2857910000000001
     },
     {
-      "decode_tok_per_sec" : 198.43521334422121,
+      "decode_tok_per_sec" : 252.0657107521159,
       "decode_token_count" : 127,
-      "decode_total_ms" : 640.00737500000002,
-      "e2e_tok_per_sec" : 198.60193793412637,
+      "decode_total_ms" : 503.83687500000002,
+      "e2e_tok_per_sec" : 252.40841752493333,
       "has_nan" : false,
       "run" : 3,
       "token_count" : 129,
-      "total_ms" : 644.50529200000005,
-      "ttft_ms" : 4.493709
+      "total_ms" : 507.11462500000005,
+      "ttft_ms" : 3.2772920000000001
     },
     {
-      "decode_tok_per_sec" : 198.38046561613533,
+      "decode_tok_per_sec" : 250.75702212214975,
       "decode_token_count" : 127,
-      "decode_total_ms" : 640.18400000000008,
-      "e2e_tok_per_sec" : 198.62675975744258,
+      "decode_total_ms" : 506.46637500000003,
+      "e2e_tok_per_sec" : 251.00473420225273,
       "has_nan" : false,
       "run" : 4,
       "token_count" : 129,
-      "total_ms" : 644.42475000000002,
-      "ttft_ms" : 4.2382080000000002
+      "total_ms" : 509.95054100000004,
+      "ttft_ms" : 3.4834160000000001
     }
   ],
-  "timestamp" : "2026-03-23T16:52:30Z",
+  "timestamp" : "2026-03-29T01:15:07Z",
   "token_hash" : "0afae14a84cf0df8",
   "tokens_per_run" : 128,
   "ttft_ms" : {
-    "mean" : 4.0785333999999995,
-    "median" : 4.0272079999999999
+    "mean" : 3.3572580000000003,
+    "median" : 3.3319160000000001
   }
 }

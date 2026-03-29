@@ -260,6 +260,57 @@ inline void tq_inverse_randomized_hadamard_parallel(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+inline void tq_select_top32_bitonic_mask(
+    threadgroup const float *rotated,
+    threadgroup uint *maskWords,
+    threadgroup float *magnitudes,
+    threadgroup uint *indices,
+    uint lane,
+    uint laneCount
+) {
+    for (uint dim = lane; dim < 128; dim += laneCount) {
+        magnitudes[dim] = fabs(rotated[dim]);
+        indices[dim] = dim;
+    }
+    if (lane < 4) {
+        maskWords[lane] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k = 2; k <= 128; k <<= 1) {
+        for (uint j = k >> 1; j > 0; j >>= 1) {
+            for (uint i = lane; i < 128; i += laneCount) {
+                uint ixj = i ^ j;
+                if (ixj > i) {
+                    bool ascending = (i & k) == 0;
+                    bool shouldSwap = ascending
+                        ? magnitudes[i] > magnitudes[ixj]
+                        : magnitudes[i] < magnitudes[ixj];
+                    if (shouldSwap) {
+                        float tmpMagnitude = magnitudes[i];
+                        magnitudes[i] = magnitudes[ixj];
+                        magnitudes[ixj] = tmpMagnitude;
+                        uint tmpIndex = indices[i];
+                        indices[i] = indices[ixj];
+                        indices[ixj] = tmpIndex;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    for (uint rank = lane; rank < 32; rank += laneCount) {
+        uint dim = indices[127 - rank];
+        atomic_fetch_or_explicit(
+            (threadgroup atomic_uint *)&maskWords[dim >> 5],
+            1u << (dim & 31),
+            memory_order_relaxed
+        );
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 kernel void turboquant_quantize_rows(
     device const float *source [[buffer(0)]],
     device uint *outCodes [[buffer(1)]],
@@ -400,6 +451,8 @@ inline void tq_quantize_small_aggressive_row(
     threadgroup float *projectedResidual,
     threadgroup uint *codes,
     threadgroup uint *maskWords,
+    threadgroup float *magnitudes,
+    threadgroup uint *indices,
     threadgroup float *reduction,
     threadgroup float &rowNormValue,
     threadgroup float &residualNormValue,
@@ -408,7 +461,6 @@ inline void tq_quantize_small_aggressive_row(
     constexpr uint kLaneCount = 32;
     constexpr uint kRegularBits = 2;
     constexpr uint kHighBits = 3;
-    constexpr uint kHighCount = 32;
 
     float partialNormSq = 0.0;
     for (uint dim = lane; dim < 128; dim += kLaneCount) {
@@ -461,22 +513,7 @@ inline void tq_quantize_small_aggressive_row(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_forward_randomized_hadamard_parallel(rotated, rotationSigns, lane, kLaneCount);
 
-    if (lane == 0) {
-        for (uint pick = 0; pick < kHighCount; ++pick) {
-            float bestMagnitude = -1.0;
-            uint bestIndex = 0;
-            for (uint dim = 0; dim < 128; ++dim) {
-                if (tq_get_bit(maskWords, dim) == 1u) { continue; }
-                float magnitude = fabs(rotated[dim]);
-                if (magnitude > bestMagnitude) {
-                    bestMagnitude = magnitude;
-                    bestIndex = dim;
-                }
-            }
-            maskWords[bestIndex >> 5] |= (1u << (bestIndex & 31));
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tq_select_top32_bitonic_mask(rotated, maskWords, magnitudes, indices, lane, kLaneCount);
 
     for (uint dim = lane; dim < 128; dim += kLaneCount) {
         bool useHighPrecision = tq_get_bit(maskWords, dim) == 1u;
@@ -562,6 +599,8 @@ kernel void turboquant_quantize_rows_small_aggressive(
     threadgroup float projectedResidual[128];
     threadgroup uint codes[128];
     threadgroup uint maskWords[4];
+    threadgroup float magnitudes[128];
+    threadgroup uint indices[128];
     threadgroup float reduction[32];
     threadgroup float rowNormValue;
     threadgroup float residualNormValue;
@@ -590,6 +629,8 @@ kernel void turboquant_quantize_rows_small_aggressive(
         projectedResidual,
         codes,
         maskWords,
+        magnitudes,
+        indices,
         reduction,
         rowNormValue,
         residualNormValue,
@@ -625,6 +666,8 @@ kernel void turboquant_quantize_rows_small_aggressive_kv(
     threadgroup float projectedResidual[128];
     threadgroup uint codes[128];
     threadgroup uint maskWords[4];
+    threadgroup float magnitudes[128];
+    threadgroup uint indices[128];
     threadgroup float reduction[32];
     threadgroup float rowNormValue;
     threadgroup float residualNormValue;
@@ -649,6 +692,8 @@ kernel void turboquant_quantize_rows_small_aggressive_kv(
         projectedResidual,
         codes,
         maskWords,
+        magnitudes,
+        indices,
         reduction,
         rowNormValue,
         residualNormValue,
@@ -672,11 +717,379 @@ kernel void turboquant_quantize_rows_small_aggressive_kv(
         projectedResidual,
         codes,
         maskWords,
+        magnitudes,
+        indices,
         reduction,
         rowNormValue,
         residualNormValue,
         params.codeWordsPerRow
     );
+}
+
+kernel void turboquant_quantize_rows_small_aggressive_phase1(
+    device const float *source [[buffer(0)]],
+    device float *outNormalized [[buffer(1)]],
+    device float *outRotated [[buffer(2)]],
+    device uint *outOutlierMask [[buffer(3)]],
+    device float *outRowNorm [[buffer(4)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(5)]],
+    device const float *rotationSigns [[buffer(6)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    constexpr uint kLaneCount = 32;
+
+    threadgroup float normalized[128];
+    threadgroup float rotated[128];
+    threadgroup uint maskWords[4];
+    threadgroup float magnitudes[128];
+    threadgroup uint indices[128];
+    threadgroup float reduction[32];
+    threadgroup float rowNormValue;
+
+    uint sourceBase = rowIndex * params.sourceRowStride;
+    float partialNormSq = 0.0;
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        float value = source[sourceBase + dim];
+        normalized[dim] = value;
+        rotated[dim] = value;
+        partialNormSq += value * value;
+    }
+    if (lane < 4) {
+        maskWords[lane] = 0u;
+    }
+    reduction[lane] = partialNormSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kLaneCount >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lane == 0) {
+        rowNormValue = sqrt(reduction[0]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (rowNormValue == 0.0) {
+        for (uint dim = lane; dim < 128; dim += kLaneCount) {
+            outNormalized[rowIndex * 128 + dim] = 0.0;
+            outRotated[rowIndex * 128 + dim] = 0.0;
+        }
+        if (lane < 4) {
+            outOutlierMask[rowIndex * 4 + lane] = 0u;
+        }
+        if (lane == 0) {
+            outRowNorm[rowIndex] = 0.0;
+        }
+        return;
+    }
+
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        normalized[dim] /= rowNormValue;
+        rotated[dim] = normalized[dim];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tq_forward_randomized_hadamard_parallel(rotated, rotationSigns, lane, kLaneCount);
+
+    tq_select_top32_bitonic_mask(rotated, maskWords, magnitudes, indices, lane, kLaneCount);
+    if (lane == 0) {
+        outRowNorm[rowIndex] = rowNormValue;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        outNormalized[rowIndex * 128 + dim] = normalized[dim];
+        outRotated[rowIndex * 128 + dim] = rotated[dim];
+    }
+    if (lane < 4) {
+        outOutlierMask[rowIndex * 4 + lane] = maskWords[lane];
+    }
+}
+
+kernel void turboquant_quantize_rows_small_aggressive_rotate_only(
+    device const float *source [[buffer(0)]],
+    device float *outRotated [[buffer(1)]],
+    device float *outRowNorm [[buffer(2)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(3)]],
+    device const float *rotationSigns [[buffer(4)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    constexpr uint kLaneCount = 32;
+
+    threadgroup float rotated[128];
+    threadgroup float reduction[32];
+    threadgroup float rowNormValue;
+
+    uint sourceBase = rowIndex * params.sourceRowStride;
+    float partialNormSq = 0.0;
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        float value = source[sourceBase + dim];
+        rotated[dim] = value;
+        partialNormSq += value * value;
+    }
+    reduction[lane] = partialNormSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kLaneCount >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lane == 0) {
+        rowNormValue = sqrt(reduction[0]);
+        outRowNorm[rowIndex] = rowNormValue;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (rowNormValue == 0.0) {
+        for (uint dim = lane; dim < 128; dim += kLaneCount) {
+            outRotated[rowIndex * 128 + dim] = 0.0;
+        }
+        return;
+    }
+
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        rotated[dim] /= rowNormValue;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tq_forward_randomized_hadamard_parallel(rotated, rotationSigns, lane, kLaneCount);
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        outRotated[rowIndex * 128 + dim] = rotated[dim];
+    }
+}
+
+kernel void turboquant_quantize_rows_small_aggressive_select_only(
+    device const float *rotatedSource [[buffer(0)]],
+    device uint *outOutlierMask [[buffer(1)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(2)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    constexpr uint kHighCount = 32;
+
+    threadgroup float rotated[128];
+    threadgroup uint maskWords[4];
+
+    for (uint dim = lane; dim < 128; dim += 32) {
+        rotated[dim] = rotatedSource[rowIndex * 128 + dim];
+    }
+    if (lane < 4) {
+        maskWords[lane] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        for (uint pick = 0; pick < kHighCount; ++pick) {
+            float bestMagnitude = -1.0;
+            uint bestIndex = 0;
+            for (uint dim = 0; dim < 128; ++dim) {
+                if (tq_get_bit(maskWords, dim) == 1u) { continue; }
+                float magnitude = fabs(rotated[dim]);
+                if (magnitude > bestMagnitude) {
+                    bestMagnitude = magnitude;
+                    bestIndex = dim;
+                }
+            }
+            maskWords[bestIndex >> 5] |= (1u << (bestIndex & 31));
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane < 4) {
+        outOutlierMask[rowIndex * 4 + lane] = maskWords[lane];
+    }
+}
+
+kernel void turboquant_quantize_rows_small_aggressive_select_only_bitonic(
+    device const float *rotatedSource [[buffer(0)]],
+    device uint *outOutlierMask [[buffer(1)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(2)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    threadgroup float magnitudes[128];
+    threadgroup uint indices[128];
+    for (uint dim = lane; dim < 128; dim += 32) {
+        magnitudes[dim] = fabs(rotatedSource[rowIndex * 128 + dim]);
+        indices[dim] = dim;
+    }
+    if (lane < 4) {
+        outOutlierMask[rowIndex * 4 + lane] = 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k = 2; k <= 128; k <<= 1) {
+        for (uint j = k >> 1; j > 0; j >>= 1) {
+            for (uint i = lane; i < 128; i += 32) {
+                uint ixj = i ^ j;
+                if (ixj > i) {
+                    bool ascending = (i & k) == 0;
+                    bool shouldSwap = ascending
+                        ? magnitudes[i] > magnitudes[ixj]
+                        : magnitudes[i] < magnitudes[ixj];
+                    if (shouldSwap) {
+                        float tmpMagnitude = magnitudes[i];
+                        magnitudes[i] = magnitudes[ixj];
+                        magnitudes[ixj] = tmpMagnitude;
+                        uint tmpIndex = indices[i];
+                        indices[i] = indices[ixj];
+                        indices[ixj] = tmpIndex;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    for (uint rank = lane; rank < 32; rank += 32) {
+        uint dim = indices[127 - rank];
+        atomic_fetch_or_explicit(
+            (device atomic_uint *)&outOutlierMask[rowIndex * 4 + (dim >> 5)],
+            1u << (dim & 31),
+            memory_order_relaxed
+        );
+    }
+}
+
+kernel void turboquant_quantize_rows_small_aggressive_phase2(
+    device const float *normalizedSource [[buffer(0)]],
+    device const float *rotatedSource [[buffer(1)]],
+    device const uint *inputOutlierMask [[buffer(2)]],
+    device const float *inputRowNorm [[buffer(3)]],
+    device uint *outCodes [[buffer(4)]],
+    device uint *outResidualSigns [[buffer(5)]],
+    device uint *outOutlierMask [[buffer(6)]],
+    device float *outMetadata [[buffer(7)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(8)]],
+    device const float *rotationSigns [[buffer(9)]],
+    device const float *residualSigns [[buffer(10)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    constexpr uint kLaneCount = 32;
+
+    threadgroup float normalized[128];
+    threadgroup float rotated[128];
+    threadgroup float reconstructed[128];
+    threadgroup float residual[128];
+    threadgroup float projectedResidual[128];
+    threadgroup uint codes[128];
+    threadgroup uint maskWords[4];
+    threadgroup float reduction[32];
+    threadgroup float residualNormValue;
+    threadgroup float rowNormValue;
+
+    if (lane == 0) {
+        rowNormValue = inputRowNorm[rowIndex];
+    }
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        normalized[dim] = normalizedSource[rowIndex * 128 + dim];
+        rotated[dim] = rotatedSource[rowIndex * 128 + dim];
+        reconstructed[dim] = 0.0;
+        residual[dim] = 0.0;
+        projectedResidual[dim] = 0.0;
+        codes[dim] = 0u;
+    }
+    if (lane < 4) {
+        maskWords[lane] = inputOutlierMask[rowIndex * 4 + lane];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (rowNormValue == 0.0) {
+        for (uint index = lane; index < params.codeWordsPerRow; index += kLaneCount) {
+            outCodes[rowIndex * params.codeWordsPerRow + index] = 0u;
+        }
+        if (lane < 4) {
+            outResidualSigns[rowIndex * 4 + lane] = 0u;
+            outOutlierMask[rowIndex * 4 + lane] = maskWords[lane];
+        }
+        if (lane == 0) {
+            outMetadata[rowIndex * 2] = 0.0;
+            outMetadata[rowIndex * 2 + 1] = 0.0;
+        }
+        return;
+    }
+
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        bool useHighPrecision = tq_get_bit(maskWords, dim) == 1u;
+        uint code = tq_code_for_value(rotated[dim], useHighPrecision ? 3u : 2u);
+        codes[dim] = code;
+        reconstructed[dim] = useHighPrecision ? tq_centroid_3bit(code) : tq_centroid_2bit(code);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    tq_inverse_randomized_hadamard_parallel(reconstructed, rotationSigns, lane, kLaneCount);
+
+    float partialResidualSq = 0.0;
+    for (uint dim = lane; dim < 128; dim += kLaneCount) {
+        residual[dim] = normalized[dim] - reconstructed[dim];
+        projectedResidual[dim] = residual[dim];
+        partialResidualSq += residual[dim] * residual[dim];
+    }
+    reduction[lane] = partialResidualSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kLaneCount >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (lane == 0) {
+        residualNormValue = sqrt(reduction[0]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    tq_forward_randomized_hadamard_parallel(projectedResidual, residualSigns, lane, kLaneCount);
+
+    if (lane == 0) {
+        uint codeWords[16];
+        uint signWords[4];
+        for (uint i = 0; i < 16; ++i) { codeWords[i] = 0u; }
+        for (uint i = 0; i < 4; ++i) { signWords[i] = 0u; }
+
+        uint sidebandOffset = 256u;
+        for (uint dim = 0; dim < 128; ++dim) {
+            uint code = codes[dim];
+            tq_insert_code(codeWords, dim * 2u, 2u, code & 0x3u);
+            if (tq_get_bit(maskWords, dim) == 1u) {
+                tq_insert_code(codeWords, sidebandOffset, 1u, code >> 2u);
+                sidebandOffset += 1u;
+            }
+            if (projectedResidual[dim] >= 0.0) {
+                signWords[dim >> 5] |= (1u << (dim & 31));
+            }
+        }
+
+        device uint *codeDst = outCodes + rowIndex * params.codeWordsPerRow;
+        device uint *signDst = outResidualSigns + rowIndex * 4;
+        device uint *maskDst = outOutlierMask + rowIndex * 4;
+        device float *metaDst = outMetadata + rowIndex * 2;
+        for (uint i = 0; i < params.codeWordsPerRow; ++i) { codeDst[i] = codeWords[i]; }
+        for (uint i = 0; i < 4; ++i) {
+            signDst[i] = signWords[i];
+            maskDst[i] = maskWords[i];
+        }
+        metaDst[0] = rowNormValue;
+        metaDst[1] = residualNormValue;
+    }
 }
 
 kernel void gqa_attention_turboquant(

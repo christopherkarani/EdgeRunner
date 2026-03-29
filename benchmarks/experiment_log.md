@@ -622,3 +622,9 @@ To reach 278 tok/s = 3.60ms/token:
 | Available for 4B | ❌ OOM likely | ✅ Fits in 6GB | Enabled |
 
 The optimization removes redundant float32 weight caches that existed for a prefill fallback path that is no longer needed. All inference now uses fused Q8_0 kernels directly on the raw quantized weights.
+
+### Experiment 33: TurboQuant Aggressive Bitonic Top-32 Selector
+- **Hypothesis:** The aggressive small-row quantizer is still spending too much time in the serial lane-0 outlier-channel picker; replacing it with an exact parallel bitonic top-32 selector should reduce the fused tiny-row K/V append path enough to move the real 512/1024 TurboQuant benchmarks.
+- **Change:** Added benchmark-only phase splits for the aggressive small-row quantizer, confirmed that outlier selection dominated the quantizer front half, then replaced the serial top-32 selection in `tq_quantize_small_aggressive_row` with an exact parallel bitonic selector.
+- **Result:** KEPT. Exact breakdown improved from `small_quantize_kv=0.816 ms` to `0.531 ms`, while real long-context aggressive TurboQuant moved to `22.20 tok/s` at prompt `512` and `16.47 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `250.8 tok/s`.
+- **Status:** KEPT
