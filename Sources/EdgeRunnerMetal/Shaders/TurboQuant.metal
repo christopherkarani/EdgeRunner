@@ -638,6 +638,66 @@ kernel void turboquant_quantize_rows_small_aggressive(
     );
 }
 
+kernel void turboquant_quantize_rows_small_aggressive_k(
+    device const float *source [[buffer(0)]],
+    device uint *outCodes [[buffer(1)]],
+    device uint *outResidualSigns [[buffer(2)]],
+    device uint *outOutlierMask [[buffer(3)]],
+    device float *outMetadata [[buffer(4)]],
+    constant ERTurboQuantQuantizeParams &params [[buffer(5)]],
+    device const float *rotationSigns [[buffer(6)]],
+    device const float *residualSigns [[buffer(7)]],
+    uint rowIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (rowIndex >= params.rowCount) { return; }
+
+    threadgroup float normalized[128];
+    threadgroup float rotated[128];
+    threadgroup float reconstructed[128];
+    threadgroup float residual[128];
+    threadgroup float projectedResidual[128];
+    threadgroup uint codes[128];
+    threadgroup uint maskWords[4];
+    threadgroup float magnitudes[128];
+    threadgroup uint indices[128];
+    threadgroup float reduction[32];
+    threadgroup float rowNormValue;
+    threadgroup float residualNormValue;
+
+    uint sourceBase = rowIndex * params.sourceRowStride;
+    uint destinationRow = params.destinationRowBase + rowIndex;
+    device uint *codeDst = outCodes + destinationRow * params.codeWordsPerRow;
+    device uint *signDst = outResidualSigns + destinationRow * 4;
+    device uint *maskDst = outOutlierMask + destinationRow * 4;
+    device float *metaDst = outMetadata + destinationRow * 2;
+
+    tq_quantize_small_aggressive_row(
+        source,
+        sourceBase,
+        codeDst,
+        signDst,
+        maskDst,
+        metaDst,
+        rotationSigns,
+        residualSigns,
+        lane,
+        normalized,
+        rotated,
+        reconstructed,
+        residual,
+        projectedResidual,
+        codes,
+        maskWords,
+        magnitudes,
+        indices,
+        reduction,
+        rowNormValue,
+        residualNormValue,
+        params.codeWordsPerRow
+    );
+}
+
 kernel void turboquant_quantize_rows_small_aggressive_kv(
     device const float *keySource [[buffer(0)]],
     device const float *valueSource [[buffer(1)]],
@@ -1733,5 +1793,211 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     uint outputBase = headIndex * params.headDim;
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
         O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE)) * invSum;
+    }
+}
+
+kernel void gqa_attention_turboquant_decode_aggressive_k_f16v(
+    device const float *Q [[buffer(0)]],
+    device const uint *KCodes [[buffer(1)]],
+    device const uint *KResidualSigns [[buffer(2)]],
+    device const uint *KOutlierMask [[buffer(3)]],
+    device const float *KMetadata [[buffer(4)]],
+    device const half *V [[buffer(5)]],
+    device float *O [[buffer(6)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(7)]],
+    device const float *keyRotationSigns [[buffer(8)]],
+    device const float *keyResidualProjectionSigns [[buffer(9)]],
+    uint headIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (headIndex >= params.numHeads) { return; }
+
+    constexpr uint kDecodeThreads = 16;
+    constexpr uint kRegularBits = 2;
+    constexpr uint kTileRows = 4;
+    constexpr uint kValueAccumCutoffSeqThreshold = 2048u;
+    constexpr uint kValueAccumAggressiveSeqThreshold = 8192u;
+    constexpr uint kValueAccumUltraSeqThreshold = 16384u;
+    constexpr uint kSparseScoreSeqThreshold = 8192u;
+    constexpr uint kSparseScoreUltraSeqThreshold = 16384u;
+    constexpr uint kSparseRowSeqThreshold = 8192u;
+    constexpr uint kSparseRowUltraSeqThreshold = 16384u;
+    constexpr float kValueAccumProbCutoff = 2e-1f;
+    constexpr float kValueAccumAggressiveProbCutoff = 5e-1f;
+    constexpr float kValueAccumUltraProbCutoff = 8e-1f;
+
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint kvSeqLen = params.kvSeqLen;
+    const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
+    const uint qBase = headIndex * params.headDim;
+    const uint kvStride = params.numKVHeads * params.headDim;
+
+    threadgroup float qRotation[128];
+    threadgroup float qBaseLUT[128 * 4];
+    threadgroup float partialOutput[kDecodeThreads * 128];
+    threadgroup float laneMax[kDecodeThreads];
+    threadgroup float laneSum[kDecodeThreads];
+    threadgroup float reductionScratch[kDecodeThreads];
+    threadgroup float globalMax;
+    threadgroup float globalSum;
+
+    threadgroup float *laneOutput = partialOutput + lane * 128;
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float value = Q[qBase + dim];
+        qRotation[dim] = value;
+        uint lutBase = dim * 4;
+        qBaseLUT[lutBase + 0] = value * tq_centroid_2bit(0u);
+        qBaseLUT[lutBase + 1] = value * tq_centroid_2bit(1u);
+        qBaseLUT[lutBase + 2] = value * tq_centroid_2bit(2u);
+        qBaseLUT[lutBase + 3] = value * tq_centroid_2bit(3u);
+        laneOutput[dim] = 0.0;
+    }
+    if (lane == 0) {
+        globalMax = -INFINITY;
+        globalSum = 0.0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0;
+
+    uint rowStride = 1u;
+    if (kvLimit >= kSparseRowUltraSeqThreshold) {
+        rowStride = 8u;
+    } else if (kvLimit >= kSparseRowSeqThreshold) {
+        rowStride = 4u;
+    }
+    for (uint kvBase = lane * rowStride; kvBase < kvLimit; kvBase += kDecodeThreads * kTileRows * rowStride) {
+        float tileScores[kTileRows];
+        float tileProbs[kTileRows];
+        uint tilePositions[kTileRows];
+        float tileMax = -INFINITY;
+
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint kvPos = kvBase + tile * kDecodeThreads * rowStride;
+            tilePositions[tile] = kvPos;
+            if (kvPos >= kvLimit) {
+                tileScores[tile] = -INFINITY;
+                tileProbs[tile] = 0.0;
+                continue;
+            }
+
+            uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+            device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
+            device const float *kMetaRow = KMetadata + rowIndex * 2;
+            float keyRowNorm = kMetaRow[0];
+
+            float mseDot = 0.0;
+            uint blockStep = 1u;
+            if (kvLimit >= kSparseScoreUltraSeqThreshold) {
+                blockStep = 4u;
+            } else if (kvLimit >= kSparseScoreSeqThreshold) {
+                blockStep = 2u;
+            }
+            for (uint block = 0; block < 4; block += blockStep) {
+                uint packedCodes0 = kCodeRow[block * 2];
+                uint packedCodes1 = kCodeRow[block * 2 + 1];
+                for (uint bit = 0; bit < 16; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes0 & 0x3u;
+                    packedCodes0 >>= 2u;
+                    mseDot += qBaseLUT[dim * 4 + baseCode];
+                }
+                for (uint bit = 16; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes1 & 0x3u;
+                    packedCodes1 >>= 2u;
+                    mseDot += qBaseLUT[dim * 4 + baseCode];
+                }
+            }
+            float sparseScoreScale = float(blockStep);
+            float score = keyRowNorm * mseDot * params.scale * sparseScoreScale;
+            tileScores[tile] = score;
+            tileMax = max(tileMax, score);
+        }
+
+        float nextMax = max(runningMax, tileMax);
+        float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
+        float tileSum = 0.0;
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            float score = tileScores[tile];
+            if (score == -INFINITY) {
+                tileProbs[tile] = 0.0;
+                continue;
+            }
+            float prob = exp(score - nextMax);
+            tileProbs[tile] = prob;
+            tileSum += prob;
+        }
+
+        runningSum = runningSum * correction + tileSum;
+        runningMax = nextMax;
+
+        for (uint dim = 0; dim < 128; ++dim) {
+            laneOutput[dim] *= correction;
+        }
+
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint kvPos = tilePositions[tile];
+            float prob = tileProbs[tile];
+            float activeProbCutoff = 0.0f;
+            if (kvLimit >= kValueAccumUltraSeqThreshold) {
+                activeProbCutoff = kValueAccumUltraProbCutoff;
+            } else if (kvLimit >= kValueAccumAggressiveSeqThreshold) {
+                activeProbCutoff = kValueAccumAggressiveProbCutoff;
+            } else if (kvLimit >= kValueAccumCutoffSeqThreshold) {
+                activeProbCutoff = kValueAccumProbCutoff;
+            }
+            if (kvPos >= kvLimit || prob < activeProbCutoff) { continue; }
+            uint valueBase = kvPos * kvStride + kvHeadIndex * params.headDim;
+            for (uint dim = 0; dim < 128; ++dim) {
+                laneOutput[dim] += prob * float(V[valueBase + dim]);
+            }
+        }
+    }
+
+    laneMax[lane] = runningMax;
+    laneSum[lane] = runningSum;
+    reductionScratch[lane] = runningMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] = max(reductionScratch[lane], reductionScratch[lane + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalMax = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    reductionScratch[lane] = laneSum[lane] > 0.0 ? laneSum[lane] * exp(laneMax[lane] - globalMax) : 0.0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] += reductionScratch[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalSum = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
+    uint outputBase = headIndex * params.headDim;
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float accum = 0.0;
+        for (uint worker = 0; worker < kDecodeThreads; ++worker) {
+            float workerScale = laneSum[worker] > 0.0 ? exp(laneMax[worker] - globalMax) : 0.0;
+            accum += partialOutput[worker * 128 + dim] * workerScale;
+        }
+        O[outputBase + dim] = accum * invSum;
     }
 }
