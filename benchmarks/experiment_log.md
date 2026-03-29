@@ -766,3 +766,19 @@ The optimization removes redundant float32 weight caches that existed for a pref
     - long-context decode: `42.26 tok/s`
 - **Result:** KEPT. This is the first attention-kernel change in the exact path that produced a clear long-prompt prefill win while preserving deterministic decode behavior.
 - **Status:** KEPT
+
+### Experiment 40: Prompt Flash Attention Over FP16 K/V Caches
+- **Hypothesis:** The new exact-matrix prompt path already moved packed prompt projections onto MPS, so prompt attention is now paying unnecessary bandwidth by consuming float K/V slabs and only converting them to the decode caches afterward. Converting K/V once before prompt attention and reading them back from the fp16 caches should reduce prompt-attention bandwidth without changing exact semantics.
+- **Change:**
+  - Added `flash_attention_gqa_simd_qf32_kvf16`, a prompt-flash kernel that keeps `Q` in `float` but reads `K/V` from `half` buffers.
+  - Routed the `usePromptFlashAttention` branch in `LlamaLanguageModel` to convert the prompt K/V slabs into the per-layer fp16 caches before attention, then run prompt attention against those caches directly.
+  - Removed the redundant post-attention float-to-half conversions in that branch and kept packed long-KV decode cache writes fed from the same fp16 caches.
+- **Verification:**
+  - `swift build -c release` passed.
+  - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic token hash `0afae14a84cf0df8`, median decode `218.8 tok/s`, and median TTFT `3.8 ms`.
+  - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner medians:
+    - prompt throughput: `1910.0 tok/s`
+    - TTFT: `536.1 ms`
+    - long-context decode: `60.31 tok/s`
+- **Result:** KEPT. This is a production-safe prompt-side bandwidth win: prompt throughput improved again and TTFT dropped, while long-KV decode stayed flat and the canonical short-decode benchmark remained deterministic.
+- **Status:** KEPT
