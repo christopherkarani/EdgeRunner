@@ -1869,7 +1869,7 @@ kernel void gqa_attention_turboquant_decode_aggressive_k_f16v(
 
     uint rowStride = 1u;
     if (kvLimit >= kSparseRowUltraSeqThreshold) {
-        rowStride = 16u;
+        rowStride = 32u;
     } else if (kvLimit >= kSparseRowSeqThreshold) {
         rowStride = 4u;
     }
