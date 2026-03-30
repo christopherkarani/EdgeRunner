@@ -6,13 +6,14 @@ import Testing
 @Suite("Speculative Generation Benchmark")
 struct SpeculativeGenerationBenchmark {
 
-    static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
-    static let expectedModelFileSizeBytes: Int64 = 639_447_744
+    static let contract = BenchmarkContract.pinned
+    static let modelPath = contract.model.localPath
+    static let expectedModelFileSizeBytes = contract.model.sizeBytes
     static let generateCount = 64
     static let benchmarkRuns = 3
     static let bosToken = 1
     static let draftTokenCount = 2
-    static let expectedGreedyPrefix = [1, 14582, 25]
+    static let expectedGreedyPrefix = contract.smoke.expectedGreedyPrefix
 
     @Test func selfSpeculativeLookahead() async throws {
         let url = URL(fileURLWithPath: Self.modelPath)
@@ -27,15 +28,15 @@ struct SpeculativeGenerationBenchmark {
 
         let greedyModel = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
         let draftModel = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
         let verifyModel = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
 
         // Warm all three models so the comparison measures steady-state generation.
@@ -46,6 +47,9 @@ struct SpeculativeGenerationBenchmark {
         var greedyRuns = [Double]()
         var speculativeRuns = [Double]()
         for _ in 0..<Self.benchmarkRuns {
+            greedyModel.resetGenerationState(keepDecodeWarmup: true)
+            draftModel.resetGenerationState(keepDecodeWarmup: true)
+            verifyModel.resetGenerationState(keepDecodeWarmup: true)
             let greedy = try await measureGreedyGeneration(model: greedyModel, tokenCount: Self.generateCount)
             let speculative = try await measureSelfSpeculativeGeneration(
                 draftModel: draftModel,
@@ -135,8 +139,9 @@ struct SpeculativeGenerationBenchmark {
         tokenCount: Int
     ) async throws -> [Int] {
         var tokenIDs = [Self.bosToken]
+        let greedySampling = SamplingConfiguration(temperature: 0)
         while tokenIDs.count - 1 < tokenCount {
-            let token = try await model.nextToken(for: tokenIDs, sampling: SamplingConfiguration())
+            let token = try await model.nextToken(for: tokenIDs, sampling: greedySampling)
             tokenIDs.append(token)
             if tokenIDs.last == 151645 { break }
         }

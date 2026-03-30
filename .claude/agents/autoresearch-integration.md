@@ -1,7 +1,7 @@
-# Claude Code Autoresearch Integration Plan
+# Codex Autoresearch Integration Plan
 
 ## Objective
-Enable a persistent, autonomous optimization loop within the Claude Code environment by binding the `run_loop.sh` experiment runner to an agent-driven process.
+Enable a persistent, autonomous optimization loop within the Codex environment by binding the `run_loop.sh` experiment runner to an agent-driven process.
 
 ## Steps for Integration
 
@@ -28,7 +28,7 @@ Ensure the agent has appropriate permissions to execute the loop without user in
 ### 3. Loop Orchestration
 - Use a screen-based or persistent task runner:
   ```bash
-  # Inside Claude Code terminal
+  # Inside Codex session or shell
   screen -S autoresearch ./autoresearch/run_loop.sh 1000
   ```
 - The agent will continuously monitor the output logs and the repository state to manage the experiments.

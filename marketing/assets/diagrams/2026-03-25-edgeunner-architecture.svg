@@ -1,0 +1,220 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620"
+     font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, sans-serif">
+
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="accent-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#0070f3" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#0070f3" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#666"/>
+    </marker>
+    <linearGradient id="cbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#141414"/>
+    </linearGradient>
+    <linearGradient id="cbg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#161616"/>
+      <stop offset="100%" stop-color="#111111"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="900" height="620" fill="#0a0a0a"/>
+
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" fill="#ededed"
+        font-size="18" font-weight="600">EdgeRunner Architecture</text>
+  <text x="450" y="56" text-anchor="middle" fill="#666"
+        font-size="12">Metal LLM Inference Engine — Apple Silicon</text>
+
+  <!-- Stage 1: Input -->
+  <g transform="translate(60, 90)">
+    <rect width="160" height="56" rx="8" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="80" y="24" text-anchor="middle" fill="#ededed"
+          font-size="13" font-weight="500">Tokens</text>
+    <text x="80" y="42" text-anchor="middle" fill="#888"
+          font-size="11">[seqLen]</text>
+  </g>
+
+  <!-- Arrow -->
+  <line x1="220" y1="118" x2="280" y2="118" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Stage 2: Embedding -->
+  <g transform="translate(280, 90)">
+    <rect width="160" height="56" rx="8" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="80" y="24" text-anchor="middle" fill="#ededed"
+          font-size="13" font-weight="500">Embedding</text>
+    <text x="80" y="42" text-anchor="middle" fill="#888"
+          font-size="11">CPU / tied head</text>
+  </g>
+
+  <!-- Arrow -->
+  <line x1="440" y1="118" x2="500" y2="118" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Transformer Layer box -->
+  <rect x="500" y="75" width="340" height="80" rx="12"
+        fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="1"
+        stroke-dasharray="6,4"/>
+  <text x="516" y="68" fill="#555" font-size="10"
+        font-weight="500" letter-spacing="0.5px">TRANSFORMER LAYER × N</text>
+
+  <!-- Transformer internals -->
+  <g transform="translate(520, 90)">
+    <rect width="90" height="48" rx="6" fill="url(#cbg2)"
+          stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="45" y="22" text-anchor="middle" fill="#ededed"
+          font-size="11" font-weight="500">RMSNorm</text>
+    <text x="45" y="38" text-anchor="middle" fill="#666"
+          font-size="9">attention</text>
+  </g>
+
+  <line x1="610" y1="114" x2="635" y2="114" stroke="#444" stroke-width="1" marker-end="url(#arr)"/>
+
+  <g transform="translate(635, 90)">
+    <ellipse cx="45" cy="24" rx="55" ry="32" fill="url(#accent-glow)"/>
+    <rect width="90" height="48" rx="6" fill="url(#cbg2)"
+          stroke="#0070f3" stroke-width="1" stroke-opacity="0.5"/>
+    <text x="45" y="22" text-anchor="middle" fill="#ededed"
+          font-size="11" font-weight="500">Mega-Kernel</text>
+    <text x="45" y="38" text-anchor="middle" fill="#0070f3"
+          font-size="9">Q/K RoPE + GQA</text>
+  </g>
+
+  <line x1="725" y1="114" x2="750" y2="114" stroke="#444" stroke-width="1" marker-end="url(#arr)"/>
+
+  <g transform="translate(750, 90)">
+    <rect width="70" height="48" rx="6" fill="url(#cbg2)"
+          stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="35" y="22" text-anchor="middle" fill="#ededed"
+          font-size="11" font-weight="500">KV Cache</text>
+    <text x="35" y="38" text-anchor="middle" fill="#666"
+          font-size="9">Float16</text>
+  </g>
+
+  <!-- FFN path below -->
+  <line x1="800" y1="138" x2="800" y2="190" stroke="#444" stroke-width="1" marker-end="url(#arr)"/>
+
+  <g transform="translate(720, 190)">
+    <ellipse cx="80" cy="30" rx="90" ry="38" fill="url(#accent-glow)"/>
+    <rect width="160" height="60" rx="8" fill="url(#cbg)"
+          stroke="#0070f3" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="80" y="26" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="500">FFN Mega-Kernel</text>
+    <text x="80" y="44" text-anchor="middle" fill="#888"
+          font-size="10">Wo+RMSNorm+Gate+Up+Down</text>
+  </g>
+
+  <!-- Output arrow -->
+  <line x1="800" y1="280" x2="800" y2="310" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Final Norm -->
+  <g transform="translate(720, 310)">
+    <rect width="160" height="48" rx="8" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="80" y="22" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="500">Final RMSNorm</text>
+    <text x="80" y="38" text-anchor="middle" fill="#666"
+          font-size="10">+ LM Head</text>
+  </g>
+
+  <!-- Arrow to logits -->
+  <line x1="800" y1="358" x2="800" y2="385" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Logits -->
+  <g transform="translate(720, 385)">
+    <rect width="160" height="48" rx="8" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="80" y="22" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="500">Logits</text>
+    <text x="80" y="38" text-anchor="middle" fill="#888"
+          font-size="10">[vocabSize]</text>
+  </g>
+
+  <!-- Arrow to sampling -->
+  <line x1="880" y1="409" x2="880" y2="440" stroke="#444" stroke-width="1.5" marker-end="url(#arr)" transform="translate(-80,0)"/>
+  <line x1="720" y1="409" x2="720" y2="440" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Sampling pipeline -->
+  <g transform="translate(600, 440)">
+    <rect width="280" height="56" rx="8" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="140" y="22" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="500">Sampling Pipeline</text>
+    <text x="140" y="40" text-anchor="middle" fill="#888"
+          font-size="10">RepetitionPenalty → Temperature → TopK → TopP → Greedy/Stochastic</text>
+  </g>
+
+  <!-- Arrow to output -->
+  <line x1="740" y1="496" x2="740" y2="525" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Next token -->
+  <g transform="translate(660, 525)">
+    <rect width="160" height="48" rx="8" fill="#0070f3" fill-opacity="0.15"
+          stroke="#0070f3" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="80" y="22" text-anchor="middle" fill="#0070f3"
+          font-size="12" font-weight="600">Next Token</text>
+    <text x="80" y="38" text-anchor="middle" fill="#0070f3"
+          font-size="10">~160 tok/s</text>
+  </g>
+
+  <!-- KV Cache detail box -->
+  <g transform="translate(60, 200)">
+    <rect width="240" height="130" rx="10" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="120" y="20" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="600">KV Cache</text>
+    <text x="120" y="40" text-anchor="middle" fill="#555"
+          font-size="10">Circular buffer · Per-layer</text>
+
+    <line x1="20" y1="50" x2="220" y2="50" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="70" fill="#888" font-size="10">writePos / totalWritten tracking</text>
+    <text x="20" y="86" fill="#888" font-size="10">Float16 precision</text>
+    <text x="20" y="102" fill="#888" font-size="10">Overflow: two-chunk retrieval</text>
+    <text x="20" y="118" fill="#888" font-size="10">GPU direct write (no kernel)</text>
+  </g>
+
+  <!-- Scratch buffers detail box -->
+  <g transform="translate(60, 350)">
+    <rect width="240" height="130" rx="10" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="120" y="20" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="600">Scratch Buffers</text>
+    <text x="120" y="40" text-anchor="middle" fill="#555"
+          font-size="10">19 pre-allocated · maxSeqLen sized</text>
+
+    <line x1="20" y1="50" x2="220" y2="50" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="70" fill="#888" font-size="10">normed, afterAttn, outputA/B</text>
+    <text x="20" y="86" fill="#888" font-size="10">allQ, allK, allV, ropeQ, ropeK</text>
+    <text x="20" y="102" fill="#888" font-size="10">gateOut, upOut, activ, downOut</text>
+    <text x="20" y="118" fill="#888" font-size="10">Zero MTLBuffer allocation / call</text>
+  </g>
+
+  <!-- Memory management box -->
+  <g transform="translate(60, 500)">
+    <rect width="240" height="90" rx="10" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="120" y="20" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="600">MetalBackend</text>
+
+    <line x1="20" y1="30" x2="220" y2="30" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="50" fill="#888" font-size="10">BufferCache (LRU · 50% VRAM)</text>
+    <text x="20" y="66" fill="#888" font-size="10">BarrierTracker (RAW hazards)</text>
+    <text x="20" y="82" fill="#888" font-size="10">CommandBatcher (≤50 ops/encoder)</text>
+  </g>
+
+  <!-- Metrics bar -->
+  <rect x="0" y="598" width="900" height="22" fill="#111"/>
+  <text x="450" y="612" text-anchor="middle" fill="#555" font-size="10">
+    Qwen3 0.6B Q8_0 · ~160 tok/s · 310MB RSS · Metal 4
+  </text>
+</svg>

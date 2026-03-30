@@ -12,14 +12,15 @@ import Foundation
 @Suite("Qwen 3 0.6B Real Model Benchmark")
 struct QwenBenchmark {
 
-    static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
+    static let contract = BenchmarkContract.pinned
+    static let modelPath = contract.model.localPath
     static let baselinePath = "benchmarks/baseline.json"
-    static let expectedModelFileSizeBytes: Int64 = 639_446_688
+    static let expectedModelFileSizeBytes = contract.model.sizeBytes
 
     // Stable greedy prefix for the pinned GGUF. Later tokens drift slightly across
     // fresh processes on current main, so cross-check the full decode path via the
     // prefix-equivalence test below instead of hard-coding all 4 generated tokens.
-    static let expectedGreedyPrefix = [1, 1479, 35]
+    static let expectedGreedyPrefix = contract.smoke.expectedGreedyPrefix
 
     // MARK: - Smoke Benchmark
 
@@ -32,15 +33,16 @@ struct QwenBenchmark {
 
         let model = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
 
         // Autoregressive decode: generate 4 tokens
-        let generateCount = 4
+        let generateCount = Self.contract.smoke.generateCount
         var tokenIDs = [1] // Pinned benchmark seed token for the canonical Qwen3 harness
 
         // Warmup (caches dequantized weights)
         _ = try await model.greedyToken(for: tokenIDs)
+        model.resetGenerationState(keepDecodeWarmup: true)
 
         let clock = ContinuousClock()
         let start = clock.now
@@ -99,7 +101,7 @@ struct QwenBenchmark {
         let start = clock.now
         let model = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
         let elapsed = start.duration(to: clock.now)
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18
@@ -117,7 +119,7 @@ struct QwenBenchmark {
 
         let model = try await LlamaLanguageModel.load(
             from: url,
-            configuration: ModelConfiguration(contextWindowSize: 2048)
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: Self.contract.publishable.contextWindow)
         )
 
         let clock = ContinuousClock()
@@ -163,7 +165,7 @@ struct QwenBenchmark {
 
         let baseline: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "model": "Qwen3-0.6B-Q8_0",
+            "model": Self.contract.model.name,
             "model_path": modelPath,
             "model_file_size_bytes": modelFileSize,
             "tokens_per_sec": tokensPerSec,

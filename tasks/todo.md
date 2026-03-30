@@ -61,6 +61,21 @@
   - no slice is kept if publishable determinism or hash parity regresses
 
 ## Review
+- Current trusted floor on `perf2@e815937` with `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1` and `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
+  - publishable decode median `211.9 tok/s`
+  - publishable TTFT `~4.1 ms`
+  - publishable hash `0afae14a84cf0df8`
+  - long-prompt prompt throughput median `1926.9 tok/s`
+  - long-prompt TTFT median `531.4 ms`
+  - long-prompt decode median `150.91 tok/s`
+- Next rewrite slice:
+  - specialize prompt flash attention for the pinned `groupSize == 2`, `headDim == 128` path so the two Q heads sharing each KV head reuse K/V loads instead of running two independent sweeps
+  - keep the current prompt flash path as fallback
+  - kill immediately if the 1024-token benchmark does not materially improve prompt throughput or if publishable determinism regresses
+- Current active branch:
+  - keep the current prompt-flash + packed-long-KV floor intact
+  - swap only the prompt FFN on that path to the existing fused raw Q8 `gate+up+silu` plus batched raw Q8 `down` kernels
+  - kill immediately if the long-prompt benchmark regresses or the generated prefix / publishable hash changes
 - Trusted kept baseline on `perf2@05736be73ef5f8d73e51edec2b743de0726f548a`:
   - publishable decode median `~211-213 tok/s`
   - publishable TTFT `~4.0 ms`

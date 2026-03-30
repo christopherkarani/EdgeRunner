@@ -1,5 +1,18 @@
 # Lessons
 
+## 2026-03-27
+- Any autoresearch or benchmark automation that depends on a pinned external GGUF must preflight the artifact before the first benchmark run. Treat model provisioning as part of the loop contract, not as an implicit machine setup step.
+- When benchmark docs, harness pins, and upstream artifact metadata disagree, follow the executable harness and live artifact headers first, then reconcile the stale docs separately.
+- Never use uninitialized shared-memory buffer contents as a decode-path sentinel. The optimized Metal 3 params buffer in `LlamaLanguageModel` must write its constant blocks explicitly every call or zero the buffer at allocation time.
+- When a fused decode kernel is known to be nondeterministic on the pinned benchmark artifact, pin benchmarks to a benchmark-only safe decode override instead of silently changing the app's default inference path. Keep the contract explicit and temporary.
+- If repeated publishable runs stay nondeterministic even after explicit model-state reset and process isolation, stop treating that as an automation problem. The loop should fail fast on a `baseline_unhealthy` benchmark and classify the decode path as the real blocker.
+- In Metal, separate threadgroups inside one dispatch cannot safely produce and consume the same current-token cache slice unless the consumer derives that slice locally or the producer is moved to an earlier dispatch. Threadgroup barriers do not solve cross-threadgroup K/V handoffs.
+- For long-form decode parity bugs, a short 16-token probe can miss the defect. Keep a bounded fast parity check for iteration speed, but validate fused decode fixes on the full 128-token pinned benchmark contract before declaring the path canonical again.
+- A correct but dramatically slower research feature is not production-ready. For TurboQuant-class work, keep correctness review and performance review separate, and do not present the feature as “done” until the long-context benchmark improves in the target regime.
+- If a research path disables a fused projection kernel only because one output sink differs, keep the fused math and split the sink instead of falling back to separate RMSNorm and GEMV dispatches. For TurboQuant, recovering fused Q8 QKV with a float-`V` output produced the first major long-context TTFT breakthrough.
+- Wide threadgroup kernels must degrade gracefully per device. On this machine, `gqa_attention_f16kv_prefill32` exceeds the available threadgroup-memory budget, so pipeline creation should fall back to the stable FP16 kernel rather than aborting unrelated model loads and TurboQuant validation.
+- In the single-token TurboQuant decode path, split work across KV rows, not across the 128 channel dimensions. Once a worker owns a row, keep bit unpack linear with a running `bitOffset` cursor; recomputing per-dimension offsets with prefix popcounts leaves a large, avoidable decode bottleneck.
+
 ## 2026-03-16
 - Verify the actual milestone baseline from the repo before starting execution. This workspace is mid-M2, so M3/M4 implementation prompts must be deferred until M2 is complete and verified locally.
 - Validate buffer shapes and requested element types at public API boundaries before encoding Metal work. GPU kernels should never be the first place mismatched dimensions or precisions are discovered.
@@ -15,3 +28,4 @@
 - Tiny per-dispatch kernel parameter blocks are not automatically better in a shared params buffer. If a Metal kernel consumes a small constant struct, `setBytes` can beat buffer indirection even in an otherwise params-buffer-heavy decode path.
 - Generation-side optimizations must be benchmarked through `nextToken` or streaming paths, not `logits + argmax` in the benchmark harness, or the measurement will hide the real win.
 - On the pinned Qwen3-0.6B GGUF, long generated sequences can drift across runs even when the short prefix is stable. Generation benchmarks should pin the verified prefix and compare exact outputs within each run, not require full cross-run sequence equality.
+- Autoresearch Codex runs should use a sanitized `CODEX_HOME` that excludes stale global skill symlinks. A broken optional skill should not be able to abort the entire experiment hook.

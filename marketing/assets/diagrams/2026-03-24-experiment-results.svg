@@ -1,0 +1,87 @@
+<svg viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#6366f1;stop-opacity:0.05" />
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#10b981;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#10b981;stop-opacity:0.05" />
+    </linearGradient>
+    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#f59e0b;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#f59e0b;stop-opacity:0.05" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="400" fill="#0a0a0a"/>
+
+  <!-- Grid lines -->
+  <g stroke="#1a1a1a" stroke-width="1">
+    <line x1="0" y1="100" x2="800" y2="100"/>
+    <line x1="0" y1="200" x2="800" y2="200"/>
+    <line x1="0" y1="300" x2="800" y2="300"/>
+    <line x1="200" y1="0" x2="200" y2="400"/>
+    <line x1="400" y1="0" x2="400" y2="400"/>
+    <line x1="600" y1="0" x2="600" y2="400"/>
+  </g>
+
+  <!-- Title -->
+  <text x="400" y="50" text-anchor="middle" fill="#e5e5e5" font-family="system-ui, -apple-system" font-size="24" font-weight="600">Autoresearch Swarm: 3 Experiments</text>
+
+  <!-- Baseline -->
+  <rect x="40" y="120" width="160" height="160" rx="8" fill="#141414" stroke="#262626" stroke-width="1"/>
+  <text x="120" y="160" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="14">Baseline</text>
+  <text x="120" y="200" text-anchor="middle" fill="#e5e5e5" font-family="system-ui" font-size="32" font-weight="700">228</text>
+  <text x="120" y="230" text-anchor="middle" fill="#525252" font-family="system-ui" font-size="12">tok/s</text>
+
+  <!-- Arrow 1 -->
+  <line x1="210" y1="200" x2="250" y2="200" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6366f1"/>
+    </marker>
+  </defs>
+
+  <!-- Exp 33: Failed -->
+  <rect x="260" y="120" width="120" height="160" rx="8" fill="#141414" stroke="#dc2626" stroke-width="1"/>
+  <text x="320" y="150" text-anchor="middle" fill="#dc2626" font-family="system-ui" font-size="12">EXP 33</text>
+  <text x="320" y="175" text-anchor="middle" fill="#e5e5e5" font-family="system-ui" font-size="11">SIMD softmax</text>
+  <text x="320" y="210" text-anchor="middle" fill="#dc2626" font-family="system-ui" font-size="24" font-weight="700">✗</text>
+  <text x="320" y="240" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="10">Wrong tokens</text>
+
+  <!-- Arrow 2 -->
+  <line x1="390" y1="200" x2="430" y2="200" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Exp 34: Abandoned -->
+  <rect x="440" y="120" width="120" height="160" rx="8" fill="#141414" stroke="#f59e0b" stroke-width="1"/>
+  <text x="500" y="150" text-anchor="middle" fill="#f59e0b" font-family="system-ui" font-size="12">EXP 34</text>
+  <text x="500" y="175" text-anchor="middle" fill="#e5e5e5" font-family="system-ui" font-size="11">Metal ICBs</text>
+  <text x="500" y="210" text-anchor="middle" fill="#f59e0b" font-family="system-ui" font-size="24" font-weight="700">—</text>
+  <text x="500" y="240" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="10">macOS limitation</text>
+
+  <!-- Arrow 3 -->
+  <line x1="570" y1="200" x2="610" y2="200" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Exp 35: Kept -->
+  <rect x="620" y="120" width="120" height="160" rx="8" fill="#141414" stroke="#10b981" stroke-width="1"/>
+  <text x="680" y="150" text-anchor="middle" fill="#10b981" font-family="system-ui" font-size="12">EXP 35</text>
+  <text x="680" y="175" text-anchor="middle" fill="#e5e5e5" font-family="system-ui" font-size="11">Tile GEMV</text>
+  <text x="680" y="210" text-anchor="middle" fill="#10b981" font-family="system-ui" font-size="20" font-weight="700">+1.2%</text>
+  <text x="680" y="240" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="10">No breakthrough</text>
+
+  <!-- Bottom stats -->
+  <rect x="200" y="310" width="400" height="60" rx="8" fill="#141414" stroke="#262626" stroke-width="1"/>
+  <text x="280" y="348" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="12">Final Result</text>
+  <text x="520" y="348" text-anchor="middle" fill="#a3a3a3" font-family="system-ui" font-size="12">Gap to Target (MLX)</text>
+  <text x="280" y="365" text-anchor="middle" fill="#e5e5e5" font-family="system-ui" font-size="20" font-weight="700">230.8 tok/s</text>
+  <text x="520" y="365" text-anchor="middle" fill="#dc2626" font-family="system-ui" font-size="20" font-weight="700">-47 tok/s</text>
+</svg>

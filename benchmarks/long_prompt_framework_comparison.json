@@ -1,0 +1,125 @@
+{
+  "delta": {
+    "decode_tok_s_pct_mlx_over_edgerunner": 73.64034892329676,
+    "prompt_tok_s_pct_mlx_over_edgerunner": 258.00887677448696,
+    "ttft_pct_edgerunner_faster_than_mlx": -258.00887677448696
+  },
+  "frameworks": [
+    {
+      "framework": "EdgeRunner",
+      "metadata": {
+        "context_window": 2048,
+        "model_path": "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
+      },
+      "runs": [
+        {
+          "decode_tok_s": 143.75950086873357,
+          "framework": "EdgeRunner",
+          "generated_prefix": [
+            279,
+            5068,
+            16982,
+            11,
+            4938,
+            6559,
+            32483,
+            11
+          ],
+          "generated_token_count": 128,
+          "has_non_finite": false,
+          "model_path": "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf",
+          "prompt_tok_s": 1990.0824667824675,
+          "prompt_token_count": 1024,
+          "ttft_ms": 514.551541
+        }
+      ],
+      "summary": {
+        "decode_tok_s": {
+          "max": 143.75950086873357,
+          "mean": 143.75950086873357,
+          "median": 143.75950086873357,
+          "min": 143.75950086873357,
+          "stdev": 0.0
+        },
+        "prompt_tok_s": {
+          "max": 1990.0824667824675,
+          "mean": 1990.0824667824675,
+          "median": 1990.0824667824675,
+          "min": 1990.0824667824675,
+          "stdev": 0.0
+        },
+        "ttft_ms": {
+          "max": 514.551541,
+          "mean": 514.551541,
+          "median": 514.551541,
+          "min": 514.551541,
+          "stdev": 0.0
+        }
+      }
+    },
+    {
+      "framework": "MLX",
+      "metadata": {
+        "context_window": 2048,
+        "model_repo": "mlx-community/Qwen3-0.6B-8bit"
+      },
+      "runs": [
+        {
+          "decode_tok_s": 249.62449891885882,
+          "framework": "MLX",
+          "generated_token_count": 128,
+          "peak_memory_gb": 1.768558892,
+          "prompt_tok_s": 7124.671886213914,
+          "prompt_token_count": 1024,
+          "ttft_ms": 143.72591697610915
+        }
+      ],
+      "summary": {
+        "decode_tok_s": {
+          "max": 249.62449891885882,
+          "mean": 249.62449891885882,
+          "median": 249.62449891885882,
+          "min": 249.62449891885882,
+          "stdev": 0.0
+        },
+        "prompt_tok_s": {
+          "max": 7124.671886213914,
+          "mean": 7124.671886213914,
+          "median": 7124.671886213914,
+          "min": 7124.671886213914,
+          "stdev": 0.0
+        },
+        "ttft_ms": {
+          "max": 143.72591697610915,
+          "mean": 143.72591697610915,
+          "median": 143.72591697610915,
+          "min": 143.72591697610915,
+          "stdev": 0.0
+        }
+      }
+    }
+  ],
+  "generate_token_count": 128,
+  "prompt_preview_tokens": [
+    2610,
+    525,
+    33888,
+    264,
+    1293,
+    5942,
+    2884,
+    9814,
+    369,
+    458,
+    389,
+    65607,
+    4128,
+    1614,
+    15592,
+    624
+  ],
+  "prompt_token_count": 1024,
+  "prompt_tokenizer_repo": "Qwen/Qwen3-0.6B",
+  "runs": 1,
+  "timestamp": "2026-03-30T18:01:35Z"
+}

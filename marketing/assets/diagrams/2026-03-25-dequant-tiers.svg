@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420"
+     font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, sans-serif">
+
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="green-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00cc88" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#00cc88" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orange-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="purple-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#a855f7" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#666"/>
+    </marker>
+    <linearGradient id="cbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#141414"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="800" height="420" fill="#0a0a0a"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" fill="#ededed"
+        font-size="16" font-weight="600">Three-Tier Dequantization Strategy</text>
+  <text x="400" y="46" text-anchor="middle" fill="#666"
+        font-size="11">Dequantize only what's needed, where it's needed</text>
+
+  <!-- Input: Q8_0 weight buffer -->
+  <g transform="translate(30, 70)">
+    <rect width="200" height="80" rx="10" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="100" y="22" text-anchor="middle" fill="#888"
+          font-size="10" font-weight="600" letter-spacing="0.5px">QUANTIZED WEIGHT</text>
+    <text x="100" y="40" text-anchor="middle" fill="#ededed"
+          font-size="12">Q8_0 buffer</text>
+    <text x="100" y="56" text-anchor="middle" fill="#666"
+          font-size="10">34 bytes/block · 32 elements</text>
+    <text x="100" y="70" text-anchor="middle" fill="#555"
+          font-size="9">[scale: 2B][int8 × 32]</text>
+  </g>
+
+  <!-- Tier 1: Raw Q8_0 zero-copy -->
+  <g transform="translate(260, 60)">
+    <ellipse cx="120" cy="50" rx="130" ry="60" fill="url(#green-glow)"/>
+    <rect width="240" height="100" rx="10" fill="url(#cbg)"
+          stroke="#00cc88" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="120" y="20" text-anchor="middle" fill="#00cc88"
+          font-size="12" font-weight="600">Tier 1 — Raw Zero-Copy</text>
+    <line x1="20" y1="30" x2="220" y2="30" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="120" y="50" text-anchor="middle" fill="#ededed"
+          font-size="11">Q8_0 → GEMV kernel</text>
+    <text x="120" y="68" text-anchor="middle" fill="#888"
+          font-size="10">No float32 materialization</text>
+    <text x="120" y="84" text-anchor="middle" fill="#00cc88"
+          font-size="10">~3.8× less bandwidth</text>
+  </g>
+
+  <!-- Arrow down from tier 1 -->
+  <line x1="400" y1="160" x2="400" y2="190" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="415" y="178" fill="#555" font-size="9">fallback</text>
+
+  <!-- Tier 2: GPU dequant kernel -->
+  <g transform="translate(260, 195)">
+    <ellipse cx="120" cy="50" rx="130" ry="60" fill="url(#orange-glow)"/>
+    <rect width="240" height="100" rx="10" fill="url(#cbg)"
+          stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="120" y="20" text-anchor="middle" fill="#f59e0b"
+          font-size="12" font-weight="600">Tier 2 — GPU Dequant Kernel</text>
+    <line x1="20" y1="30" x2="220" y2="30" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="120" y="50" text-anchor="middle" fill="#ededed"
+          font-size="11">Q4_0 / Q5_0 / K-quants</text>
+    <text x="120" y="68" text-anchor="middle" fill="#888"
+          font-size="10">Dequant kernel → float16</text>
+    <text x="120" y="84" text-anchor="middle" fill="#f59e0b"
+          font-size="10">Inline with GEMV</text>
+  </g>
+
+  <!-- Arrow down from tier 2 -->
+  <line x1="400" y1="295" x2="400" y2="325" stroke="#444" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="415" y="313" fill="#555" font-size="9">fallback</text>
+
+  <!-- Tier 3: CPU fallback -->
+  <g transform="translate(260, 325)">
+    <ellipse cx="120" cy="50" rx="130" ry="60" fill="url(#purple-glow)"/>
+    <rect width="240" height="100" rx="10" fill="url(#cbg)"
+          stroke="#a855f7" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="120" y="20" text-anchor="middle" fill="#a855f7"
+          font-size="12" font-weight="600">Tier 3 — CPU SIMD Fallback</text>
+    <line x1="20" y1="30" x2="220" y2="30" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="120" y="50" text-anchor="middle" fill="#ededed"
+          font-size="11">Embeddings + tied heads</text>
+    <text x="120" y="68" text-anchor="middle" fill="#888"
+          font-size="10">SIMD loops on CPU</text>
+    <text x="120" y="84" text-anchor="middle" fill="#a855f7"
+          font-size="10">Direct to destination buffer</text>
+  </g>
+
+  <!-- Right side: What gets what -->
+  <g transform="translate(530, 60)">
+    <rect width="240" height="365" rx="10" fill="url(#cbg)"
+          stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    <text x="120" y="22" text-anchor="middle" fill="#ededed"
+          font-size="12" font-weight="600">Quantization Support</text>
+
+    <line x1="20" y1="32" x2="220" y2="32" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="52" fill="#00cc88" font-size="10" font-weight="600">Tier 1 (zero-copy):</text>
+    <text x="20" y="70" fill="#888" font-size="10">Q8_0 — 8-bit, 34B/block</text>
+
+    <line x1="20" y1="82" x2="220" y2="82" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="102" fill="#f59e0b" font-size="10" font-weight="600">Tier 2 (GPU kernel):</text>
+    <text x="20" y="120" fill="#888" font-size="10">Q4_0 — 4-bit, 18B/block</text>
+    <text x="20" y="136" fill="#888" font-size="10">Q5_0 — 5-bit, 24B/block</text>
+    <text x="20" y="152" fill="#888" font-size="10">Q5_1 — 5-bit + bias</text>
+    <text x="20" y="168" fill="#888" font-size="10">Q2_K — 2-bit K-quant</text>
+    <text x="20" y="184" fill="#888" font-size="10">Q3_K — 3-bit K-quant</text>
+    <text x="20" y="200" fill="#888" font-size="10">Q4_K_M — 4-bit K-quant</text>
+    <text x="20" y="216" fill="#888" font-size="10">Q5_K — 5-bit K-quant</text>
+    <text x="20" y="232" fill="#888" font-size="10">Q6_K — 6-bit K-quant</text>
+
+    <line x1="20" y1="244" x2="220" y2="244" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="264" fill="#a855f7" font-size="10" font-weight="600">Tier 3 (CPU SIMD):</text>
+    <text x="20" y="282" fill="#888" font-size="10">Embedding lookups</text>
+    <text x="20" y="298" fill="#888" font-size="10">Tied head (LM head = wte)</text>
+
+    <line x1="20" y1="310" x2="220" y2="310" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+
+    <text x="20" y="330" fill="#555" font-size="10">+ F16, F32 full-precision</text>
+    <text x="20" y="348" fill="#555" font-size="10">10 formats total</text>
+  </g>
+</svg>

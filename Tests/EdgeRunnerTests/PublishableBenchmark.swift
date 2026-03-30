@@ -18,12 +18,18 @@ import Foundation
 @Suite("Publishable Inference Benchmark")
 struct PublishableBenchmark {
 
-    static let modelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
-    static let generateCount = 128
-    static let benchmarkRuns = 5
-    static let expectedModelFileSizeBytes: Int64 = 639_446_688
-    static let expectedGreedyPrefix = [1, 1479, 35]
-    static let expectedTokenHash = "0afae14a84cf0df8"
+    static let contract = BenchmarkContract.pinned
+    static let modelPath = contract.model.localPath
+    static let generateCount = contract.publishable.tokenCount
+    static let benchmarkRuns = contract.publishable.runCount
+    static let expectedModelFileSizeBytes = contract.model.sizeBytes
+    static let expectedGreedyPrefix = contract.publishable.expectedGreedyPrefix
+    static let expectedTokenHash = contract.publishable.expectedTokenHash
+    static let childRunEnvKey = "EDGERUNNER_PUBLISHABLE_CHILD_RUN"
+    static let processIsolationEnvKey = "EDGERUNNER_BENCHMARK_PROCESS_ISOLATION"
+    static let outputPathEnvKey = "EDGERUNNER_BENCHMARK_OUTPUT_PATH"
+    static let megaParityRunEnvKey = "EDGERUNNER_RUN_MEGA_PARITY"
+    static let megaParityTokensEnvKey = "EDGERUNNER_MEGA_PARITY_TOKENS"
 
     // MARK: - Primary Publishable Benchmark
 
@@ -41,7 +47,7 @@ struct PublishableBenchmark {
         )
         let contextWindow = try validatedPositiveInt(
             env["EDGERUNNER_BENCHMARK_CONTEXT"],
-            defaultValue: 2048,
+            defaultValue: Self.contract.publishable.contextWindow,
             name: "EDGERUNNER_BENCHMARK_CONTEXT"
         )
         guard contextWindow >= tokenCount else {
@@ -59,7 +65,7 @@ struct PublishableBenchmark {
         let isCanonicalRun =
             tokenCount == Self.generateCount
             && runCount == Self.benchmarkRuns
-            && contextWindow == 2048
+            && contextWindow == Self.contract.publishable.contextWindow
             && !hasDecodeOverride
 
         let url = URL(fileURLWithPath: Self.modelPath)
@@ -67,51 +73,37 @@ struct PublishableBenchmark {
             throw GenerationError.modelLoadFailed(reason: "Pinned publishable benchmark model not found at \(Self.modelPath)")
         }
         let modelFileSize = try pinnedModelFileSize(at: url)
+        let shouldIsolateRuns =
+            !isEnabled(env[Self.childRunEnvKey])
+            && runCount > 1
+            && !isExplicitlyDisabled(env[Self.processIsolationEnvKey])
 
-        // Track peak memory
-        let memBefore = currentRSS()
-
-        let model = try await LlamaLanguageModel.load(
-            from: url,
-            configuration: ModelConfiguration(contextWindowSize: contextWindow)
-        )
-
-        let memAfterLoad = currentRSS()
-
-        // Warmup: one full generation to JIT all pipelines
-        var warmupTokens = [1]
-        for _ in 0..<4 {
-            let result = try await model.greedyToken(for: warmupTokens)
-            warmupTokens.append(result.token)
-        }
-
-        // Run benchmarkRuns iterations (single model, reset via fresh prefill each run)
-        var runResults: [RunResult] = []
-
-        for run in 0..<runCount {
-            // Each run starts with logits(for: [1]) which triggers prefill + KV cache reset.
-            // The model's decode detector sees a fresh sequence and resets automatically.
-            let result = try await measureGeneration(
-                model: model,
+        let benchmarkResult: BenchmarkExecution
+        if shouldIsolateRuns {
+            benchmarkResult = try runProcessIsolatedBenchmark(
                 tokenCount: tokenCount,
-                runIndex: run
+                runCount: runCount,
+                contextWindow: contextWindow,
+                profileLMHead: profileLMHead
             )
-            runResults.append(result)
+        } else {
+            benchmarkResult = try await runInProcessBenchmark(
+                modelURL: url,
+                tokenCount: tokenCount,
+                runCount: runCount,
+                contextWindow: contextWindow,
+                profileLMHead: profileLMHead
+            )
         }
-
-        let memPeak = currentRSS()
 
         // Compute statistics
-        let stats = computeStatistics(runs: runResults)
+        let stats = computeStatistics(runs: benchmarkResult.runResults)
 
-        let lmHeadMs = profileLMHead ? try await model.measureLMHeadLatency(samples: 5) : nil
-
-        // Determinism check: all runs should produce identical tokens
-        let referenceTokens = runResults[0].tokens
-        let allDeterministic = runResults.allSatisfy { $0.tokens == referenceTokens }
-        let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(referenceTokens.count))
-        let actualPrefix = Array(referenceTokens.prefix(expectedPrefix.count))
-        let tokenHash = tokenSequenceHash(referenceTokens)
+        // Determinism check: all runs should produce identical output fingerprints.
+        let allDeterministic = benchmarkResult.deterministic
+        let actualPrefix = benchmarkResult.tokenPrefix
+        let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(actualPrefix.count))
+        let tokenHash = benchmarkResult.tokenHash
 
         // Hard validation guards: invalid runs must not persist artifacts.
         guard allDeterministic else {
@@ -128,7 +120,7 @@ struct PublishableBenchmark {
         let isPinnedHarness =
             tokenCount == Self.generateCount
             && runCount == Self.benchmarkRuns
-            && contextWindow == 2048
+            && contextWindow == Self.contract.publishable.contextWindow
 
         if isPinnedHarness {
             guard tokenHash == Self.expectedTokenHash else {
@@ -143,39 +135,91 @@ struct PublishableBenchmark {
         guard stats.decodeMedian > 0 else {
             throw GenerationError.decodingFailed("Decode throughput must be positive")
         }
-        for run in runResults where run.hasNaN {
+        for run in benchmarkResult.runResults where run.hasNaN {
             throw GenerationError.decodingFailed("Run \(run.runIndex) produced NaN/Inf logits")
         }
 
         // Print and persist only after validation passes.
         printReport(
             stats: stats,
-            runs: runResults,
-            memLoadMB: Double(memAfterLoad - memBefore) / 1_048_576,
-            memPeakMB: Double(memPeak - memBefore) / 1_048_576,
+            runs: benchmarkResult.runResults,
+            memLoadMB: benchmarkResult.memLoadMB,
+            memPeakMB: benchmarkResult.memPeakMB,
             deterministic: allDeterministic,
             tokenCount: tokenCount,
             runCount: runCount,
-            lmHeadMs: lmHeadMs,
-            isCanonicalRun: isCanonicalRun
+            lmHeadMs: benchmarkResult.lmHeadMs,
+            isCanonicalRun: isCanonicalRun,
+            tokenHash: tokenHash
         )
 
         try writeJSON(
             stats: stats,
-            runs: runResults,
-            memLoadMB: Double(memAfterLoad - memBefore) / 1_048_576,
-            memPeakMB: Double(memPeak - memBefore) / 1_048_576,
+            runs: benchmarkResult.runResults,
+            memLoadMB: benchmarkResult.memLoadMB,
+            memPeakMB: benchmarkResult.memPeakMB,
             deterministic: allDeterministic,
             modelPath: url.path,
             modelFileSize: modelFileSize,
             tokenPrefix: actualPrefix,
             tokenHash: tokenHash,
-            lmHeadMs: lmHeadMs,
+            lmHeadMs: benchmarkResult.lmHeadMs,
             tokenCount: tokenCount,
             runCount: runCount,
             contextWindow: contextWindow,
             isCanonicalRun: isCanonicalRun
         )
+    }
+
+    @Test
+    func megaKernelMatchesSafePath() async throws {
+        guard isEnabled(ProcessInfo.processInfo.environment[Self.megaParityRunEnvKey]) else {
+            Swift.print("SKIP: Set \(Self.megaParityRunEnvKey)=1 to run the mega-kernel parity probe.")
+            return
+        }
+
+        let tokenCount = try validatedPositiveInt(
+            ProcessInfo.processInfo.environment[Self.megaParityTokensEnvKey],
+            defaultValue: 16,
+            name: Self.megaParityTokensEnvKey
+        )
+        let contextWindow = Self.contract.publishable.contextWindow
+        let modelURL = URL(fileURLWithPath: Self.modelPath)
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            throw GenerationError.modelLoadFailed(reason: "Pinned publishable benchmark model not found at \(Self.modelPath)")
+        }
+
+        let safeModel = try await LlamaLanguageModel.load(
+            from: modelURL,
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: contextWindow, disableMegaKernel: true)
+        )
+        let megaModel = try await LlamaLanguageModel.load(
+            from: modelURL,
+            configuration: .pinnedBenchmarkConfiguration(contextWindow: contextWindow, disableMegaKernel: false)
+        )
+
+        try await warmBenchmarkModel(safeModel)
+        try await warmBenchmarkModel(megaModel)
+
+        let safeTokens = try await greedyTokens(model: safeModel, tokenCount: tokenCount)
+        let megaTokens = try await greedyTokens(
+            model: megaModel,
+            tokenCount: tokenCount,
+            referenceTokens: safeTokens
+        )
+
+        #expect(megaTokens == safeTokens, "Mega path diverged from safe path. safe=\(safeTokens) mega=\(megaTokens)")
+        let actualPrefix = Array(megaTokens.prefix(Self.expectedGreedyPrefix.count))
+        let expectedPrefix = Array(Self.expectedGreedyPrefix.prefix(actualPrefix.count))
+        #expect(actualPrefix == expectedPrefix, "Expected prefix \(expectedPrefix), got \(actualPrefix)")
+
+        if tokenCount == Self.generateCount {
+            let tokenHash = tokenSequenceHash(megaTokens)
+            #expect(
+                tokenHash == Self.expectedTokenHash,
+                "Expected token hash \(Self.expectedTokenHash), got \(tokenHash)"
+            )
+        }
     }
 
     // MARK: - Single-Run Measurement
@@ -239,6 +283,278 @@ struct PublishableBenchmark {
         )
     }
 
+    private func runInProcessBenchmark(
+        modelURL: URL,
+        tokenCount: Int,
+        runCount: Int,
+        contextWindow: Int,
+        profileLMHead: Bool
+    ) async throws -> BenchmarkExecution {
+        let memBefore = currentRSS()
+        var memAfterLoad = memBefore
+        var memPeak = memBefore
+        var runResults: [RunResult] = []
+
+        for run in 0..<runCount {
+            let model = try await LlamaLanguageModel.load(
+                from: modelURL,
+                configuration: .pinnedBenchmarkConfiguration(contextWindow: contextWindow)
+            )
+            if run == 0 {
+                memAfterLoad = currentRSS()
+            }
+
+            try await warmBenchmarkModel(model)
+            let result = try await measureGeneration(
+                model: model,
+                tokenCount: tokenCount,
+                runIndex: run
+            )
+            runResults.append(result)
+            memPeak = max(memPeak, currentRSS())
+        }
+
+        let referenceTokens = runResults[0].tokens
+        let tokenPrefix = Array(referenceTokens.prefix(Self.expectedGreedyPrefix.count))
+        let tokenHash = tokenSequenceHash(referenceTokens)
+        let lmHeadMs: Double?
+        if profileLMHead {
+            let profilingModel = try await LlamaLanguageModel.load(
+                from: modelURL,
+                configuration: .pinnedBenchmarkConfiguration(contextWindow: contextWindow)
+            )
+            lmHeadMs = try await profilingModel.measureLMHeadLatency(samples: 5)
+        } else {
+            lmHeadMs = nil
+        }
+
+        return BenchmarkExecution(
+            runResults: runResults,
+            memLoadMB: Double(memAfterLoad - memBefore) / 1_048_576,
+            memPeakMB: Double(memPeak - memBefore) / 1_048_576,
+            deterministic: runResults.allSatisfy { $0.tokens == referenceTokens },
+            tokenPrefix: tokenPrefix,
+            tokenHash: tokenHash,
+            lmHeadMs: lmHeadMs
+        )
+    }
+
+    private func warmBenchmarkModel(_ model: LlamaLanguageModel) async throws {
+        var warmupTokens = [1]
+        for _ in 0..<4 {
+            let result = try await model.greedyToken(for: warmupTokens)
+            #expect(!result.hasNonFinite, "Benchmark warmup produced NaN/Inf logits")
+            warmupTokens.append(result.token)
+        }
+        model.resetGenerationState(keepDecodeWarmup: true)
+    }
+
+    private func greedyTokens(
+        model: LlamaLanguageModel,
+        tokenCount: Int,
+        referenceTokens: [Int]? = nil
+    ) async throws -> [Int] {
+        var tokenIDs = [1]
+        let referenceTokens = referenceTokens ?? []
+
+        let first = try await model.greedyToken(for: tokenIDs)
+        guard !first.hasNonFinite else {
+            throw GenerationError.decodingFailed("Step 0 produced NaN/Inf logits")
+        }
+        tokenIDs.append(first.token)
+        if !referenceTokens.isEmpty {
+            let safeToken = referenceTokens[1]
+            guard first.token == safeToken else {
+                throw GenerationError.decodingFailed(
+                    "Mega path diverged at step 0. safeToken=\(safeToken) megaToken=\(first.token) prefix=\(tokenIDs)"
+                )
+            }
+        }
+
+        for stepIndex in 1..<tokenCount {
+            let result = try await model.greedyToken(for: tokenIDs)
+            guard !result.hasNonFinite else {
+                throw GenerationError.decodingFailed("Step \(stepIndex) produced NaN/Inf logits")
+            }
+            tokenIDs.append(result.token)
+            if !referenceTokens.isEmpty {
+                let safeToken = referenceTokens[stepIndex + 1]
+                guard result.token == safeToken else {
+                    throw GenerationError.decodingFailed(
+                        "Mega path diverged at step \(stepIndex). safeToken=\(safeToken) megaToken=\(result.token) prefix=\(tokenIDs)"
+                    )
+                }
+            }
+        }
+
+        return tokenIDs
+    }
+
+    private func runProcessIsolatedBenchmark(
+        tokenCount: Int,
+        runCount: Int,
+        contextWindow: Int,
+        profileLMHead: Bool
+    ) throws -> BenchmarkExecution {
+        let fileManager = FileManager.default
+        let projectDir = ProcessInfo.processInfo.environment["PROJECT_DIR"] ?? fileManager.currentDirectoryPath
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent(
+            "edgerunner-publishable-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDir) }
+
+        var runResults: [RunResult] = []
+        var memLoadMB: Double = 0
+        var memPeakMB: Double = 0
+        var referenceHash: String?
+        var referencePrefix: [Int]?
+        var childLMHeadValues: [Double] = []
+        var deterministic = true
+
+        for run in 0..<runCount {
+            let reportURL = tempDir.appendingPathComponent("child-run-\(run).json")
+            let report = try runIsolatedChildProcess(
+                projectDir: projectDir,
+                reportURL: reportURL,
+                tokenCount: tokenCount,
+                contextWindow: contextWindow,
+                profileLMHead: profileLMHead
+            )
+
+            guard let persistedRun = report.runs.first else {
+                throw GenerationError.decodingFailed("Publishable child run \(run) produced no per-run data")
+            }
+
+            let syntheticTokens = Array(repeating: 0, count: persistedRun.tokenCount)
+            runResults.append(
+                RunResult(
+                    runIndex: run,
+                    tokens: syntheticTokens,
+                    ttftMs: persistedRun.ttftMs,
+                    decodeTokenCount: persistedRun.decodeTokenCount,
+                    decodeTotalMs: persistedRun.decodeTotalMs,
+                    decodeTokPerSec: persistedRun.decodeTokPerSec,
+                    endToEndTokPerSec: persistedRun.e2eTokPerSec,
+                    totalMs: persistedRun.totalMs,
+                    decodeLatencies: persistedRun.decodeLatencies,
+                    hasNaN: persistedRun.hasNaN
+                )
+            )
+
+            if run == 0 {
+                memLoadMB = report.memoryMB.modelLoad
+            }
+            memPeakMB = max(memPeakMB, report.memoryMB.peakRSS)
+            if let lmHead = report.lmHeadAvgMs {
+                childLMHeadValues.append(lmHead)
+            }
+            if report.deterministic == false {
+                deterministic = false
+            }
+
+            if let referenceHash, let referencePrefix {
+                if report.tokenHash != referenceHash || report.greedyPrefix != referencePrefix {
+                    deterministic = false
+                }
+            } else {
+                referenceHash = report.tokenHash
+                referencePrefix = report.greedyPrefix
+            }
+        }
+
+        guard let referenceHash, let referencePrefix else {
+            throw GenerationError.decodingFailed("Publishable benchmark produced no child results")
+        }
+
+        let lmHeadMs = childLMHeadValues.isEmpty
+            ? nil
+            : childLMHeadValues.reduce(0, +) / Double(childLMHeadValues.count)
+
+        return BenchmarkExecution(
+            runResults: runResults,
+            memLoadMB: memLoadMB,
+            memPeakMB: memPeakMB,
+            deterministic: deterministic,
+            tokenPrefix: referencePrefix,
+            tokenHash: referenceHash,
+            lmHeadMs: lmHeadMs
+        )
+    }
+
+    private func runIsolatedChildProcess(
+        projectDir: String,
+        reportURL: URL,
+        tokenCount: Int,
+        contextWindow: Int,
+        profileLMHead: Bool
+    ) throws -> PersistedBenchmarkReport {
+        let fileManager = FileManager.default
+        let stdoutURL = reportURL.deletingPathExtension().appendingPathExtension("stdout.log")
+        let stderrURL = reportURL.deletingPathExtension().appendingPathExtension("stderr.log")
+        fileManager.createFile(atPath: stdoutURL.path, contents: nil)
+        fileManager.createFile(atPath: stderrURL.path, contents: nil)
+        defer {
+            try? fileManager.removeItem(at: stdoutURL)
+            try? fileManager.removeItem(at: stderrURL)
+        }
+
+        let testingHelperURL = try swiftPMTestingHelperURL()
+        let testBinaryURL = try currentTestBinaryURL()
+        let testBundleURL = try currentTestBundleURL(fallbackBinaryURL: testBinaryURL)
+
+        let process = Process()
+        process.currentDirectoryURL = URL(fileURLWithPath: projectDir)
+        process.executableURL = testingHelperURL
+        process.arguments = [
+            "--test-bundle-path", testBundleURL.path,
+            "-c", "release",
+            "--filter", "PublishableBenchmark/fullBenchmark",
+            testBinaryURL.path,
+            "--testing-library", "swift-testing",
+        ]
+
+        var childEnv = ProcessInfo.processInfo.environment
+        childEnv["PROJECT_DIR"] = projectDir
+        childEnv["EDGERUNNER_BENCHMARK_TOKENS"] = String(tokenCount)
+        childEnv["EDGERUNNER_BENCHMARK_RUNS"] = "1"
+        childEnv["EDGERUNNER_BENCHMARK_CONTEXT"] = String(contextWindow)
+        childEnv[Self.childRunEnvKey] = "1"
+        childEnv[Self.processIsolationEnvKey] = "0"
+        childEnv[Self.outputPathEnvKey] = reportURL.path
+        if profileLMHead {
+            childEnv["EDGERUNNER_PROFILE_LMHEAD"] = "1"
+        } else {
+            childEnv.removeValue(forKey: "EDGERUNNER_PROFILE_LMHEAD")
+        }
+        process.environment = childEnv
+
+        process.standardOutput = try FileHandle(forWritingTo: stdoutURL)
+        process.standardError = try FileHandle(forWritingTo: stderrURL)
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
+        let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            throw GenerationError.decodingFailed(
+                """
+                Publishable child benchmark failed with status \(process.terminationStatus).
+                stdout:
+                \(tailLines(stdout))
+                stderr:
+                \(tailLines(stderr))
+                """
+            )
+        }
+
+        let data = try Data(contentsOf: reportURL)
+        return try JSONDecoder().decode(PersistedBenchmarkReport.self, from: data)
+    }
+
     // MARK: - Statistics
 
     private struct RunResult {
@@ -252,6 +568,70 @@ struct PublishableBenchmark {
         let totalMs: Double
         let decodeLatencies: [Double]
         let hasNaN: Bool
+    }
+
+    private struct BenchmarkExecution {
+        let runResults: [RunResult]
+        let memLoadMB: Double
+        let memPeakMB: Double
+        let deterministic: Bool
+        let tokenPrefix: [Int]
+        let tokenHash: String
+        let lmHeadMs: Double?
+    }
+
+    private struct PersistedBenchmarkReport: Decodable {
+        struct PersistedRun: Decodable {
+            let run: Int
+            let decodeTokPerSec: Double
+            let e2eTokPerSec: Double
+            let ttftMs: Double
+            let decodeTotalMs: Double
+            let decodeTokenCount: Int
+            let totalMs: Double
+            let tokenCount: Int
+            let decodeLatencies: [Double]
+            let hasNaN: Bool
+
+            private enum CodingKeys: String, CodingKey {
+                case run
+                case decodeTokPerSec = "decode_tok_per_sec"
+                case e2eTokPerSec = "e2e_tok_per_sec"
+                case ttftMs = "ttft_ms"
+                case decodeTotalMs = "decode_total_ms"
+                case decodeTokenCount = "decode_token_count"
+                case totalMs = "total_ms"
+                case tokenCount = "token_count"
+                case decodeLatencies = "decode_latencies_ms"
+                case hasNaN = "has_nan"
+            }
+        }
+
+        struct Memory: Decodable {
+            let modelLoad: Double
+            let peakRSS: Double
+
+            private enum CodingKeys: String, CodingKey {
+                case modelLoad = "model_load"
+                case peakRSS = "peak_rss"
+            }
+        }
+
+        let greedyPrefix: [Int]
+        let tokenHash: String
+        let deterministic: Bool
+        let lmHeadAvgMs: Double?
+        let memoryMB: Memory
+        let runs: [PersistedRun]
+
+        private enum CodingKeys: String, CodingKey {
+            case greedyPrefix = "greedy_prefix"
+            case tokenHash = "token_hash"
+            case deterministic
+            case lmHeadAvgMs = "lm_head_avg_ms"
+            case memoryMB = "memory_mb"
+            case runs
+        }
     }
 
     private struct BenchmarkStats {
@@ -309,14 +689,15 @@ struct PublishableBenchmark {
         tokenCount: Int,
         runCount: Int,
         lmHeadMs: Double?,
-        isCanonicalRun: Bool
+        isCanonicalRun: Bool,
+        tokenHash: String
     ) {
         print("")
         print("=" * 70)
-        print("  EdgeRunner Inference Benchmark — Qwen 3 0.6B Q8_0")
+        print("  EdgeRunner Inference Benchmark — \(Self.contract.model.name)")
         print("=" * 70)
         print("")
-        print("  Model:           Qwen3-0.6B-Q8_0 (804,753,504-byte GGUF, 28 layers, 151K vocab)")
+        print("  Model:           \(Self.contract.model.name) (\(Self.expectedModelFileSizeBytes)-byte GGUF, 28 layers, 151K vocab)")
         print("  Device:          \(deviceDescription())")
         print("  Tokens:          \(tokenCount) per run")
         print("  Runs:            \(runCount)")
@@ -367,7 +748,7 @@ struct PublishableBenchmark {
         print("\(prefix): qwen_decode_throughput_max \(String(format: "%.1f", stats.decodeMax)) tok/s")
         print("\(prefix): qwen_ttft_median \(String(format: "%.1f", stats.ttftMedian)) ms")
         print("\(prefix): qwen_e2e_throughput_median \(String(format: "%.1f", stats.e2eMedian)) tok/s")
-        print("\(prefix): qwen_token_hash \(tokenSequenceHash(runs[0].tokens))")
+        print("\(prefix): qwen_token_hash \(tokenHash)")
     }
 
     // MARK: - JSON Output
@@ -398,13 +779,14 @@ struct PublishableBenchmark {
                 "decode_token_count": run.decodeTokenCount,
                 "total_ms": run.totalMs,
                 "token_count": run.tokens.count,
+                "decode_latencies_ms": run.decodeLatencies,
                 "has_nan": run.hasNaN,
             ]
         }
 
         let json: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "model": "Qwen3-0.6B-Q8_0",
+            "model": Self.contract.model.name,
             "model_path": modelPath,
             "model_file_size_bytes": modelFileSize,
             "greedy_prefix": tokenPrefix,
@@ -448,8 +830,21 @@ struct PublishableBenchmark {
         let benchDir = URL(fileURLWithPath: projectDir).appendingPathComponent("benchmarks")
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
 
-        let outputFileName = isCanonicalRun ? "publishable_benchmark.json" : "publishable_profile_benchmark.json"
-        let outputURL = benchDir.appendingPathComponent(outputFileName)
+        let outputURL: URL
+        if let overridePath = ProcessInfo.processInfo.environment[Self.outputPathEnvKey], !overridePath.isEmpty {
+            if overridePath.hasPrefix("/") {
+                outputURL = URL(fileURLWithPath: overridePath)
+            } else {
+                outputURL = URL(fileURLWithPath: projectDir).appendingPathComponent(overridePath)
+            }
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } else {
+            let outputFileName = isCanonicalRun ? "publishable_benchmark.json" : "publishable_profile_benchmark.json"
+            outputURL = benchDir.appendingPathComponent(outputFileName)
+        }
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: outputURL)
         print("Benchmark results written to: \(outputURL.path)")
@@ -468,6 +863,88 @@ struct PublishableBenchmark {
             throw GenerationError.decodingFailed("Invalid \(name)=\(rawValue). Expected a positive integer.")
         }
         return parsed
+    }
+
+    private func isExplicitlyDisabled(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return false }
+        switch rawValue.lowercased() {
+        case "0", "false", "no", "off":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func tailLines(_ output: String, maxLines: Int = 40) -> String {
+        let lines = output.split(whereSeparator: \.isNewline)
+        guard lines.count > maxLines else { return output }
+        return lines.suffix(maxLines).joined(separator: "\n")
+    }
+
+    private func swiftPMTestingHelperURL() throws -> URL {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["--find", "swift-test"]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let swiftTestPath = String(
+            data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard process.terminationStatus == 0, !swiftTestPath.isEmpty else {
+            throw GenerationError.decodingFailed(
+                "Could not locate swift-test via xcrun for process-isolated benchmark child. \(tailLines(stderr))"
+            )
+        }
+
+        let toolchainUsrURL = URL(fileURLWithPath: swiftTestPath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let helperURL = toolchainUsrURL.appendingPathComponent("libexec/swift/pm/swiftpm-testing-helper")
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            throw GenerationError.decodingFailed(
+                "swiftpm-testing-helper is not executable at \(helperURL.path)"
+            )
+        }
+
+        return helperURL
+    }
+
+    private func currentTestBinaryURL() throws -> URL {
+        let arguments = CommandLine.arguments
+        if let testingLibraryIndex = arguments.firstIndex(of: "--testing-library"),
+           testingLibraryIndex > 0 {
+            return URL(fileURLWithPath: arguments[testingLibraryIndex - 1])
+        }
+
+        if let binaryArgument = arguments.last(where: { !$0.hasPrefix("-") }) {
+            return URL(fileURLWithPath: binaryArgument)
+        }
+
+        throw GenerationError.decodingFailed("Could not resolve current test binary path from command-line arguments.")
+    }
+
+    private func currentTestBundleURL(fallbackBinaryURL: URL) throws -> URL {
+        let arguments = CommandLine.arguments
+        if let bundleIndex = arguments.firstIndex(of: "--test-bundle-path"),
+           bundleIndex + 1 < arguments.count {
+            return URL(fileURLWithPath: arguments[bundleIndex + 1])
+        }
+
+        return fallbackBinaryURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 
     private func tokenSequenceHash(_ tokens: [Int]) -> String {

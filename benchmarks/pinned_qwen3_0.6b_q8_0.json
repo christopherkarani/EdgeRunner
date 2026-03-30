@@ -1,0 +1,22 @@
+{
+  "model": {
+    "name": "Qwen3-0.6B-Q8_0",
+    "hf_repo": "Qwen/Qwen3-0.6B-GGUF",
+    "hf_file": "Qwen3-0.6B-Q8_0.gguf",
+    "local_path": "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf",
+    "download_url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+    "size_bytes": 639446688,
+    "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+  },
+  "publishable": {
+    "token_count": 128,
+    "run_count": 5,
+    "context_window": 2048,
+    "expected_greedy_prefix": [1, 1479, 35],
+    "expected_token_hash": "0afae14a84cf0df8"
+  },
+  "smoke": {
+    "generate_count": 4,
+    "expected_greedy_prefix": [1, 1479, 35]
+  }
+}

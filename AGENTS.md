@@ -3,14 +3,16 @@
 ## Autoresearch: Inference Optimization Agent
 
 Autonomous optimization loop targeting maximum autoregressive decode tokens/sec
-on Qwen 3 0.6B Q8_0 (pinned GGUF size: 804,753,504 bytes). Follows the Karpathy autoresearch pattern:
+on Qwen 3 0.6B Q8_0 (pinned GGUF size: 639,446,688 bytes). Follows the Karpathy autoresearch pattern:
 RESEARCH → MODIFY → BUILD → BENCHMARK → KEEP/ROLLBACK → REPEAT.
 
 ### Current Benchmark Ground Rules
 
 - Primary metric: **Publishable benchmark** (128-token greedy decode, TTFT separated, release build)
 - Command: `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
-- Model: Qwen 3 0.6B Q8_0 at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` (expected size: **804,753,504** bytes)
+- Model: Qwen 3 0.6B Q8_0 at `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` (expected size: **639,446,688** bytes)
+- Contract source of truth: `benchmarks/pinned_qwen3_0.6b_q8_0.json`
+- Benchmark harnesses pin the safe decode path with the mega fused GQA kernel disabled until that kernel regains deterministic correctness on the pinned artifact.
 - `QwenBenchmark/decodeBenchmark` is **smoke/regression only** (4 tokens, not apples-to-apples)
 - Cached JSON artifacts in `benchmarks/` are for record-keeping only; always rerun benchmarks for truth
 - Metal 4: available on macOS 26+, but the optimized Metal 3 decode path remains the default. Use `EDGERUNNER_DECODE_PREFER_METAL4=1` to compare Metal 4 against the default path.
@@ -46,7 +48,7 @@ RESEARCH → MODIFY → BUILD → BENCHMARK → KEEP/ROLLBACK → REPEAT.
 
 ### Correctness Guard
 
-Canonical publishable benchmark guard: greedy prefix must start with `[1, 14582, 25]`.
+Canonical publishable benchmark guard: greedy prefix must start with `[1, 1479, 35]`.
 Canonical publishable runs also enforce the pinned full-token hash for the 128-token harness.
 If the publishable benchmark loses determinism, the prefix changes, or the canonical token hash changes on the pinned GGUF, treat it as a correctness regression.
 
