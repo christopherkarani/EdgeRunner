@@ -1611,16 +1611,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         destination: turboVCache!,
                         signs: turboQuantKernel!.valueSigns
                     )
+                }
 
-                    if let turboDenseVCache {
-                        enc.setComputePipelineState(convertF32ToF16PSO)
-                        enc.setBuffer(allVBuf, offset: 0, index: 0)
-                        enc.setBuffer(turboDenseVCache, offset: startPosition * kvDim * halfStride, index: 1)
-                        var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                        enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                        enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                    }
+                if turboQuantEnabled, let turboDenseVCache {
+                    enc.setComputePipelineState(convertF32ToF16PSO)
+                    enc.setBuffer(allVBuf, offset: 0, index: 0)
+                    enc.setBuffer(turboDenseVCache, offset: startPosition * kvDim * halfStride, index: 1)
+                    var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                    enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
 
                 // Convert V from f32 → f16 not needed for fused path (writes f16 directly)
