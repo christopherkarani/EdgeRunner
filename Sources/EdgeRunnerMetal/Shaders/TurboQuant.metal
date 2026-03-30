@@ -1517,6 +1517,157 @@ kernel void gqa_attention_turboquant_decode(
     }
 }
 
+kernel void gqa_attention_turboquant_decode_f16v(
+    device const float *Q [[buffer(0)]],
+    device const uint *KCodes [[buffer(1)]],
+    device const uint *KResidualSigns [[buffer(2)]],
+    device const uint *KOutlierMask [[buffer(3)]],
+    device const float *KMetadata [[buffer(4)]],
+    device const half *V [[buffer(5)]],
+    device float *O [[buffer(6)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(7)]],
+    device const float *keyRotationSigns [[buffer(8)]],
+    device const float *keyResidualProjectionSigns [[buffer(9)]],
+    uint headIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (headIndex >= params.numHeads) { return; }
+
+    constexpr uint kDecodeThreads = 16;
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint kvSeqLen = params.kvSeqLen;
+    const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
+    const uint qBase = headIndex * params.headDim;
+    const uint kvStride = params.numKVHeads * params.headDim;
+
+    threadgroup float qRotation[128];
+    threadgroup float qResidual[128];
+    threadgroup float output[128];
+    threadgroup float partialOutput[kDecodeThreads * 128];
+    threadgroup float laneMax[kDecodeThreads];
+    threadgroup float laneSum[kDecodeThreads];
+    threadgroup float laneScale[kDecodeThreads];
+    threadgroup float reductionScratch[kDecodeThreads];
+    threadgroup float globalMax;
+    threadgroup float globalSum;
+
+    threadgroup float *laneOutput = partialOutput + lane * 128;
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float value = Q[qBase + dim];
+        qRotation[dim] = value;
+        qResidual[dim] = value;
+        output[dim] = 0.0;
+        laneOutput[dim] = 0.0;
+    }
+    if (lane == 0) {
+        globalMax = -INFINITY;
+        globalSum = 0.0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
+        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0;
+
+    for (uint kvPos = lane; kvPos < kvLimit; kvPos += kDecodeThreads) {
+        uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+        device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
+        device const uint *kSignRow = KResidualSigns + rowIndex * 4;
+        device const uint *kMaskRow = KOutlierMask + rowIndex * 4;
+        device const float *kMetaRow = KMetadata + rowIndex * 2;
+        float keyRowNorm = kMetaRow[0];
+        float keyResidualNorm = kMetaRow[1];
+
+        float mseDot = 0.0;
+        float residualDot = 0.0;
+        uint keySidebandOffset = 128u * params.regularBits;
+        for (uint dim = 0; dim < 128; ++dim) {
+            bool useHighPrecision = tq_get_bit(kMaskRow, dim) == 1u;
+            uint code = tq_extract_split_plane_code(
+                kCodeRow,
+                dim,
+                useHighPrecision,
+                params.regularBits,
+                params.highPrecisionBits,
+                keySidebandOffset
+            );
+            mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
+            residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+        }
+        float score = keyRowNorm * (
+            mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+        ) * params.scale;
+        float nextMax = max(runningMax, score);
+        float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
+        float prob = exp(score - nextMax);
+        runningSum = runningSum * correction + prob;
+        runningMax = nextMax;
+
+        for (uint dim = 0; dim < 128; ++dim) {
+            laneOutput[dim] *= correction;
+        }
+
+        uint valueBase = kvPos * kvStride + kvHeadIndex * params.headDim;
+        for (uint dim = 0; dim < 128; ++dim) {
+            laneOutput[dim] += prob * float(V[valueBase + dim]);
+        }
+    }
+
+    laneMax[lane] = runningMax;
+    laneSum[lane] = runningSum;
+    reductionScratch[lane] = runningMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] = max(reductionScratch[lane], reductionScratch[lane + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalMax = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localScale = runningSum > 0.0 ? exp(runningMax - globalMax) : 0.0;
+    laneScale[lane] = localScale;
+    reductionScratch[lane] = runningSum * localScale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] += reductionScratch[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalSum = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float accum = 0.0;
+        for (uint worker = 0; worker < kDecodeThreads; ++worker) {
+            float workerScale = laneScale[worker];
+            accum += partialOutput[worker * 128 + dim] * workerScale;
+        }
+        output[dim] = accum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
+    uint outputBase = headIndex * params.headDim;
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        O[outputBase + dim] = output[dim] * invSum;
+    }
+}
+
 kernel void gqa_attention_turboquant_decode_aggressive(
     device const float *Q [[buffer(0)]],
     device const uint *KCodes [[buffer(1)]],
@@ -1793,6 +1944,223 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     uint outputBase = headIndex * params.headDim;
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
         O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE)) * invSum;
+    }
+}
+
+kernel void gqa_attention_turboquant_decode_aggressive_f16v(
+    device const float *Q [[buffer(0)]],
+    device const uint *KCodes [[buffer(1)]],
+    device const uint *KResidualSigns [[buffer(2)]],
+    device const uint *KOutlierMask [[buffer(3)]],
+    device const float *KMetadata [[buffer(4)]],
+    device const half *V [[buffer(5)]],
+    device float *O [[buffer(6)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(7)]],
+    device const float *keyRotationSigns [[buffer(8)]],
+    device const float *keyResidualProjectionSigns [[buffer(9)]],
+    uint headIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (headIndex >= params.numHeads) { return; }
+
+    constexpr uint kDecodeThreads = 16;
+    constexpr uint kRegularBits = 2;
+    constexpr uint kHighBits = 3;
+    constexpr uint kTileRows = 4;
+
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint kvSeqLen = params.kvSeqLen;
+    const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
+    const uint qBase = headIndex * params.headDim;
+    const uint kvStride = params.numKVHeads * params.headDim;
+
+    threadgroup float qRotation[128];
+    threadgroup float qResidual[128];
+    threadgroup float output[128];
+    threadgroup float partialOutput[kDecodeThreads * 128];
+    threadgroup float laneMax[kDecodeThreads];
+    threadgroup float laneSum[kDecodeThreads];
+    threadgroup float laneScale[kDecodeThreads];
+    threadgroup float laneAccumulationScale[kDecodeThreads];
+    threadgroup float reductionScratch[kDecodeThreads];
+    threadgroup float globalMax;
+    threadgroup float globalSum;
+
+    threadgroup float *laneOutput = partialOutput + lane * 128;
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float value = Q[qBase + dim];
+        qRotation[dim] = value;
+        qResidual[dim] = value;
+        output[dim] = 0.0;
+        laneOutput[dim] = 0.0;
+    }
+    if (lane == 0) {
+        globalMax = -INFINITY;
+        globalSum = 0.0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
+        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0;
+    float accumulationScale = 1.0;
+
+    for (uint kvBase = lane; kvBase < kvLimit; kvBase += kDecodeThreads * kTileRows) {
+        float tileScores[kTileRows];
+        float tileProbs[kTileRows];
+        uint tilePositions[kTileRows];
+        float tileMax = -INFINITY;
+
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint kvPos = kvBase + tile * kDecodeThreads;
+            tilePositions[tile] = kvPos;
+            if (kvPos >= kvLimit) {
+                tileScores[tile] = -INFINITY;
+                tileProbs[tile] = 0.0;
+                continue;
+            }
+
+            uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+            device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
+            device const uint *kSignRow = KResidualSigns + rowIndex * 4;
+            device const uint *kMaskRow = KOutlierMask + rowIndex * 4;
+            device const float *kMetaRow = KMetadata + rowIndex * 2;
+            float keyRowNorm = kMetaRow[0];
+            float keyResidualNorm = kMetaRow[1];
+
+            float mseDot = 0.0;
+            float residualDot = 0.0;
+            for (uint block = 0; block < 4; ++block) {
+                uint signWord = kSignRow[block];
+                uint packedCodes0 = kCodeRow[block * 2];
+                uint packedCodes1 = kCodeRow[block * 2 + 1];
+                for (uint bit = 0; bit < 16; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes0 & 0x3u;
+                    packedCodes0 >>= 2u;
+                    mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
+                    residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
+                for (uint bit = 16; bit < 32; ++bit) {
+                    uint dim = block * 32 + bit;
+                    uint baseCode = packedCodes1 & 0x3u;
+                    packedCodes1 >>= 2u;
+                    mseDot += qRotation[dim] * tq_centroid_2bit(baseCode);
+                    residualDot += qResidual[dim] * ((((signWord >> bit) & 1u) != 0u) ? 1.0 : -1.0);
+                }
+            }
+            uint keySidebandOffset = 128u * kRegularBits;
+            for (uint block = 0; block < 4; ++block) {
+                uint maskWord = kMaskRow[block];
+                while (maskWord != 0u) {
+                    uint bit = ctz(maskWord);
+                    uint dim = block * 32 + bit;
+                    uint baseCode = tq_extract_code(kCodeRow, dim * kRegularBits, kRegularBits);
+                    uint extra = tq_extract_code(kCodeRow, keySidebandOffset, kHighBits - kRegularBits);
+                    uint fullCode = baseCode | (extra << kRegularBits);
+                    mseDot += qRotation[dim] * (tq_centroid_3bit(fullCode) - tq_centroid_2bit(baseCode));
+                    keySidebandOffset += (kHighBits - kRegularBits);
+                    maskWord &= (maskWord - 1u);
+                }
+            }
+
+            float score = keyRowNorm * (
+                mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+            ) * params.scale;
+            tileScores[tile] = score;
+            tileMax = max(tileMax, score);
+        }
+
+        float nextMax = max(runningMax, tileMax);
+        bool maxAdvanced = tileMax > runningMax;
+        float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
+        float tileSum = 0.0;
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            float score = tileScores[tile];
+            if (score == -INFINITY) {
+                tileProbs[tile] = 0.0;
+                continue;
+            }
+            float prob = exp(score - nextMax);
+            tileProbs[tile] = prob;
+            tileSum += prob;
+        }
+
+        runningSum = runningSum * correction + tileSum;
+        runningMax = nextMax;
+
+        if (maxAdvanced && runningSum > tileSum) {
+            accumulationScale *= correction;
+            if (accumulationScale < 1.0e-6f) {
+                for (uint dim = 0; dim < 128; ++dim) {
+                    laneOutput[dim] *= accumulationScale;
+                }
+                accumulationScale = 1.0f;
+            }
+        }
+
+        for (uint tile = 0; tile < kTileRows; ++tile) {
+            uint kvPos = tilePositions[tile];
+            float prob = tileProbs[tile];
+            if (kvPos >= kvLimit || prob == 0.0f) { continue; }
+            uint valueBase = kvPos * kvStride + kvHeadIndex * params.headDim;
+            for (uint dim = 0; dim < 128; ++dim) {
+                laneOutput[dim] += (prob / accumulationScale) * float(V[valueBase + dim]);
+            }
+        }
+    }
+
+    laneMax[lane] = runningMax;
+    laneSum[lane] = runningSum;
+    reductionScratch[lane] = runningMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] = max(reductionScratch[lane], reductionScratch[lane + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalMax = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localScale = runningSum > 0.0 ? exp(runningMax - globalMax) : 0.0;
+    laneScale[lane] = localScale;
+    laneAccumulationScale[lane] = accumulationScale;
+    reductionScratch[lane] = runningSum * localScale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] += reductionScratch[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalSum = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float accum = 0.0;
+        for (uint worker = 0; worker < kDecodeThreads; ++worker) {
+            float workerScale = laneScale[worker] * laneAccumulationScale[worker];
+            accum += partialOutput[worker * 128 + dim] * workerScale;
+        }
+        output[dim] = accum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
+    uint outputBase = headIndex * params.headDim;
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        O[outputBase + dim] = output[dim] * invSum;
     }
 }
 

@@ -118,6 +118,7 @@
   - widening the TurboQuant decode kernel worker count beyond the stable 16-thread shape
   - rewriting the decode kernel to a cooperative row-block reducer
   - shrinking the TurboQuant prefill attention tile from 16 to 8
+  - fusing TurboQuant decode Q/K head norm + NeoX RoPE into a single runtime path: it passed attention parity and the exact smoke trace, improved the 512-token aggressive run to `23.55 tok/s`, but regressed the 1024-token aggressive run from `17.33 tok/s` to `15.46 tok/s`, so it was rolled back
   - rewriting the row quantizer as a cooperative per-row threadgroup kernel
 - All of those either regressed throughput badly, broke parity, or exceeded the device threadgroup-memory limit.
 - Kept:
@@ -216,6 +217,35 @@
 ## Goal
 - Restore deterministic, benchmark-canonical decode on the fast mega fused Q/K norm + RoPE + GQA path for the pinned `Qwen3-0.6B-Q8_0` artifact.
 - Keep benchmark throughput on the fast path without relying on the temporary `disableMegaKernel` benchmark override.
+
+## TurboQuant Long-Context Quality Harness
+
+### Goal
+- Add an env-gated long-context quality harness for aggressive TurboQuant so ultra-long throughput tuning is measured against FP16 token/logit drift, not only the short smoke trace.
+
+### Plan
+- [x] Add an env-gated quality harness that runs FP16 and aggressive TurboQuant on the same long prompt.
+- [x] Report first greedy-token divergence step plus max absolute logit delta across decode steps.
+- [ ] Run the harness on the current `16k` winning branch and capture the baseline quality delta.
+
+### Review
+- Added [`TurboQuantQualityHarnessTest.swift`](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Tests/EdgeRunnerTests/TurboQuantQualityHarnessTest.swift), an env-gated long-context trace comparator for the pinned `Qwen3-0.6B-Q8_0` model.
+- The harness runs both `.disabled` and `.turboQuantAggressive` modes on the same prompt, records greedy decode steps, and prints:
+  - first argmax divergence step
+  - max absolute logit delta across compared steps
+  - generated-token traces for both modes
+- Baseline quality findings so far:
+  - `4096/8`, aggressive: first divergence at step `1`, max logit delta `24.6944`, generated trace collapses after the first token
+  - `4096/8`, balanced: first divergence at step `1`, max logit delta `19.9133`
+  - `4096/2`, aggressive after shared dense-V decode fix: first divergence still at step `1`, but max logit delta improved from `15.6232` to `11.7310`
+  - `4096/2`, balanced after the same fix: first divergence still at step `1`, max logit delta stayed roughly flat (`14.4329` → `14.4110`)
+
+### Acceptance Rule
+- Before resuming throughput-only tuning on TurboQuant:
+  - [ ] `QwenTurboQuantSmokeTest` remains exactly `[16, 11, 220, 508]`
+  - [ ] `TurboQuantQualityHarnessTest` at `4096/2` no longer diverges at step `1`
+  - [ ] TurboQuant no longer collapses into repeated-token traces on the quality harness
+  - [ ] The `16384` aggressive benchmark still preserves the ultra-long decode-throughput win over FP16
 
 ## Assumptions Check
 - [x] Reproduce the pinned 0.6B divergence on the mega decode path with a bounded parity harness.

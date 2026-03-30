@@ -28,6 +28,12 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let kernel = try TurboQuantKernel(device: device)
         let registry = try KernelRegistry(device: device)
         let fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
+        let rmsNormPipeline = try registry.pipeline(for: "rmsnorm_f32")
+        let ropeNeoXPipeline = try registry.pipeline(for: "rope_neox_f32")
+        let scoreOnlyPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_scores_only")
+        let valuesOnlyPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_values_only")
+        let valuesAccumOnlyPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_values_accum_only")
+        let valuesFinalizeOnlyPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_values_finalize_only")
         let phase1Pipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_phase1")
         let rotateOnlyPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_rotate_only")
         let selectOnlyPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_select_only")
@@ -47,23 +53,32 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let q = makeQuery(headCount: 16)
         let hidden = makeHidden(dim: dim, phase: 0.19)
         let norm = makeNorm(dim: dim)
+        let headNorm = makeNorm(dim: 128)
 
         let kSourceBuffer = device.makeBuffer(bytes: kSource, length: kSource.count * MemoryLayout<Float>.stride)!
         let vSourceBuffer = device.makeBuffer(bytes: vSource, length: vSource.count * MemoryLayout<Float>.stride)!
         let qBuffer = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride)!
         let hiddenBuffer = device.makeBuffer(bytes: hidden, length: hidden.count * MemoryLayout<Float>.stride)!
         let normBuffer = device.makeBuffer(bytes: norm, length: norm.count * MemoryLayout<Float>.stride)!
+        let headNormBuffer = device.makeBuffer(bytes: headNorm, length: headNorm.count * MemoryLayout<Float>.stride)!
         let wqBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: qRows, blocksPerRow: blocksPerRow, phase: 0x11), length: qRows * blocksPerRow * 34)!
         let wkBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: kvRows, blocksPerRow: blocksPerRow, phase: 0x31), length: kvRows * blocksPerRow * 34)!
         let wvBuffer = device.makeBuffer(bytes: makeQ8Weights(rows: kvRows, blocksPerRow: blocksPerRow, phase: 0x51), length: kvRows * blocksPerRow * 34)!
         let fusedQOutput = device.makeBuffer(length: qRows * MemoryLayout<Float>.stride)!
         let fusedKOutput = device.makeBuffer(length: kvRows * MemoryLayout<Float>.stride)!
         let fusedVOutput = device.makeBuffer(length: kvRows * MemoryLayout<Float>.stride)!
+        let qNormOutput = device.makeBuffer(length: q.count * MemoryLayout<Float>.stride)!
+        let kNormOutput = device.makeBuffer(length: kSource.count * MemoryLayout<Float>.stride)!
+        let qRopeOutput = device.makeBuffer(length: q.count * MemoryLayout<Float>.stride)!
+        let kRopeOutput = device.makeBuffer(length: kSource.count * MemoryLayout<Float>.stride)!
 
         let singleK = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let fusedK = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let fusedV = try makeTurboBuffers(rowCount: rowCount, layout: layout)
         let attentionOutput = device.makeBuffer(length: 16 * 128 * MemoryLayout<Float>.stride)!
+        let scoreSummary = device.makeBuffer(length: 16 * MemoryLayout<Float>.stride)!
+        let finalizeInputMSE = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride)!
+        let finalizeInputResidual = device.makeBuffer(bytes: makeQuery(headCount: 16).map { $0 * 0.5 }, length: q.count * MemoryLayout<Float>.stride)!
         let phaseNormalized = device.makeBuffer(length: rowCount * 128 * MemoryLayout<Float>.stride)!
         let phaseRotated = device.makeBuffer(length: rowCount * 128 * MemoryLayout<Float>.stride)!
         let phaseOutlierMask = device.makeBuffer(length: rowCount * 4 * MemoryLayout<UInt32>.stride)!
@@ -87,6 +102,24 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             tokenCount: 1,
             rmsEps: 1e-6
         )
+        var qNormParams = RMSNormParamsBench(rows: 16, cols: 128, eps: 1e-6)
+        var kNormParams = RMSNormParamsBench(rows: 8, cols: 128, eps: 1e-6)
+        var qRoPEParams = RoPEParamsBench(
+            seqLen: 1,
+            numHeads: 16,
+            headDim: 128,
+            startPos: 1023,
+            theta: 1_000_000,
+            scalingFactor: 1
+        )
+        var kRoPEParams = RoPEParamsBench(
+            seqLen: 1,
+            numHeads: 8,
+            headDim: 128,
+            startPos: 1023,
+            theta: 1_000_000,
+            scalingFactor: 1
+        )
         var attentionParams = TurboQuantAttentionParamsBench(
             seqLen: 1,
             headDim: 128,
@@ -106,6 +139,163 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         )
 
         let attentionCache = try makeAttentionCache(rowCount: 1024)
+        let valueOnlyProbs = makeUniformProbabilities(headCount: 16, kvSeqLen: 1024)
+        let valueOnlyProbBuffer = device.makeBuffer(bytes: valueOnlyProbs, length: valueOnlyProbs.count * MemoryLayout<Float>.stride)!
+
+        let qNorm = try await benchmark(name: "turboquant_decode_q_norm", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(rmsNormPipeline)
+                $0.setBuffer(qBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(qNormOutput, offset: 0, index: 2)
+                $0.setBytes(&qNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(16, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+            }
+        }
+
+        let kNorm = try await benchmark(name: "turboquant_decode_k_norm", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(rmsNormPipeline)
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(kNormOutput, offset: 0, index: 2)
+                $0.setBytes(&kNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 8, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(8, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+            }
+        }
+
+        let qRoPE = try await benchmark(name: "turboquant_decode_q_rope", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(ropeNeoXPipeline)
+                $0.setBuffer(qNormOutput, offset: 0, index: 0)
+                $0.setBuffer(qRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&qRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 16, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+            }
+        }
+
+        let kRoPE = try await benchmark(name: "turboquant_decode_k_rope", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(ropeNeoXPipeline)
+                $0.setBuffer(kNormOutput, offset: 0, index: 0)
+                $0.setBuffer(kRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&kRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 8, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+            }
+        }
+
+        let qkNormRoPEFallback = try await benchmark(name: "turboquant_decode_qk_norm_rope_fallback", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(rmsNormPipeline)
+                $0.setBuffer(qBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(qNormOutput, offset: 0, index: 2)
+                $0.setBytes(&qNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(16, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(kNormOutput, offset: 0, index: 2)
+                $0.setBytes(&kNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 8, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(8, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setComputePipelineState(ropeNeoXPipeline)
+                $0.setBuffer(qNormOutput, offset: 0, index: 0)
+                $0.setBuffer(qRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&qRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 16, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setBuffer(kNormOutput, offset: 0, index: 0)
+                $0.setBuffer(kRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&kRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 8, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+            }
+        }
+
+        let qkNormRoPEPlusQuantize = try await benchmark(name: "turboquant_decode_qk_norm_rope_plus_quantize", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(rmsNormPipeline)
+                $0.setBuffer(qBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(qNormOutput, offset: 0, index: 2)
+                $0.setBytes(&qNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(16, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setBuffer(kSourceBuffer, offset: 0, index: 0)
+                $0.setBuffer(headNormBuffer, offset: 0, index: 1)
+                $0.setBuffer(kNormOutput, offset: 0, index: 2)
+                $0.setBytes(&kNormParams, length: MemoryLayout<RMSNormParamsBench>.stride, index: 3)
+                $0.dispatchThreads(
+                    MTLSize(width: 8, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(8, rmsNormPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setComputePipelineState(ropeNeoXPipeline)
+                $0.setBuffer(qNormOutput, offset: 0, index: 0)
+                $0.setBuffer(qRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&qRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 16, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setBuffer(kNormOutput, offset: 0, index: 0)
+                $0.setBuffer(kRopeOutput, offset: 0, index: 1)
+                $0.setBytes(&kRoPEParams, length: MemoryLayout<RoPEParamsBench>.stride, index: 2)
+                $0.dispatchThreads(
+                    MTLSize(width: 64, height: 8, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, ropeNeoXPipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+                )
+
+                $0.setComputePipelineState(kernel.quantizeAggressiveSmallKVPipeline)
+                $0.setBuffer(kRopeOutput, offset: 0, index: 0)
+                $0.setBuffer(vSourceBuffer, offset: 0, index: 1)
+                $0.setBuffer(fusedK.codes, offset: 0, index: 2)
+                $0.setBuffer(fusedK.residualSigns, offset: 0, index: 3)
+                $0.setBuffer(fusedK.outlierMask, offset: 0, index: 4)
+                $0.setBuffer(fusedK.metadata, offset: 0, index: 5)
+                $0.setBuffer(fusedV.codes, offset: 0, index: 6)
+                $0.setBuffer(fusedV.residualSigns, offset: 0, index: 7)
+                $0.setBuffer(fusedV.outlierMask, offset: 0, index: 8)
+                $0.setBuffer(fusedV.metadata, offset: 0, index: 9)
+                $0.setBytes(&quantizeParams, length: MemoryLayout<TurboQuantQuantizeParamsBench>.stride, index: 10)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+                $0.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
+                $0.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+                $0.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: rowCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
+            }
+        }
 
         let singleQuantize = try await benchmark(name: "turboquant_quantize_small_aggressive", warmup: 3, iterations: 20) {
             try encodeAndWait {
@@ -304,7 +494,84 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             }
         }
 
+        let decodeScoresOnly = try await benchmark(name: "gqa_attention_turboquant_decode_aggressive_scores_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(scoreOnlyPipeline)
+                $0.setBuffer(qBuffer, offset: 0, index: 0)
+                $0.setBuffer(attentionCache.key.codes, offset: 0, index: 1)
+                $0.setBuffer(attentionCache.key.residualSigns, offset: 0, index: 2)
+                $0.setBuffer(attentionCache.key.outlierMask, offset: 0, index: 3)
+                $0.setBuffer(attentionCache.key.metadata, offset: 0, index: 4)
+                $0.setBuffer(scoreSummary, offset: 0, index: 5)
+                $0.setBytes(&attentionParams, length: MemoryLayout<TurboQuantAttentionParamsBench>.stride, index: 6)
+                $0.setBuffer(kernel.keySigns.rotation, offset: 0, index: 7)
+                $0.setBuffer(kernel.keySigns.residual, offset: 0, index: 8)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let decodeValuesOnly = try await benchmark(name: "gqa_attention_turboquant_decode_aggressive_values_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(valuesOnlyPipeline)
+                $0.setBuffer(attentionCache.value.codes, offset: 0, index: 0)
+                $0.setBuffer(attentionCache.value.residualSigns, offset: 0, index: 1)
+                $0.setBuffer(attentionCache.value.outlierMask, offset: 0, index: 2)
+                $0.setBuffer(attentionCache.value.metadata, offset: 0, index: 3)
+                $0.setBuffer(valueOnlyProbBuffer, offset: 0, index: 4)
+                $0.setBuffer(attentionOutput, offset: 0, index: 5)
+                $0.setBytes(&attentionParams, length: MemoryLayout<TurboQuantAttentionParamsBench>.stride, index: 6)
+                $0.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 7)
+                $0.setBuffer(kernel.valueSigns.residual, offset: 0, index: 8)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let decodeValuesAccumOnly = try await benchmark(name: "gqa_attention_turboquant_decode_aggressive_values_accum_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(valuesAccumOnlyPipeline)
+                $0.setBuffer(attentionCache.value.codes, offset: 0, index: 0)
+                $0.setBuffer(attentionCache.value.residualSigns, offset: 0, index: 1)
+                $0.setBuffer(attentionCache.value.outlierMask, offset: 0, index: 2)
+                $0.setBuffer(attentionCache.value.metadata, offset: 0, index: 3)
+                $0.setBuffer(valueOnlyProbBuffer, offset: 0, index: 4)
+                $0.setBuffer(attentionOutput, offset: 0, index: 5)
+                $0.setBytes(&attentionParams, length: MemoryLayout<TurboQuantAttentionParamsBench>.stride, index: 6)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+                )
+            }
+        }
+
+        let decodeValuesFinalizeOnly = try await benchmark(name: "gqa_attention_turboquant_decode_aggressive_values_finalize_only", warmup: 3, iterations: 20) {
+            try encodeAndWait {
+                $0.setComputePipelineState(valuesFinalizeOnlyPipeline)
+                $0.setBuffer(finalizeInputMSE, offset: 0, index: 0)
+                $0.setBuffer(finalizeInputResidual, offset: 0, index: 1)
+                $0.setBuffer(attentionOutput, offset: 0, index: 2)
+                $0.setBytes(&attentionParams, length: MemoryLayout<TurboQuantAttentionParamsBench>.stride, index: 3)
+                $0.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 4)
+                $0.setBuffer(kernel.valueSigns.residual, offset: 0, index: 5)
+                $0.dispatchThreadgroups(
+                    MTLSize(width: 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+                )
+            }
+        }
+
         let fusedQKVMs = String(format: "%.3f", fusedQKV.perIterationMs)
+        let qNormMs = String(format: "%.3f", qNorm.perIterationMs)
+        let kNormMs = String(format: "%.3f", kNorm.perIterationMs)
+        let qRoPEMs = String(format: "%.3f", qRoPE.perIterationMs)
+        let kRoPEMs = String(format: "%.3f", kRoPE.perIterationMs)
+        let qkNormRoPEFallbackMs = String(format: "%.3f", qkNormRoPEFallback.perIterationMs)
+        let qkNormRoPEPlusQuantizeMs = String(format: "%.3f", qkNormRoPEPlusQuantize.perIterationMs)
         let singleQuantizeMs = String(format: "%.3f", singleQuantize.perIterationMs)
         let fusedQuantizeMs = String(format: "%.3f", fusedQuantize.perIterationMs)
         let phase1Ms = String(format: "%.3f", quantizePhase1.perIterationMs)
@@ -314,6 +581,10 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         let phase2Ms = String(format: "%.3f", quantizePhase2.perIterationMs)
         let separateQuantizeKVms = String(format: "%.3f", separateQuantizeKV.perIterationMs)
         let decodeAttentionMs = String(format: "%.3f", decodeAttention.perIterationMs)
+        let decodeScoresOnlyMs = String(format: "%.3f", decodeScoresOnly.perIterationMs)
+        let decodeValuesOnlyMs = String(format: "%.3f", decodeValuesOnly.perIterationMs)
+        let decodeValuesAccumOnlyMs = String(format: "%.3f", decodeValuesAccumOnly.perIterationMs)
+        let decodeValuesFinalizeOnlyMs = String(format: "%.3f", decodeValuesFinalizeOnly.perIterationMs)
         let fusedPlusQuantize = fusedQKV.perIterationMs + fusedQuantize.perIterationMs
         let fusedPlusQuantizeMs = String(format: "%.3f", fusedPlusQuantize)
         let decodeVsSingle = String(
@@ -334,6 +605,12 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         )
 
         print("BENCHMARK: turboquant_fused_qkv_ms \(fusedQKVMs) ms/op")
+        print("BENCHMARK: turboquant_decode_q_norm_ms \(qNormMs) ms/op")
+        print("BENCHMARK: turboquant_decode_k_norm_ms \(kNormMs) ms/op")
+        print("BENCHMARK: turboquant_decode_q_rope_ms \(qRoPEMs) ms/op")
+        print("BENCHMARK: turboquant_decode_k_rope_ms \(kRoPEMs) ms/op")
+        print("BENCHMARK: turboquant_decode_qk_norm_rope_fallback_ms \(qkNormRoPEFallbackMs) ms/op")
+        print("BENCHMARK: turboquant_decode_qk_norm_rope_plus_quantize_ms \(qkNormRoPEPlusQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_ms \(singleQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_kv_ms \(fusedQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_small_quantize_phase1_ms \(phase1Ms) ms/op")
@@ -343,6 +620,10 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         print("BENCHMARK: turboquant_small_quantize_phase2_ms \(phase2Ms) ms/op")
         print("BENCHMARK: turboquant_small_quantize_separate_kv_ms \(separateQuantizeKVms) ms/op")
         print("BENCHMARK: turboquant_decode_attention_ms \(decodeAttentionMs) ms/op")
+        print("BENCHMARK: turboquant_decode_scores_only_ms \(decodeScoresOnlyMs) ms/op")
+        print("BENCHMARK: turboquant_decode_values_only_ms \(decodeValuesOnlyMs) ms/op")
+        print("BENCHMARK: turboquant_decode_values_accum_only_ms \(decodeValuesAccumOnlyMs) ms/op")
+        print("BENCHMARK: turboquant_decode_values_finalize_only_ms \(decodeValuesFinalizeOnlyMs) ms/op")
         print("BENCHMARK: turboquant_fused_qkv_plus_small_quantize_kv_ms \(fusedPlusQuantizeMs) ms/op")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize \(decodeVsSingle)x")
         print("BENCHMARK: turboquant_decode_attention_vs_small_quantize_kv \(decodeVsFused)x")
@@ -422,6 +703,11 @@ struct TurboQuantDecodeBreakdownBenchmarks {
         }
     }
 
+    private func makeUniformProbabilities(headCount: Int, kvSeqLen: Int) -> [Float] {
+        let value = 1.0 / Float(kvSeqLen)
+        return Array(repeating: value, count: headCount * kvSeqLen)
+    }
+
     private func makeHidden(dim: Int, phase: Float) -> [Float] {
         (0..<dim).map { index in
             let x = Float(index)
@@ -497,4 +783,19 @@ private struct FusedQKVParamsBench {
     var blocksPerRow: UInt32
     var tokenCount: UInt32
     var rmsEps: Float
+}
+
+private struct RMSNormParamsBench {
+    var rows: UInt32
+    var cols: UInt32
+    var eps: Float
+}
+
+private struct RoPEParamsBench {
+    var seqLen: UInt32
+    var numHeads: UInt32
+    var headDim: UInt32
+    var startPos: UInt32
+    var theta: Float
+    var scalingFactor: Float
 }
