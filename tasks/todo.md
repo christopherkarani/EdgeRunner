@@ -38,87 +38,6 @@
   - The prompt tokens are identical across runtimes because both consumed the same pre-tokenized ID list.
   - The underlying model formats still differ (`GGUF Q8_0` for EdgeRunner vs MLX 8-bit safetensors), so this is apples-to-apples at the prompt/workload level, not at the raw weight-format level.
 
-# Runtime Repack + Matrix Prefill Rewrite
-
-## Goal
-- Replace the current experimental packed-prefill scaffolding with a production runtime repack for compatible Q8 hot-path weights.
-- Replace the token-loop-heavy multi-token prompt path with a true prompt-matrix exact prefill engine.
-- Replace the long-KV exact decode attention path with a dedicated exact kernel and cache layout that scale better at `kvLen ~ 1k+`.
-- Preserve the current deterministic short-decode path and legacy prefill/decode fallbacks until the rewrite has benchmarked wins.
-
-## Plan
-- [ ] Phase 0: re-establish authoritative baselines on this checkout for publishable decode and the 1024-token long-prompt benchmark, then record them in the review notes below.
-- [ ] Phase 1: promote runtime repacking from debug scaffolding to a first-class load-time artifact for compatible Q8 weights, with explicit metadata and fallback preservation.
-- [ ] Phase 2: add a dedicated exact matrix-prefill engine entrypoint instead of routing every path through `fusedPrefillPass`.
-- [ ] Phase 3: implement matrix-backed QKV projection in the new prefill engine and validate parity plus long-prompt benchmark effect.
-- [ ] Phase 4: implement prompt-wide exact FFN (`wo`, `gate/up/down`) in the new prefill engine and re-benchmark.
-- [ ] Phase 5: replace prompt attention with a dedicated exact tiled kernel that operates on prompt slabs and writes K/V directly in cache-native form.
-- [ ] Phase 6: redesign long-KV exact decode attention and KV layout behind explicit routing, then re-run publishable and long-prompt benchmarks.
-- [ ] Phase 7: only after kernel architecture is winning, revisit dispatch/runtime cleanup and Metal 4 fast-path routing.
-- [ ] Kill criteria:
-  - matrix-backed slices that regress long-prompt prompt throughput or TTFT after one tuning pass are reverted immediately
-  - decode-only changes that do not improve the 1024-token decode metric are reverted even if short decode stays healthy
-  - no slice is kept if publishable determinism or hash parity regresses
-
-## Review
-- Current trusted floor on `perf2@e815937` with `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1` and `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
-  - publishable decode median `211.9 tok/s`
-  - publishable TTFT `~4.1 ms`
-  - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `1926.9 tok/s`
-  - long-prompt TTFT median `531.4 ms`
-  - long-prompt decode median `150.91 tok/s`
-- Next rewrite slice:
-  - specialize prompt flash attention for the pinned `groupSize == 2`, `headDim == 128` path so the two Q heads sharing each KV head reuse K/V loads instead of running two independent sweeps
-  - keep the current prompt flash path as fallback
-  - kill immediately if the 1024-token benchmark does not materially improve prompt throughput or if publishable determinism regresses
-- Current active branch:
-  - keep the current prompt-flash + packed-long-KV floor intact
-  - swap only the prompt FFN on that path to the existing fused raw Q8 `gate+up+silu` plus batched raw Q8 `down` kernels
-  - kill immediately if the long-prompt benchmark regresses or the generated prefix / publishable hash changes
-- Trusted kept baseline on `perf2@05736be73ef5f8d73e51edec2b743de0726f548a`:
-  - publishable decode median `~211-213 tok/s`
-  - publishable TTFT `~4.0 ms`
-  - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `489.0 tok/s`
-  - long-prompt TTFT median `2093.9 ms`
-  - long-prompt decode median `42.26 tok/s`
-- Current kept rewrite checkpoint on top of `de785a1`:
-  - vectorized packed-prefill matmul kernel (`gemm_f32_packed_prefill`) wired into the experimental multi-token QKV/`wo`/FFN/down path under `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1`
-  - publishable decode median `213.3 tok/s`
-  - publishable TTFT `4.0 ms`
-  - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `558.6 tok/s`
-  - long-prompt TTFT median `1833.2 ms`
-  - long-prompt decode median `42.24 tok/s`
-- New kept decode rewrite candidate behind `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
-  - dedicated packed decode KV views plus exact long-KV attention kernel, with K/V repack collapsed into one dispatch
-  - publishable decode median `220.3 tok/s`
-  - publishable TTFT `3.9 ms`
-  - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `526.8 tok/s`
-  - long-prompt TTFT median `1943.9 ms`
-  - long-prompt decode median `60.29 tok/s`
-- New kept prompt rewrite candidate with `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1` + `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1`:
-  - prompt-local flash-style GQA over f32 K/V slabs before cache conversion
-  - publishable decode median `218.1 tok/s`
-  - publishable TTFT `3.8 ms`
-  - publishable hash `0afae14a84cf0df8`
-  - long-prompt prompt throughput median `1169.6 tok/s`
-  - long-prompt TTFT median `875.5 ms`
-  - long-prompt decode median `60.09 tok/s`
-- Dead rewrite branches already measured and reverted:
-  - GEMM-backed exact matrix prefill over repacked Q8 weights: regressed long-prompt prompt throughput to `433.3 tok/s`
-  - contiguous raw-Q8 prefill bundle views over the GGUF mmap: regressed long-prompt prompt throughput to `469.2 tok/s`
-  - first dedicated exact-matrix execution slice using prompt-wide `gemm_f32` packed QKV/FFN/down inside `exactMatrixPrefillPass`: regressed long-prompt prompt throughput to `451.9 tok/s`, TTFT to `2266.1 ms`, while decode stayed flat at `42.42 tok/s`
-  - tiled `gemm_f32_packed_prefill` threadgroup rewrite: improved publishable decode to `223.2 tok/s` but regressed the target long-prompt workload to `549.8 tok/s` prompt throughput, `1862.3 ms` TTFT, and `37.34 tok/s` long-context decode
-  - mega decode kernel block-softmax chunking in `fused_qk_norm_rope_gqa`: improved prompt throughput/TTFT to `608.8 tok/s` / `1681.9 ms` in the long-prompt harness but regressed long-context decode to `37.19 tok/s` and publishable decode to `203.2 tok/s`
-  - packed long-KV decode forced onto short contexts (`kvLen < 256`): broke canonical publishable prefix (`[1, 1479, 6222]` instead of `[1, 1479, 35]`), so the new packed attention path remains long-KV-only
-  - direct float-to-packed decode-cache writes in the flash-prompt prefill path: preserved correctness but regressed publishable decode to `212.5 tok/s` and slipped the long-prompt checkpoint to about `1160.8 tok/s` prompt throughput, `882.3 ms` TTFT, and `59.36 tok/s` long-context decode versus the kept `88ccdbd` floor
-  - prompt-flash Q/K/V via `MPSMatrixMultiplication`: KEPT. 3-run long-prompt median improved from about `1159.0 tok/s`, `883.5 ms`, `59.9 tok/s` to about `1356.0 tok/s`, `755.2 ms`, `59.2 tok/s`; publishable benchmark stayed deterministic with hash `0afae14a84cf0df8`
-  - extend `MPSMatrixMultiplication` to packed `wo`, `gate`, `up`, and `down`: KEPT. 3-run long-prompt median improved again to about `1748.3 tok/s`, `585.7 ms`, `60.3 tok/s`; publishable benchmark stayed deterministic and improved to about `213.9 tok/s`
-- Implication: the remaining viable path is a larger engine split, not more local substitutions inside the legacy prefill body.
-
 # Mega Fused GQA Kernel Repair
 
 # TurboQuant KV Cache Integration
@@ -217,6 +136,82 @@
   - `prompt_len=1024`: decode `4.57 -> 6.96 tok/s`, TTFT `9309.67 -> 8528.19 ms`
   - `prompt_len=512`: TurboQuant now measures `9.53 tok/s` with `5875.91 ms` TTFT on the same harness
 - This is the next real TurboQuant breakthrough on this checkout. The dominant remaining decode cost is now the packed low-bit extraction and centroid lookup itself, not the bit-offset bookkeeping around it.
+
+### Follow-up Tuning Note: Aggressive Decode Specialization
+- Added an aggressive-only single-token TurboQuant decode pipeline in [TurboQuant.metal](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunnerMetal/Shaders/TurboQuant.metal) and [TurboQuantKernel.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunnerMetal/TurboQuantKernel.swift), then routed `.turboQuantAggressive` single-token decode through it from [LlamaLanguageModel.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunner/Models/LlamaLanguageModel.swift).
+- The specialization removes generic `2/3/5`-bit centroid switching and repeated per-dimension mask/sign helper traffic from the aggressive benchmark path by hard-wiring the `2`/`3`-bit decode shape and iterating mask/sign words in 32-channel blocks.
+- Verified:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Benchmark deltas versus the previous kept aggressive decode baseline:
+  - `prompt_len=1024`: decode `6.96 -> 7.95 tok/s`, TTFT `8528.19 -> 8221.26 ms`
+  - `prompt_len=512`: decode `9.53 -> 10.10 tok/s`, TTFT `5875.91 -> 3754.08 ms`
+- This is another real TurboQuant gain. The remaining decode bottleneck is now less about generic preset branching and more about the packed representation itself: low-bit extraction and centroid application are still being done directly in the attention hot loop.
+
+### Follow-up Tuning Note: Aggressive Split-Plane Format
+- Repacked aggressive TurboQuant rows into a fixed split-plane layout:
+  - base plane: `128 x 2-bit`
+  - sideband: `32 x 1-bit`
+  - total remains `288` code bits per row
+- Updated the shared CPU reference pack/unpack in [TurboQuant.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunnerMetal/TurboQuant.swift), the GPU quantizer in [TurboQuant.metal](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunnerMetal/Shaders/TurboQuant.metal), the generic TurboQuant attention readers, and the aggressive single-token decode path to use the new physical layout.
+- Removed stale variable-width unpack assumptions from [TurboQuantAttentionTests.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Tests/EdgeRunnerMetalTests/TurboQuantAttentionTests.swift) and added explicit split-plane layout checks in [TurboQuantReferenceTests.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Tests/EdgeRunnerMetalTests/TurboQuantReferenceTests.swift).
+- Stabilized the runtime path by caching `TurboQuantLayout` once in [LlamaLanguageModel.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Sources/EdgeRunner/Models/LlamaLanguageModel.swift) instead of recomputing it on the hot path. This fixed a real-model crash introduced during the format transition.
+- Verified:
+  - `swift test --filter TurboQuantReferenceTests`
+  - `swift test --filter KVCacheTests`
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Benchmark deltas versus the previous kept aggressive baseline:
+  - `prompt_len=512`: decode `10.10 -> 11.12 tok/s`, TTFT `3754.08 -> 4447.68 ms`
+  - `prompt_len=1024`: decode `7.95 -> 9.19 tok/s`, TTFT `8221.26 -> 9594.09 ms`
+- Outcome:
+  - This is the largest decode-only TurboQuant gain so far in the isolated worktree.
+  - The tradeoff is now explicit: decode throughput improved materially, but TTFT regressed because prefill is still paying more for the new format.
+
+### Rejected Follow-up: Aggressive Prefill Attention Specialization
+- Tried adding an aggressive-specific prefill attention kernel on top of the split-plane format.
+- Result:
+  - `TurboQuantAttentionTests` still passed, but the real-model smoke trace changed from the stable `[16, 11, 220, 508]` to `[16, 15, 25, 16]`.
+- Decision:
+  - Rolled back. The synthetic parity test was not sufficient evidence for this optimization.
+- Current kept baseline remains:
+  - split-plane aggressive row format
+  - aggressive-specific single-token decode kernel
+  - generic prefill attention kernel
+
+### Follow-up Tuning Note: Decode Breakdown Harness + Tiled Decode Keep
+- Added an env-gated kernel-level benchmark in [TurboQuantDecodeBreakdownBenchmarks.swift](/Users/chriskarani/CodingProjects/worktrees/EdgeRunner-turboquant-20260328/Tests/EdgeRunnerMetalTests/TurboQuantDecodeBreakdownBenchmarks.swift) to time:
+  - `turboquant_quantize_rows_small_aggressive`
+  - `turboquant_quantize_rows_small_aggressive_kv`
+  - `gqa_attention_turboquant_decode_aggressive`
+- This harness established that the remaining wall is split between aggressive decode attention and the tiny-row append quantizer, instead of decode attention being the only significant cost.
+- Kept a 4-row strided tile in `gqa_attention_turboquant_decode_aggressive`, which reduces online-softmax rescaling frequency without changing the exact smoke trace.
+- Verified:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Benchmark deltas versus the prior stable aggressive baseline:
+  - `prompt_len=512`: decode `14.60 -> 15.01 tok/s`, TTFT `4637.16 -> 4467.82 ms`
+  - `prompt_len=1024`: decode `11.21 -> 12.06 tok/s`, TTFT `8726.37 -> 8536.71 ms`
+- This is a kept TurboQuant gain, but it still leaves the path far below FP16. On the breakdown harness, decode attention and fused K/V quantization are now in the same cost band instead of one overwhelmingly dominating the other.
+
+### Rejected Follow-up: Deeper Decode Tile / Parallel Decode Hadamard / Direct Pack Rewrite
+- Rejected after measurement:
+  - increasing the aggressive decode tile from `4` rows to `8`
+  - parallelizing the aggressive decode forward/inverse Hadamards across the 16-lane decode threadgroup
+  - replacing the aggressive lane-0 pack stage with direct fixed-plane word packing
+- Why they were rejected:
+  - tile `8` improved the isolated breakdown harness slightly but regressed the real 512/1024 aggressive benchmarks, especially TTFT at `1024`
+  - parallel decode Hadamard work substantially regressed the isolated breakdown benchmark
+  - direct pack reduced fused quantizer time in isolation but regressed the real long-context runs
+- Conclusion:
+  - for this codebase, the 4-row tiled aggressive decode kernel is a real keep, but the next breakthrough will not come from simply pushing tile depth, parallelizing the decode Hadamard transforms, or shortening the lane-0 pack code.
 
 ## Goal
 - Restore deterministic, benchmark-canonical decode on the fast mega fused Q/K norm + RoPE + GQA path for the pinned `Qwen3-0.6B-Q8_0` artifact.
@@ -800,6 +795,191 @@ See benchmarks/experiment_log.md
   - `prompt_len=128`, `decode_tokens=4`: `fp16_decode_tok_s=42.33`, `turboquant_decode_tok_s=13.85`, `fp16_ttft_ms=757.55`, `turboquant_ttft_ms=1382.30`
   - `prompt_len=256`, `decode_tokens=4`: `fp16_decode_tok_s=37.97`, `turboquant_decode_tok_s=12.11`, `fp16_ttft_ms=1687.05`, `turboquant_ttft_ms=2420.11`
 - Current conclusion: decode throughput keeps improving incrementally, and TTFT at moderate context lengths is now within the same order of magnitude as FP16. The next remaining cost is still the scalar low-bit unpack/codebook work plus the row-wise prefill quantizer.
+
+## TurboQuant Follow-up
+- [x] Make the TurboQuant smoke test assert the exact aggressive greedy trace instead of only printing it.
+- [x] Add benchmark case selection so `fp16` and `aggressive` TurboQuant cases can be run independently when the combined harness crashes.
+- [x] Specialize the tiny-row aggressive decode quantizer with a parallel per-row kernel and route decode KV appends through it.
+- [x] Fuse decode-time aggressive K/V quantization into one dispatch after K RoPE is available.
+- [ ] Determine the next post-quantizer decode bottleneck now that aggressive reaches `20.38 tok/s` at prompt `16`, `14.60 tok/s` at `512`, and `11.21 tok/s` at `1024`.
+- [ ] Investigate the `TurboQuantLongContextBenchmark` combined `both`-mode lifecycle crash separately from throughput tuning.
+
+## TurboQuant Review
+- Kept:
+  - exact-trace smoke assertion for `[16, 11, 220, 508]`
+  - benchmark case selector (`fp16` vs `aggressive` isolation)
+  - aggressive small-row decode quantizer (`32` threads)
+  - fused aggressive decode-time K/V quantize dispatch
+  - lazy aggressive decode-output rescaling, so max advances no longer force a 128-dim accumulator rescale on every tiled step
+- Rejected:
+  - aggressive decode-native `11`-word runtime row
+  - aggressive prefill fast path / specialized prefill kernel variants
+  - `64`-thread aggressive small-row quantizer
+- Current isolated benchmark points:
+  - `prompt_len=16`, `decode_tokens=1`: `20.38 tok/s`, `437.40 ms` TTFT
+  - `prompt_len=512`, `decode_tokens=4`: `15.49 tok/s`, `5496.40 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.33 tok/s`, `8957.69 ms` TTFT
+
+## TurboQuant Decode Lazy Rescale
+
+## Plan
+- [x] Remove unconditional per-tile 128-dim rescaling from the aggressive tiled decode kernel.
+- [x] Preserve exact online-softmax math by tracking a per-lane accumulation scale and folding it into the final reduction.
+- [x] Re-run parity, exact smoke, isolated breakdown, and long-context aggressive benchmarks.
+
+## Review
+- `gqa_attention_turboquant_decode_aggressive` now tracks a per-lane accumulation scale instead of multiplying all 128 partial outputs whenever the running max advances.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Isolated breakdown point:
+  - `turboquant_decode_attention_ms=1.004`
+  - `turboquant_small_quantize_kv_ms=0.780`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `15.43 tok/s`, `4448.79 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.50 tok/s`, `8633.14 ms` TTFT
+- Current conclusion: this is a real decode-side keep. It does not unlock the paper’s claims, but it materially reduces the remaining aggressive decode tax and keeps the exact smoke trace intact.
+
+## TurboQuant Redundant Barrier Removal
+
+## Plan
+- [x] Remove the early decode-path KV cache barrier for TurboQuant only, while leaving the dense FP16 path unchanged.
+- [x] Keep the later pre-attention barrier so packed K/V writes still become visible before TurboQuant attention reads them.
+- [x] Re-run parity, exact smoke, breakdown, and long-context aggressive benchmarks.
+
+## Review
+- `fusedDecodePass` no longer inserts the first KV cache `memoryBarrier(scope: .buffers)` on the TurboQuant path. TurboQuant already pays the later barrier immediately before attention consumes packed K/V.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+- Breakdown point:
+  - `turboquant_decode_attention_ms=0.993`
+  - `turboquant_small_quantize_kv_ms=0.757`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `15.43 tok/s`, `4448.79 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `12.50 tok/s`, `8633.14 ms` TTFT
+- Current conclusion: the first TurboQuant-side KV barrier was redundant on the decode path. Removing it is a safe keep and improves long-context latency while preserving exact greedy output.
+
+## TurboQuant Decode Fused QKV Restore
+
+## Plan
+- [x] Restore a TurboQuant-specific fused Q8 `RMSNorm + Q/K/V` decode path instead of forcing TurboQuant through the separate RMSNorm + three GEMV fallback.
+- [x] Keep the fused kernel semantics identical except for writing `V` into the existing float scratch buffer used for TurboQuant packing.
+- [x] Re-run parity, exact smoke, decode breakdown, and long-context aggressive benchmarks before deciding whether to keep it.
+
+## Review
+- Added `dequant_q8_0_fused_qkv_turbo` and routed TurboQuant decode through it when Q8 raw weights are available.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark` (repeated twice)
+- Breakdown point after the restore:
+  - `turboquant_decode_attention_ms=1.041`
+  - `turboquant_small_quantize_kv_ms=1.187`
+- Updated benchmark points:
+  - `prompt_len=512`, `decode_tokens=4`: `16.77 tok/s`, `6195.07 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4`: `13.14 tok/s`, `9486.02 ms` TTFT
+  - `prompt_len=1024`, `decode_tokens=4` confirmation: `13.25 tok/s`, `9175.76 ms` TTFT
+- Current conclusion: TurboQuant had been carrying an unnecessary dense-path fallback in decode. Restoring fused Q8 Q/K/V is a real decode-throughput keep, but it shifts cost toward the fused tiny-row K/V quantizer and does not improve TTFT on this checkout.
+
+## TurboQuant Exact Decode Breakdown
+
+## Plan
+- [x] Extend the TurboQuant breakdown harness so it measures fused TurboQuant QKV projection, fused tiny-row K/V append quantization, and decode attention in the same benchmark.
+- [x] Use that breakdown to identify whether the next win is still in projection composition, the packed K/V append quantizer, or decode attention.
+- [x] Reject low-signal shader experiments against the new harness before spending full 512/1024 benchmark time.
+
+## Review
+- `TurboQuantDecodeBreakdownBenchmarks` now measures:
+  - `dequant_q8_0_fused_qkv_turbo`
+  - `turboquant_quantize_rows_small_aggressive_kv`
+  - `gqa_attention_turboquant_decode_aggressive`
+- Current composition on the kept fused-decode baseline:
+  - `turboquant_fused_qkv_ms=0.172`
+  - `turboquant_small_quantize_kv_ms=0.804`
+  - `turboquant_decode_attention_ms=0.994`
+  - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.976`
+- Interpretation:
+  - Fused QKV is no longer the dominant stage.
+  - The remaining wall is split between the fused tiny-row K/V append quantizer and decode attention.
+  - A follow-up attempt to parallelize the aggressive pack stage cleared parity but regressed the breakdown badly, so the quantizer tax is not explained by the final pack loop alone.
+  - A follow-up comparison of fused K/V append quantization versus two separate small-row K and V dispatches showed they are nearly identical on this GPU (`0.806 ms` fused vs `0.792 ms` separate), so the remaining quantizer cost is not explained by the fused-vs-separate dispatch structure either.
+
+## TurboQuant Bitonic Top-32 Selection
+
+## Plan
+- [x] Split the aggressive small-row quantizer into benchmark-only front-half and back-half stages.
+- [x] Split the front half again to isolate `normalize + Hadamard` from the outlier-channel top-32 selection step.
+- [x] Replace the serial lane-0 outlier picker with an exact parallel bitonic selector in the real aggressive small-row quantizer if it preserves parity and improves the fused tiny-row K/V append path.
+- [x] Re-run attention parity, exact smoke, exact decode breakdown, 512/1024 aggressive long-context benchmarks, and the default publishable benchmark before keeping the change.
+
+## Review
+- Added benchmark-only aggressive quantizer splits in `TurboQuant.metal` plus `TurboQuantDecodeBreakdownBenchmarks.swift`.
+- The deeper breakdown showed the front half of the aggressive small-row quantizer was dominant, and that the serial top-32 picker itself was the main front-half tax:
+  - `turboquant_small_quantize_phase1_ms=0.466`
+  - `turboquant_small_quantize_rotate_only_ms=0.171`
+  - `turboquant_small_quantize_select_only_ms=0.451`
+  - `turboquant_small_quantize_select_only_bitonic_ms=0.197`
+- Replaced the serial lane-0 top-32 selection inside `tq_quantize_small_aggressive_row` with an exact parallel bitonic selector.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Updated kept points:
+  - Exact breakdown:
+    - `turboquant_small_quantize_ms=0.646`
+    - `turboquant_small_quantize_kv_ms=0.531`
+    - `turboquant_decode_attention_ms=1.055`
+    - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.732`
+  - Long-context aggressive:
+    - `prompt_len=512`, `decode_tokens=4`: `22.20 tok/s`, `4195.15 ms` TTFT
+    - `prompt_len=1024`, `decode_tokens=4`: `16.47 tok/s`, `8357.66 ms` TTFT
+  - Default publishable benchmark remained deterministic and clean:
+    - `250.8 tok/s` median decode
+    - `3.3 ms` median TTFT
+    - token hash `0afae14a84cf0df8`
+- Current conclusion: the next major TurboQuant gain came from the quantizer’s outlier-channel selection, not another attention-kernel tweak. On this GPU, exact parallel top-32 selection is a production keep.
+
+## TurboQuant Aggressive Word-Aligned Base Decode
+
+## Plan
+- [x] Re-run the exact TurboQuant decode breakdown after the bitonic selector keep and identify the next dominant stage.
+- [x] Remove generic fixed-2-bit base-plane extraction overhead from the aggressive decode kernel by decoding the 8 base-code words sequentially instead of calling `tq_extract_code` 128 times per K row and 128 times per V row.
+- [x] Re-run attention parity, exact smoke, exact decode breakdown, 512/1024 aggressive long-context benchmarks, and the default publishable benchmark before deciding whether to keep it.
+
+## Review
+- Updated `gqa_attention_turboquant_decode_aggressive` in `TurboQuant.metal` to iterate the aggressive base plane as word-aligned 2-bit streams for both K scoring and V accumulation.
+- Verification passed:
+  - `swift test --filter TurboQuantAttentionTests`
+  - `EDGERUNNER_RUN_TURBOQUANT_SMOKE=1 swift test --filter QwenTurboQuantSmokeTest`
+  - `EDGERUNNER_RUN_TURBOQUANT_DECODE_BREAKDOWN=1 swift test --filter TurboQuantDecodeBreakdownBenchmarks`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=512 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=1024 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=4 swift test --filter TurboQuantLongContextBenchmark`
+  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"`
+- Updated kept points:
+  - Exact breakdown:
+    - `turboquant_small_quantize_kv_ms=0.471`
+    - `turboquant_decode_attention_ms=0.964`
+    - `turboquant_fused_qkv_plus_small_quantize_kv_ms=0.699`
+  - Long-context aggressive:
+    - `prompt_len=512`, `decode_tokens=4`: `22.58 tok/s`, `6841.89 ms` TTFT
+    - `prompt_len=1024`, `decode_tokens=4`: `17.33 tok/s`, `12533.22 ms` TTFT
+  - Default publishable benchmark remained deterministic and clean:
+    - `254.8 tok/s` median decode
+    - `3.4 ms` median TTFT
+    - token hash `0afae14a84cf0df8`
+- Current conclusion: once the aggressive outlier selector was fixed, the next decode win came from treating the fixed 2-bit base plane as a real word-aligned format instead of routing it through generic code extraction in the hot loop.
 # Exact Path Rewrite Program
 
 ## Goal
@@ -823,41 +1003,12 @@ See benchmarks/experiment_log.md
   - `dequant_q8_0_fused_qkv` now supports batched prompt tokens while preserving the single-token decode path.
   - `fusedPrefillPass` now uses the fused Q8 RMSNorm+QKV path for multi-token prefill instead of looping per token for Q/K/V plus a separate V conversion pass.
   - Added a multi-token correctness test in `FusedKernelTests`.
-- Kept a second exact-path prefill slice that batches RoPE-K cache writes:
-  - `fusedPrefillPass` now converts the full RoPE'd K slab from `f32` to `f16` KV-cache storage in one dispatch instead of one conversion dispatch per token.
-  - Decode behavior and canonical benchmark semantics are unchanged.
-- Kept a third exact-path prefill slice that batches the remaining Q8 `wo` and `down` projections:
-  - Added a dedicated batched Q8 GEMV kernel for multi-token prompt projections.
-  - Routed only multi-token prefill `wo` / `down` work through that kernel; single-token decode stays on the existing tiled and fused-add paths.
-- Kept a fourth exact-path attention slice that vectorizes the shared GQA kernel:
-  - Reworked the exact `gqa_attention_f32` and `gqa_attention_f16kv` kernels around `float4` / `half4` tile loads and `dot(float4, float4)` accumulation instead of scalar head-dimension loops.
-  - Added a direct `f16`-KV correctness test so the cache-backed attention path is checked against the CPU reference, not just the float32 helper path.
 - Verification for the kept batched QKV slice:
   - `swift test -c release --filter FusedKernelTests` passed.
   - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `221.8 tok/s`.
   - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `285.9 tok/s` prompt throughput, `3581.9 ms` TTFT, and `41.85 tok/s` long-context decode.
-- Verification for the kept batched RoPE-K conversion slice:
-  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `211.1 tok/s`.
-  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `351.9 tok/s` prompt throughput, `2910.2 ms` TTFT, and `40.95 tok/s` long-context decode.
-- Verification for the kept batched `wo` / `down` slice:
-  - `swift test -c release --filter FusedKernelTests` passed, including the new batched GEMV correctness case.
-  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `213.2 tok/s`.
-  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `368.5 tok/s` prompt throughput, `2778.9 ms` TTFT, and `41.85 tok/s` long-context decode.
-- Verification for the kept vectorized GQA slice:
-  - `swift test -c release --filter GQATests` passed, including the new direct `f16`-KV reference case.
-  - `swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8` and median decode `211.2 tok/s`.
-  - `python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3 ...` produced EdgeRunner median `489.0 tok/s` prompt throughput, `2093.9 ms` TTFT, and `42.26 tok/s` long-context decode.
-- Verification for the kept fp16-K/V prompt-flash slice:
-  - `swift build -c release` passed.
-  - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8`, median decode `218.8 tok/s`, and median TTFT `3.8 ms`.
-  - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner median `1910.0 tok/s` prompt throughput, `536.1 ms` TTFT, and `60.31 tok/s` long-context decode.
-- Verification for the kept split-KV packed decode slice:
-  - `swift build -c release` passed.
-  - `EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"` passed with deterministic hash `0afae14a84cf0df8`, median decode `211.9 tok/s`, and median TTFT `4.1 ms`.
-  - `EDGERUNNER_PREFILL_PREFER_EXACT_MATRIX=1 EDGERUNNER_DECODE_PREFER_PACKED_LONG_KV=1 python3 benchmarks/run_long_prompt_framework_benchmark.py --prompt-tokens 1024 --generate-tokens 128 --runs 3` produced EdgeRunner median `1926.9 tok/s` prompt throughput, `531.4 ms` TTFT, and `150.91 tok/s` long-context decode.
 - Interpretation:
-  - These are bounded production-safe improvements to exact prefill structure and exact attention math, not the full prefill rewrite.
-  - Prompt throughput and TTFT have improved materially again, and the long-KV exact decode path now has a real architectural win instead of a marginal kernel tweak.
-  - The remaining MLX gap is now primarily prompt-side throughput and TTFT, with decode still behind but much closer than before.
+  - This is a bounded production-safe improvement to exact prefill projections, not the full prefill rewrite.
+  - Prompt throughput moved slightly upward versus the saved baseline artifact, but the MLX gap remains overwhelmingly architectural.
 
 # Long-Prompt MLX vs EdgeRunner Benchmark

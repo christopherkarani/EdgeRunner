@@ -54,6 +54,16 @@ public struct TurboQuantLayout: Sendable, Equatable {
     public let dimension: Int
     public let codeBitsPerRow: Int
     public let codeWordsPerRow: Int
+    public let runtimeCodeBitsPerRow: Int
+    public let runtimeCodeWordsPerRow: Int
+    public let baseBitsPerRow: Int
+    public let baseWordsPerRow: Int
+    public let sidebandBitsPerRow: Int
+    public let sidebandWordsPerRow: Int
+    public let runtimeBaseBitsPerRow: Int
+    public let runtimeBaseWordsPerRow: Int
+    public let runtimeSidebandBitsPerRow: Int
+    public let runtimeSidebandWordsPerRow: Int
 
     public init(preset: TurboQuantPreset, dimension: Int = supportedDimension) throws {
         guard dimension == Self.supportedDimension else {
@@ -64,15 +74,31 @@ public struct TurboQuantLayout: Sendable, Equatable {
         let codeBitsPerRow =
             descriptor.regularChannelCount * descriptor.regularBits
             + descriptor.highPrecisionChannelCount * descriptor.highPrecisionBits
+        let baseBitsPerRow = dimension * descriptor.regularBits
+        let sidebandBitsPerRow = descriptor.highPrecisionChannelCount * (descriptor.highPrecisionBits - descriptor.regularBits)
+        let runtimeBaseBitsPerRow = dimension * descriptor.regularBits
+        let runtimeSidebandBitsPerRow: Int
+        runtimeSidebandBitsPerRow = sidebandBitsPerRow
+        let runtimeCodeBitsPerRow = runtimeBaseBitsPerRow + runtimeSidebandBitsPerRow
 
         self.preset = preset
         self.dimension = dimension
         self.codeBitsPerRow = codeBitsPerRow
         self.codeWordsPerRow = (codeBitsPerRow + 31) / 32
+        self.runtimeCodeBitsPerRow = runtimeCodeBitsPerRow
+        self.runtimeCodeWordsPerRow = (runtimeCodeBitsPerRow + 31) / 32
+        self.baseBitsPerRow = baseBitsPerRow
+        self.baseWordsPerRow = (baseBitsPerRow + 31) / 32
+        self.sidebandBitsPerRow = sidebandBitsPerRow
+        self.sidebandWordsPerRow = (sidebandBitsPerRow + 31) / 32
+        self.runtimeBaseBitsPerRow = runtimeBaseBitsPerRow
+        self.runtimeBaseWordsPerRow = (runtimeBaseBitsPerRow + 31) / 32
+        self.runtimeSidebandBitsPerRow = runtimeSidebandBitsPerRow
+        self.runtimeSidebandWordsPerRow = (runtimeSidebandBitsPerRow + 31) / 32
     }
 
     public var bytesPerRow: Int {
-        (codeWordsPerRow + Self.residualWordsPerRow + Self.outlierMaskWordsPerRow)
+        (runtimeCodeWordsPerRow + Self.residualWordsPerRow + Self.outlierMaskWordsPerRow)
             * MemoryLayout<UInt32>.stride
             + Self.metadataScalarsPerRow * MemoryLayout<Float>.stride
     }
@@ -151,6 +177,16 @@ public struct TurboQuantEncodedRow: Sendable, Equatable {
         let words = primaryCodes.count + residualSigns.count + outlierMask.count
         return words * UInt32.bitWidth + (2 * MemoryLayout<Float>.size * 8)
     }
+}
+
+public struct TurboQuantRuntimeRow: Sendable, Equatable {
+    public let preset: TurboQuantPreset
+    public let dimension: Int
+    public let primaryCodes: [UInt32]
+    public let residualSigns: [UInt32]
+    public let outlierMask: [UInt32]
+    public let rowNorm: Float
+    public let residualNorm: Float
 }
 
 public enum TurboQuantSeeds {
@@ -355,6 +391,76 @@ public enum TurboQuantReferenceEncoder {
         }
         return mask
     }
+
+    public static func makeRuntimeRow(
+        from encoded: TurboQuantEncodedRow
+    ) throws -> TurboQuantRuntimeRow {
+        let layout = try TurboQuantLayout(preset: encoded.preset, dimension: encoded.dimension)
+        let descriptor = encoded.preset.descriptor
+        let outlierMask = BitPacker.unpackBooleans(encoded.outlierMask, count: encoded.dimension)
+        let logicalCodes = try BitPacker.unpackCodes(
+            encoded.primaryCodes,
+            count: encoded.dimension,
+            outlierMask: outlierMask,
+            regularBits: descriptor.regularBits,
+            highPrecisionBits: descriptor.highPrecisionBits
+        )
+        let runtimeCodes = try BitPacker.packRuntimeCodes(
+            logicalCodes,
+            outlierMask: outlierMask,
+            regularBits: descriptor.regularBits,
+            highPrecisionBits: descriptor.highPrecisionBits,
+            preset: encoded.preset,
+            layout: layout
+        )
+        return TurboQuantRuntimeRow(
+            preset: encoded.preset,
+            dimension: encoded.dimension,
+            primaryCodes: runtimeCodes,
+            residualSigns: encoded.residualSigns,
+            outlierMask: encoded.outlierMask,
+            rowNorm: encoded.rowNorm,
+            residualNorm: encoded.residualNorm
+        )
+    }
+
+    public static func approximateDecode(
+        runtimeRow: TurboQuantRuntimeRow,
+        rotationSeed: UInt64,
+        residualSeed: UInt64
+    ) throws -> [Float] {
+        let descriptor = runtimeRow.preset.descriptor
+        let layout = try TurboQuantLayout(preset: runtimeRow.preset, dimension: runtimeRow.dimension)
+        let outlierMask = BitPacker.unpackBooleans(runtimeRow.outlierMask, count: runtimeRow.dimension)
+        let codes = try BitPacker.unpackRuntimeCodes(
+            runtimeRow.primaryCodes,
+            count: runtimeRow.dimension,
+            outlierMask: outlierMask,
+            regularBits: descriptor.regularBits,
+            highPrecisionBits: descriptor.highPrecisionBits,
+            preset: runtimeRow.preset,
+            layout: layout
+        )
+        let logicalRow = TurboQuantEncodedRow(
+            preset: runtimeRow.preset,
+            dimension: runtimeRow.dimension,
+            primaryCodes: try BitPacker.packCodes(
+                codes,
+                outlierMask: outlierMask,
+                regularBits: descriptor.regularBits,
+                highPrecisionBits: descriptor.highPrecisionBits
+            ),
+            residualSigns: runtimeRow.residualSigns,
+            outlierMask: runtimeRow.outlierMask,
+            rowNorm: runtimeRow.rowNorm,
+            residualNorm: runtimeRow.residualNorm
+        )
+        return try approximateDecode(
+            logicalRow,
+            rotationSeed: rotationSeed,
+            residualSeed: residualSeed
+        )
+    }
 }
 
 private struct SplitMix64 {
@@ -369,7 +475,7 @@ private struct SplitMix64 {
     }
 }
 
-private enum BitPacker {
+enum BitPacker {
     static func packBooleans(_ values: [Bool]) -> [UInt32] {
         var words = [UInt32](repeating: 0, count: (values.count + 31) / 32)
         for (index, value) in values.enumerated() where value {
@@ -395,15 +501,25 @@ private enum BitPacker {
         regularBits: Int,
         highPrecisionBits: Int
     ) throws -> [UInt32] {
-        let totalBits = zip(outlierMask, codes).reduce(0) { partial, pair in
-            partial + (pair.0 ? highPrecisionBits : regularBits)
-        }
-        var words = [UInt32](repeating: 0, count: (totalBits + 31) / 32)
-        var bitOffset = 0
+        let baseBits = codes.count * regularBits
+        let sidebandBits = outlierMask.reduce(0) { $0 + ($1 ? (highPrecisionBits - regularBits) : 0) }
+        var words = [UInt32](repeating: 0, count: ((baseBits + sidebandBits) + 31) / 32)
+
+        let sidebandWidth = highPrecisionBits - regularBits
+        var sidebandOffset = baseBits
         for index in codes.indices {
-            let width = outlierMask[index] ? highPrecisionBits : regularBits
-            try insert(code: UInt32(codes[index]), width: width, into: &words, bitOffset: bitOffset)
-            bitOffset += width
+            let code = UInt32(codes[index])
+            let baseMask = (UInt32(1) << UInt32(regularBits)) - 1
+            try insert(code: code & baseMask, width: regularBits, into: &words, bitOffset: index * regularBits)
+            if outlierMask[index], sidebandWidth > 0 {
+                try insert(
+                    code: code >> UInt32(regularBits),
+                    width: sidebandWidth,
+                    into: &words,
+                    bitOffset: sidebandOffset
+                )
+                sidebandOffset += sidebandWidth
+            }
         }
         return words
     }
@@ -417,14 +533,74 @@ private enum BitPacker {
     ) throws -> [UInt8] {
         var codes = [UInt8]()
         codes.reserveCapacity(count)
-        var bitOffset = 0
+        let baseBits = count * regularBits
+        let sidebandWidth = highPrecisionBits - regularBits
+        var sidebandOffset = baseBits
         for index in 0..<count {
-            let width = outlierMask[index] ? highPrecisionBits : regularBits
-            let raw = try extract(from: words, width: width, bitOffset: bitOffset)
+            var raw = try extract(from: words, width: regularBits, bitOffset: index * regularBits)
+            if outlierMask[index], sidebandWidth > 0 {
+                let extra = try extract(from: words, width: sidebandWidth, bitOffset: sidebandOffset)
+                raw |= extra << UInt32(regularBits)
+                sidebandOffset += sidebandWidth
+            }
             codes.append(UInt8(raw))
-            bitOffset += width
         }
         return codes
+    }
+
+    static func packRuntimeCodes(
+        _ codes: [UInt8],
+        outlierMask: [Bool],
+        regularBits: Int,
+        highPrecisionBits: Int,
+        preset: TurboQuantPreset,
+        layout: TurboQuantLayout
+    ) throws -> [UInt32] {
+        switch preset {
+        case .balanced:
+            return try packCodes(
+                codes,
+                outlierMask: outlierMask,
+                regularBits: regularBits,
+                highPrecisionBits: highPrecisionBits
+            )
+        case .aggressive:
+            return try packCodes(
+                codes,
+                outlierMask: outlierMask,
+                regularBits: regularBits,
+                highPrecisionBits: highPrecisionBits
+            )
+        }
+    }
+
+    static func unpackRuntimeCodes(
+        _ words: [UInt32],
+        count: Int,
+        outlierMask: [Bool],
+        regularBits: Int,
+        highPrecisionBits: Int,
+        preset: TurboQuantPreset,
+        layout: TurboQuantLayout
+    ) throws -> [UInt8] {
+        switch preset {
+        case .balanced:
+            return try unpackCodes(
+                words,
+                count: count,
+                outlierMask: outlierMask,
+                regularBits: regularBits,
+                highPrecisionBits: highPrecisionBits
+            )
+        case .aggressive:
+            return try unpackCodes(
+                words,
+                count: count,
+                outlierMask: outlierMask,
+                regularBits: regularBits,
+                highPrecisionBits: highPrecisionBits
+            )
+        }
     }
 
     private static func insert(

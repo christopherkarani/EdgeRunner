@@ -85,8 +85,71 @@ struct TurboQuantReferenceTests {
         let balanced = try TurboQuantLayout(preset: .balanced)
 
         #expect(aggressive.codeWordsPerRow == 9)
+        #expect(aggressive.runtimeCodeWordsPerRow == 9)
+        #expect(aggressive.baseWordsPerRow == 8)
+        #expect(aggressive.sidebandWordsPerRow == 1)
         #expect(balanced.codeWordsPerRow == 14)
+        #expect(balanced.runtimeCodeWordsPerRow == 14)
+        #expect(balanced.baseWordsPerRow == 12)
+        #expect(balanced.sidebandWordsPerRow == 2)
         #expect(aggressive.bytesPerRow < balanced.bytesPerRow)
+    }
+
+    @Test func aggressivePackLayoutUsesSplitPlane() throws {
+        let descriptor = TurboQuantPreset.aggressive.descriptor
+        let mask = (0..<128).map { $0 % 4 == 0 }
+        let codes = (0..<128).map { index -> UInt8 in
+            if mask[index] {
+                return UInt8((index / 4) % 8)
+            } else {
+                return UInt8(index % 4)
+            }
+        }
+
+        let packed = try BitPacker.packCodes(
+            codes,
+            outlierMask: mask,
+            regularBits: descriptor.regularBits,
+            highPrecisionBits: descriptor.highPrecisionBits
+        )
+        let unpacked = try BitPacker.unpackCodes(
+            packed,
+            count: 128,
+            outlierMask: mask,
+            regularBits: descriptor.regularBits,
+            highPrecisionBits: descriptor.highPrecisionBits
+        )
+
+        #expect(unpacked == codes)
+        let layout = try TurboQuantLayout(preset: .aggressive)
+        #expect(packed.count == layout.codeWordsPerRow)
+    }
+
+    @Test func aggressiveRuntimeRowDecodesLikeLogicalRow() throws {
+        let vector = makeSignal()
+        let encoded = try TurboQuantReferenceEncoder.encode(
+            vector,
+            preset: .aggressive,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+        let runtime = try TurboQuantReferenceEncoder.makeRuntimeRow(from: encoded)
+        let logicalDecoded = try TurboQuantReferenceEncoder.approximateDecode(
+            encoded,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+        let runtimeDecoded = try TurboQuantReferenceEncoder.approximateDecode(
+            runtimeRow: runtime,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+
+        let layout = try TurboQuantLayout(preset: .aggressive)
+        #expect(runtime.primaryCodes.count == layout.runtimeCodeWordsPerRow)
+        for (lhs, rhs) in zip(logicalDecoded, runtimeDecoded) {
+            #expect(abs(lhs - rhs) < 1e-5)
+        }
     }
 
     private func makeSignal() -> [Float] {

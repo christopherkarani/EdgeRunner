@@ -12,8 +12,11 @@ public struct TurboQuantAttentionBuffers: @unchecked Sendable {
 
 public final class TurboQuantKernel: Sendable {
     public let quantizePipeline: MTLComputePipelineState
+    public let quantizeAggressiveSmallPipeline: MTLComputePipelineState
+    public let quantizeAggressiveSmallKVPipeline: MTLComputePipelineState
     public let attentionPipeline: MTLComputePipelineState
     public let decodeAttentionPipeline: MTLComputePipelineState
+    public let decodeAttentionAggressivePipeline: MTLComputePipelineState
 
     public let keySigns: TurboQuantSignBuffers
     public let valueSigns: TurboQuantSignBuffers
@@ -21,8 +24,11 @@ public final class TurboQuantKernel: Sendable {
     public init(device: MTLDevice) throws {
         let registry = try KernelRegistry(device: device)
         self.quantizePipeline = try registry.pipeline(for: "turboquant_quantize_rows")
+        self.quantizeAggressiveSmallPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive")
+        self.quantizeAggressiveSmallKVPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_kv")
         self.attentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant")
         self.decodeAttentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode")
+        self.decodeAttentionAggressivePipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive")
         self.keySigns = try Self.makeSignBuffers(
             device: device,
             rotationSeed: TurboQuantSeeds.keyRotation,

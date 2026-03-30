@@ -79,7 +79,7 @@ struct TurboQuantAttentionTests {
         }
 
         encoder.setComputePipelineState(
-            useDecodePipeline ? kernel.decodeAttentionPipeline : kernel.attentionPipeline
+            useDecodePipeline ? kernel.decodeAttentionAggressivePipeline : kernel.attentionPipeline
         )
         encoder.setBuffer(qBuffer, offset: 0, index: 0)
         encoder.setBuffer(buffers.key.codes, offset: 0, index: 1)
@@ -146,9 +146,10 @@ struct TurboQuantAttentionTests {
             )
             let outlierMask = unpackBits(encoded.outlierMask, count: 128)
             let residualSigns = unpackBits(encoded.residualSigns, count: 128)
-            let codes = try unpackCodes(
+            let codes = try BitPacker.unpackCodes(
                 encoded.primaryCodes,
-                mask: outlierMask,
+                count: 128,
+                outlierMask: outlierMask,
                 regularBits: descriptor.regularBits,
                 highPrecisionBits: descriptor.highPrecisionBits
             )
@@ -193,32 +194,6 @@ struct TurboQuantAttentionTests {
             let bitIndex = index % 32
             return ((words[wordIndex] >> UInt32(bitIndex)) & 1) == 1
         }
-    }
-
-    private func unpackCodes(
-        _ words: [UInt32],
-        mask: [Bool],
-        regularBits: Int,
-        highPrecisionBits: Int
-    ) throws -> [UInt8] {
-        var codes: [UInt8] = []
-        codes.reserveCapacity(mask.count)
-        var bitOffset = 0
-        for index in 0..<mask.count {
-            let width = mask[index] ? highPrecisionBits : regularBits
-            let wordIndex = bitOffset / 32
-            let shift = bitOffset % 32
-            let maskValue = (UInt32(1) << UInt32(width)) - 1
-            var raw = (words[wordIndex] >> UInt32(shift)) & maskValue
-            let spill = shift + width - 32
-            if spill > 0, wordIndex + 1 < words.count {
-                let highBits = words[wordIndex + 1] & ((UInt32(1) << UInt32(spill)) - 1)
-                raw |= highBits << UInt32(width - spill)
-            }
-            codes.append(UInt8(raw))
-            bitOffset += width
-        }
-        return codes
     }
 }
 

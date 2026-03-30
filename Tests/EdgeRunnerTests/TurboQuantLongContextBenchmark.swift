@@ -19,34 +19,50 @@ struct TurboQuantLongContextBenchmark {
 
         let promptLength = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_PROMPT_LEN"] ?? "4096") ?? 4096
         let decodeCount = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_DECODE_TOKENS"] ?? "32") ?? 32
+        let mode = ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_BENCHMARK_MODE"] ?? "both"
         let modelURL = URL(fileURLWithPath: Self.modelPath)
         let prompt = Array(repeating: 9707, count: promptLength)
 
-        let fp16 = try await runCase(
-            modelURL: modelURL,
-            prompt: prompt,
-            decodeCount: decodeCount,
-            compression: .disabled
-        )
-        let aggressive = try await runCase(
-            modelURL: modelURL,
-            prompt: prompt,
-            decodeCount: decodeCount,
-            compression: .turboQuantAggressive
-        )
+        let fp16: BenchmarkResult?
+        if mode == "both" || mode == "fp16" {
+            fp16 = try await runCase(
+                modelURL: modelURL,
+                prompt: prompt,
+                decodeCount: decodeCount,
+                compression: .disabled
+            )
+        } else {
+            fp16 = nil
+        }
+        let aggressive: BenchmarkResult?
+        if mode == "both" || mode == "aggressive" {
+            aggressive = try await runCase(
+                modelURL: modelURL,
+                prompt: prompt,
+                decodeCount: decodeCount,
+                compression: .turboQuantAggressive
+            )
+        } else {
+            aggressive = nil
+        }
 
         print("""
         [turboquant-benchmark]
           prompt_len=\(promptLength)
           decode_tokens=\(decodeCount)
-          fp16_decode_tok_s=\(String(format: "%.2f", fp16.decodeTokensPerSecond))
-          turboquant_decode_tok_s=\(String(format: "%.2f", aggressive.decodeTokensPerSecond))
-          fp16_ttft_ms=\(String(format: "%.2f", fp16.ttftMilliseconds))
-          turboquant_ttft_ms=\(String(format: "%.2f", aggressive.ttftMilliseconds))
+          mode=\(mode)
+          fp16_decode_tok_s=\(fp16.map { String(format: "%.2f", $0.decodeTokensPerSecond) } ?? "n/a")
+          turboquant_decode_tok_s=\(aggressive.map { String(format: "%.2f", $0.decodeTokensPerSecond) } ?? "n/a")
+          fp16_ttft_ms=\(fp16.map { String(format: "%.2f", $0.ttftMilliseconds) } ?? "n/a")
+          turboquant_ttft_ms=\(aggressive.map { String(format: "%.2f", $0.ttftMilliseconds) } ?? "n/a")
         """)
 
-        #expect(fp16.decodeTokensPerSecond > 0)
-        #expect(aggressive.decodeTokensPerSecond > 0)
+        if let fp16 {
+            #expect(fp16.decodeTokensPerSecond > 0)
+        }
+        if let aggressive {
+            #expect(aggressive.decodeTokensPerSecond > 0)
+        }
     }
 
     private func runCase(

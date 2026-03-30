@@ -10,6 +10,7 @@ struct QwenTurboQuantSmokeTest {
     // cache writes, not only single-token decode appends.
     private static let promptTokens = [9707, 25, 220]
     private static let generateCount = 4
+    private static let expectedGenerated = [16, 11, 220, 508]
 
     @Test
     func aggressiveTurboQuantGreedyTrace() async throws {
@@ -48,5 +49,6 @@ struct QwenTurboQuantSmokeTest {
 
         print("[edgerunner-qwen-turboquant] generated=\(generated)")
         #expect(generated.count == Self.generateCount)
+        #expect(generated == Self.expectedGenerated)
     }
 }
