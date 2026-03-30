@@ -24,6 +24,42 @@ struct TurboQuantAttentionTests {
         try verifyAttentionKernel(useDecodePipeline: true)
     }
 
+    @Test func scoreErrorVsValueErrorAttribution() throws {
+        let q = makeSignal(phase: 0.13)
+        let keyRows = (0..<3).map { row in makeSignal(phase: Float(row) * 0.23) }
+        let valueRows = (0..<3).map { row in makeSignal(phase: 0.7 + Float(row) * 0.11) }
+
+        let dense = denseAttention(q: q, keyRows: keyRows, valueRows: valueRows)
+        let exactKDecodedV = try cpuAttention(
+            q: q,
+            keyRows: keyRows,
+            valueRows: valueRows,
+            preset: .aggressive,
+            useDecodedK: false,
+            useDecodedV: true
+        )
+        let decodedKExactV = try cpuAttention(
+            q: q,
+            keyRows: keyRows,
+            valueRows: valueRows,
+            preset: .aggressive,
+            useDecodedK: true,
+            useDecodedV: false
+        )
+
+        let exactKDecodedVError = meanSquaredError(lhs: dense, rhs: exactKDecodedV)
+        let decodedKExactVError = meanSquaredError(lhs: dense, rhs: decodedKExactV)
+
+        print("""
+        [turboquant-attention-diagnostic]
+          exact_k_decoded_v_mse=\(String(format: "%.6f", exactKDecodedVError))
+          decoded_k_exact_v_mse=\(String(format: "%.6f", decodedKExactVError))
+        """)
+
+        #expect(exactKDecodedVError.isFinite)
+        #expect(decodedKExactVError.isFinite)
+    }
+
     private func verifyAttentionKernel(useDecodePipeline: Bool) throws {
         let cache = try KVCache(
             device: device,
@@ -179,6 +215,104 @@ struct TurboQuantAttentionTests {
             }
         }
         return output
+    }
+
+    private func cpuAttention(
+        q: [Float],
+        keyRows: [[Float]],
+        valueRows: [[Float]],
+        preset: TurboQuantPreset,
+        useDecodedK: Bool,
+        useDecodedV: Bool
+    ) throws -> [Float] {
+        let effectiveKeys: [[Float]]
+        if useDecodedK {
+            effectiveKeys = try keyRows.map {
+                let encoded = try TurboQuantReferenceEncoder.encode(
+                    $0,
+                    preset: preset,
+                    rotationSeed: TurboQuantSeeds.keyRotation,
+                    residualSeed: TurboQuantSeeds.keyResidual
+                )
+                return try TurboQuantReferenceEncoder.approximateDecode(
+                    encoded,
+                    rotationSeed: TurboQuantSeeds.keyRotation,
+                    residualSeed: TurboQuantSeeds.keyResidual
+                )
+            }
+        } else {
+            effectiveKeys = keyRows
+        }
+
+        let effectiveValues: [[Float]]
+        if useDecodedV {
+            effectiveValues = try valueRows.map {
+                let encoded = try TurboQuantReferenceEncoder.encode(
+                    $0,
+                    preset: preset,
+                    rotationSeed: TurboQuantSeeds.valueRotation,
+                    residualSeed: TurboQuantSeeds.valueResidual
+                )
+                return try TurboQuantReferenceEncoder.approximateDecode(
+                    encoded,
+                    rotationSeed: TurboQuantSeeds.valueRotation,
+                    residualSeed: TurboQuantSeeds.valueResidual
+                )
+            }
+        } else {
+            effectiveValues = valueRows
+        }
+
+        var scores = [Float](repeating: 0, count: effectiveKeys.count)
+        for row in effectiveKeys.indices {
+            var dot: Float = 0
+            for dim in 0..<128 {
+                dot += q[dim] * effectiveKeys[row][dim]
+            }
+            scores[row] = dot / sqrt(128.0)
+        }
+
+        let maxScore = scores.max() ?? 0
+        let exps = scores.map { exp($0 - maxScore) }
+        let sum = exps.reduce(Float.zero, +)
+        var output = [Float](repeating: 0, count: 128)
+        for row in effectiveValues.indices {
+            let weight = exps[row] / sum
+            for dim in 0..<128 {
+                output[dim] += weight * effectiveValues[row][dim]
+            }
+        }
+        return output
+    }
+
+    private func denseAttention(q: [Float], keyRows: [[Float]], valueRows: [[Float]]) -> [Float] {
+        var scores = [Float](repeating: 0, count: keyRows.count)
+        for row in keyRows.indices {
+            var dot: Float = 0
+            for dim in 0..<128 {
+                dot += q[dim] * keyRows[row][dim]
+            }
+            scores[row] = dot / sqrt(128.0)
+        }
+
+        let maxScore = scores.max() ?? 0
+        let exps = scores.map { exp($0 - maxScore) }
+        let sum = exps.reduce(Float.zero, +)
+        var output = [Float](repeating: 0, count: 128)
+        for row in valueRows.indices {
+            let weight = exps[row] / sum
+            for dim in 0..<128 {
+                output[dim] += weight * valueRows[row][dim]
+            }
+        }
+        return output
+    }
+
+    private func meanSquaredError(lhs: [Float], rhs: [Float]) -> Float {
+        zip(lhs, rhs).reduce(Float.zero) { partial, pair in
+            let delta = pair.0 - pair.1
+            return partial + delta * delta
+        } / Float(lhs.count)
     }
 
     private func makeSignal(phase: Float) -> [Float] {

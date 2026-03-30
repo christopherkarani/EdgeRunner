@@ -152,6 +152,33 @@ struct TurboQuantReferenceTests {
         }
     }
 
+    @Test func balancedRuntimeRowDecodesLikeLogicalRow() throws {
+        let vector = makeSignal()
+        let encoded = try TurboQuantReferenceEncoder.encode(
+            vector,
+            preset: .balanced,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+        let runtime = try TurboQuantReferenceEncoder.makeRuntimeRow(from: encoded)
+        let logicalDecoded = try TurboQuantReferenceEncoder.approximateDecode(
+            encoded,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+        let runtimeDecoded = try TurboQuantReferenceEncoder.approximateDecode(
+            runtimeRow: runtime,
+            rotationSeed: TurboQuantSeeds.testRotation,
+            residualSeed: TurboQuantSeeds.testResidual
+        )
+
+        let layout = try TurboQuantLayout(preset: .balanced)
+        #expect(runtime.primaryCodes.count == layout.runtimeCodeWordsPerRow)
+        for (lhs, rhs) in zip(logicalDecoded, runtimeDecoded) {
+            #expect(abs(lhs - rhs) < 1e-5)
+        }
+    }
+
     private func makeSignal() -> [Float] {
         (0..<128).map { index in
             let x = Float(index)

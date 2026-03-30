@@ -13,10 +13,14 @@ public struct TurboQuantAttentionBuffers: @unchecked Sendable {
 public final class TurboQuantKernel: Sendable {
     public let quantizePipeline: MTLComputePipelineState
     public let quantizeAggressiveSmallPipeline: MTLComputePipelineState
+    public let quantizeAggressiveSmallKPipeline: MTLComputePipelineState
     public let quantizeAggressiveSmallKVPipeline: MTLComputePipelineState
     public let attentionPipeline: MTLComputePipelineState
     public let decodeAttentionPipeline: MTLComputePipelineState
+    public let decodeAttentionDenseVPipeline: MTLComputePipelineState
     public let decodeAttentionAggressivePipeline: MTLComputePipelineState
+    public let decodeAttentionAggressiveDenseVPipeline: MTLComputePipelineState
+    public let decodeAttentionAggressiveHybridVPipeline: MTLComputePipelineState
 
     public let keySigns: TurboQuantSignBuffers
     public let valueSigns: TurboQuantSignBuffers
@@ -25,10 +29,14 @@ public final class TurboQuantKernel: Sendable {
         let registry = try KernelRegistry(device: device)
         self.quantizePipeline = try registry.pipeline(for: "turboquant_quantize_rows")
         self.quantizeAggressiveSmallPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive")
+        self.quantizeAggressiveSmallKPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_k")
         self.quantizeAggressiveSmallKVPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_kv")
         self.attentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant")
         self.decodeAttentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode")
+        self.decodeAttentionDenseVPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_f16v")
         self.decodeAttentionAggressivePipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive")
+        self.decodeAttentionAggressiveDenseVPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_f16v")
+        self.decodeAttentionAggressiveHybridVPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_k_f16v")
         self.keySigns = try Self.makeSignBuffers(
             device: device,
             rotationSeed: TurboQuantSeeds.keyRotation,
