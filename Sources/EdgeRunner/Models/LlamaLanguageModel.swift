@@ -128,7 +128,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let fusedQ8GemvF16OutPipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
     private let fusedQKVTurboPipeline: MTLComputePipelineState
-    private let fusedQKVTurboHybridVPipeline: MTLComputePipelineState
+    private let fusedQKVTurboHybridVPipeline: MTLComputePipelineState?
     private let fusedGateUpSiluPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
@@ -235,7 +235,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.fusedQ8GemvF16OutPipeline = try registry.pipeline(for: "dequant_q8_0_gemv_f16out")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv")
         self.fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
-        self.fusedQKVTurboHybridVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo_hybrid_v")
+        self.fusedQKVTurboHybridVPipeline = try? registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo_hybrid_v")
         self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
@@ -1115,50 +1115,31 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         )
 
         let isSingleTokenDecode = seqLen == 1
-        let useFastHybridDecode = isSingleTokenDecode
-            && preset == .aggressive
-            && denseValueBuffer != nil
-            && kvSeqLen >= Self.turboQuantFastHybridDecodeSeqThreshold
         let attentionPipeline: MTLComputePipelineState
-        if useFastHybridDecode, let denseValueBuffer {
-            attentionPipeline = turboQuantKernel.decodeAttentionAggressiveHybridVPipeline
-            encoder.setComputePipelineState(attentionPipeline)
-            encoder.setBuffer(qBuffer, offset: 0, index: 0)
-            encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
-            encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
-            encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
-            encoder.setBuffer(keyBuffers.metadata, offset: 0, index: 4)
-            encoder.setBuffer(denseValueBuffer, offset: 0, index: 5)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 6)
-            encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 7)
-            encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 8)
-            encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 9)
+        if isSingleTokenDecode {
+            attentionPipeline = preset == .aggressive
+                ? turboQuantKernel.decodeAttentionAggressivePipeline
+                : turboQuantKernel.decodeAttentionPipeline
         } else {
-            if isSingleTokenDecode {
-                attentionPipeline = preset == .aggressive
-                    ? turboQuantKernel.decodeAttentionAggressivePipeline
-                    : turboQuantKernel.decodeAttentionPipeline
-            } else {
-                attentionPipeline = turboQuantKernel.attentionPipeline
-            }
-
-            encoder.setComputePipelineState(attentionPipeline)
-            encoder.setBuffer(qBuffer, offset: 0, index: 0)
-            encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
-            encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
-            encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
-            encoder.setBuffer(keyBuffers.metadata, offset: 0, index: 4)
-            encoder.setBuffer(valueBuffers.codes, offset: 0, index: 5)
-            encoder.setBuffer(valueBuffers.residualSigns, offset: 0, index: 6)
-            encoder.setBuffer(valueBuffers.outlierMask, offset: 0, index: 7)
-            encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 9)
-            encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-            encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 11)
-            encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 12)
-            encoder.setBuffer(turboQuantKernel.valueSigns.rotation, offset: 0, index: 13)
-            encoder.setBuffer(turboQuantKernel.valueSigns.residual, offset: 0, index: 14)
+            attentionPipeline = turboQuantKernel.attentionPipeline
         }
+
+        encoder.setComputePipelineState(attentionPipeline)
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
+        encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
+        encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
+        encoder.setBuffer(keyBuffers.metadata, offset: 0, index: 4)
+        encoder.setBuffer(valueBuffers.codes, offset: 0, index: 5)
+        encoder.setBuffer(valueBuffers.residualSigns, offset: 0, index: 6)
+        encoder.setBuffer(valueBuffers.outlierMask, offset: 0, index: 7)
+        encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 9)
+        encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
+        encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 12)
+        encoder.setBuffer(turboQuantKernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(turboQuantKernel.valueSigns.residual, offset: 0, index: 14)
 
         if isSingleTokenDecode {
             let decodeThreads = min(
@@ -1256,7 +1237,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             reserved: 0
         )
 
-        encoder.setComputePipelineState(turboQuantKernel.quantizeAggressiveSmallKPipeline)
+        encoder.setComputePipelineState(turboQuantKernel.quantizeAggressiveSmallPipeline)
         encoder.setBuffer(keySourceBuffer, offset: 0, index: 0)
         encoder.setBuffer(keyDestination.codes, offset: 0, index: 1)
         encoder.setBuffer(keyDestination.residualSigns, offset: 0, index: 2)
@@ -2101,14 +2082,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let useQ8Fused = lw.wqRaw != nil
             let useFusedQKV = useQ8Fused && !turboQuantEnabled
             let useTurboFusedQKV = useQ8Fused && turboQuantEnabled
-            let useTurboHybridDenseVQKV = useTurboFusedQKV && useFastHybridDecode
+            let useTurboHybridDenseVQKV = useTurboFusedQKV && useFastHybridDecode && fusedQKVTurboHybridVPipeline != nil
             let blocksPerRowDim = dim / 32
 
             if useFusedQKV || useTurboFusedQKV {
-                // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
                 let fusedQKVPSO: MTLComputePipelineState
-                if useTurboHybridDenseVQKV {
-                    fusedQKVPSO = fusedQKVTurboHybridVPipeline
+                if useTurboHybridDenseVQKV, let hybridPipeline = fusedQKVTurboHybridVPipeline {
+                    fusedQKVPSO = hybridPipeline
                 } else if useTurboFusedQKV {
                     fusedQKVPSO = fusedQKVTurboPipeline
                 } else {
