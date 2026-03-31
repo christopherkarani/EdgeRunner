@@ -5,32 +5,25 @@ Fast, local LLM inference for Apple Silicon. Built in Swift/Metal from the groun
 ```swift
 import EdgeRunner
 
-// Load a model
-let model = try await LlamaLanguageModel.load(
-    from: URL(fileURLWithPath: "Qwen3-0.6B-Q8_0.gguf"),
-    configuration: ModelConfiguration(contextWindowSize: 2048)
-)
+let runner = try await EdgeRunner(modelPath: "Qwen3-0.6B-Q8_0.gguf")
 
-// Generate text
-var tokenIDs = [model.bosTokenID ?? 1]
-for _ in 0..<100 {
-    let nextToken = try await model.nextToken(
-        for: tokenIDs,
-        sampling: SamplingConfiguration(temperature: 0)
-    )
-    tokenIDs.append(nextToken)
+// Streaming
+for try await token in runner.stream("Once upon a time") {
+    print(token, terminator: "")
 }
-let text = model.detokenize(tokenIDs)
+
+// Or one-shot
+let text = try await runner.generate("What is Swift?", maxTokens: 100)
 ```
 
 ## Features
 
-- 🚀 **Performance**: roughly ~230+ tok/s median decode on Qwen3-0.6B (Apple M3 Max, publishable benchmark; rerun locally for exact current numbers)
-- 🧠 **Metal-native**: Custom compute kernels optimized for Apple Silicon
-- 📦 **GGUF support**: Load quantized models directly (Q8_0, Q4_0, Q4_K_M, Q2_K, Q3_K, Q5_0, Q5_1, Q5_K, Q6_K)
-- ⚡ **Fast loading**: Memory-mapped model files for instant startup
-- 🔒 **Private**: Runs entirely on-device, no network required
-- 🎯 **Correct**: Verified against reference implementations
+- **~230+ tok/s** median decode on Qwen3-0.6B (Apple M3 Max, publishable benchmark)
+- **Metal-native**: Custom compute kernels optimized for Apple Silicon
+- **GGUF support**: Load quantized models directly (Q8_0, Q4_0, Q4_K_M, Q2_K, Q3_K, Q5_0, Q5_1, Q5_K, Q6_K)
+- **Memory-mapped loading**: Instant startup, minimal memory pressure
+- **Private**: Runs entirely on-device, no network required
+- **iOS + macOS**: Drop into any Swift project as a package dependency
 
 ## Requirements
 
@@ -77,38 +70,14 @@ import EdgeRunner
 @main
 struct MyApp {
     static func main() async throws {
-        let modelURL = URL(fileURLWithPath: "Qwen3-0.6B-Q8_0.gguf")
-        
-        // Load with configuration
-        let config = ModelConfiguration(
-            maxTokens: 512,
-            contextWindowSize: 2048,
-            useMemoryMapping: true
+        let runner = try await EdgeRunner(
+            modelPath: "Qwen3-0.6B-Q8_0.gguf"
         )
-        
-        let model = try await LlamaLanguageModel.load(
-            from: modelURL,
-            configuration: config
-        )
-        
-        print("Loaded model with vocab size: \(model.vocabularySize)")
-        
-        // Simple generation
-        var tokens = [model.bosTokenID ?? 1]
-        for i in 0..<50 {
-            let next = try await model.nextToken(
-                for: tokens,
-                sampling: SamplingConfiguration(temperature: 0)
-            )
-            tokens.append(next)
-            
-            if next == model.eosTokenID {
-                print("\n[EOS after \(i) tokens]")
-                break
-            }
+
+        // Streaming output
+        for try await token in runner.stream("Hello, world!", maxTokens: 50) {
+            print(token, terminator: "")
         }
-        
-        print(model.detokenize(tokens))
     }
 }
 ```
@@ -118,7 +87,7 @@ struct MyApp {
 EdgeRunner is organized into layered modules:
 
 ```
-EdgeRunnerMetal    # Low-level Metal kernels (GEMM, attention, etc.)
+EdgeRunnerMetal    # Low-level Metal compute kernels
 EdgeRunnerIO       # Model loading (GGUF, SafeTensors)
 EdgeRunnerCore     # Sampling, tokenization, graph execution
 EdgeRunner         # Public API facade
@@ -128,7 +97,8 @@ EdgeRunner         # Public API facade
 
 | Component | Purpose |
 |-----------|---------|
-| `LlamaLanguageModel` | Main inference engine |
+| `EdgeRunner` | Simple entry point — load, stream, generate |
+| `LlamaLanguageModel` | Full inference engine (advanced use) |
 | `KVCache` | Efficient autoregressive generation |
 | `GGUFLoader` | Memory-mapped model loading |
 | `SamplingPipeline` | Temperature, top-p, top-k, repetition penalty |
@@ -148,28 +118,41 @@ Memory usage:
 
 ## Advanced Usage
 
-### Streaming Generation
-
-```swift
-for try await token in model.stream("Once upon a time") {
-    print(token, terminator: "")
-}
-```
-
 ### Custom Sampling
 
 ```swift
-let sampling = SamplingConfiguration(
-    temperature: 0.7,
-    topP: 0.9,
-    topK: 40,
-    repetitionPenalty: 1.1
+let text = try await runner.generate(
+    "Write a story about",
+    maxTokens: 200,
+    sampling: SamplingConfiguration(
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        repetitionPenalty: 1.1
+    )
+)
+```
+
+### Low-Level Control
+
+For fine-grained control over the inference loop, use `LlamaLanguageModel` directly:
+
+```swift
+let model = try await LlamaLanguageModel.load(
+    from: modelURL,
+    configuration: ModelConfiguration(contextWindowSize: 2048)
 )
 
-let nextToken = try await model.nextToken(
-    for: tokenIDs,
-    sampling: sampling
-)
+var tokens = [model.bosTokenID ?? 1]
+for _ in 0..<100 {
+    let next = try await model.nextToken(
+        for: tokens,
+        sampling: SamplingConfiguration(temperature: 0)
+    )
+    guard next != model.eosTokenID else { break }
+    tokens.append(next)
+}
+print(model.detokenize(tokens))
 ```
 
 ### Tool Calling
