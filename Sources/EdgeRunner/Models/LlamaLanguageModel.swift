@@ -2465,7 +2465,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                                 qBuffer: ropeQOutput,
                                 keyBuffers: turboKCache!,
                                 valueBuffers: turboVCache!,
-                                denseValueBuffer: useDenseVDecode ? turboDenseVCache : nil,
+                                denseValueBuffer: useDenseTurboDecode ? turboDenseVCache : nil,
                                 outputBuffer: attnOutBuf,
                                 seqLen: 1,
                                 kvSeqLen: totalKVLen,

@@ -1,2 +1,32 @@
-.worktrees/
+# Build
 .build/
+.swiftpm/
+
+# Agent/tool caches
+.claude/
+.sisyphus/
+.ruff_cache/
+
+# Marketing content
+marketing/
+
+# Internal dev files
+tasks/
+autoresearch/
+Edgerunner
+Test
+TestCases
+"Plan review summary.docx"
+
+# Generated benchmark artifacts (keep pinned contract + experiment log)
+benchmarks/publishable_benchmark.json
+benchmarks/publishable_profile_benchmark.json
+benchmarks/baseline.json
+benchmarks/experiment_database.json
+benchmarks/framework_comparison.json
+benchmarks/long_prompt_framework_comparison.json
+benchmarks/long_story_report.json
+benchmarks/logs/
+
+# macOS
+.DS_Store
