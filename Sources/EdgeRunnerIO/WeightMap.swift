@@ -87,6 +87,7 @@ public enum TensorDataType: UInt32, Sendable, Equatable {
     case i64 = 19
     case f64 = 20
     case bfloat16 = 30
+    case q1_0_g128 = 41
 }
 
 public struct TensorStorage: @unchecked Sendable {

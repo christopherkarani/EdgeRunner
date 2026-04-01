@@ -2789,13 +2789,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(lw.attnNorm, offset: 0, index: 8)
             enc.dispatchThreadgroups(MTLSize(width: qkvGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
 
-            // KV cache buffers disable hazard tracking, so decode must insert an explicit
-            // barrier before GQA consumes the freshly-written K/V slices.
-            if !decodeDebugOptions.disableKVCacheBarrier {
-                enc.memoryBarrier(scope: .buffers)
-            }
-
             // DISPATCH 2: Mega-kernel Q/K norm + RoPE + GQA
+            // Metal's hazard tracking on KV cache buffers ensures QKV writes are visible
+            // before GQA reads — no explicit barrier needed.
             enc.setComputePipelineState(megaPSO)
             enc.setBuffer(allQBuf, offset: 0, index: 0)
             enc.setBuffer(allKBuf, offset: 0, index: 1)

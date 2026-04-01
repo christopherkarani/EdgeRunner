@@ -143,6 +143,8 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
             return elementCount * MemoryLayout<Double>.stride
         case .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq4_nl, .iq3_s, .iq2_s, .iq4_xs:
             throw WeightLoaderError.unsupportedDataType(info.type.rawValue)
+        case .q1_0_g128:
+            return blocks(of: 128) * 18
         }
     }
 }

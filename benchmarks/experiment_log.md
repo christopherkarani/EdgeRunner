@@ -629,8 +629,25 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Result:** KEPT. Exact breakdown improved from `small_quantize_kv=0.816 ms` to `0.531 ms`, while real long-context aggressive TurboQuant moved to `22.20 tok/s` at prompt `512` and `16.47 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `250.8 tok/s`.
 - **Status:** KEPT
 
-### Experiment 34: TurboQuant Aggressive Word-Aligned Base Decode
-- **Hypothesis:** After fixing outlier selection, the aggressive decode kernel is still overpaying to read the fixed 2-bit base plane through generic `tq_extract_code` calls. Iterating the 8 base-code words sequentially should reduce hot-loop extraction cost for both K scoring and V accumulation.
+### Experiment 35: Tiled Fused QKV Kernel — ROLLED BACK
+- **Hypothesis:** The fused QKV kernel (largest decode dispatch, reads wq+wk+wv Q8_0) uses strided DRAM access for x[] (32 elements apart per thread). Cooperatively loading x[] tiles into threadgroup memory should improve bandwidth utilization from ~207 to 240+ GB/s.
+- **Change:** Created `dequant_q8_0_fused_qkv_tiled` Metal kernel with 1024-element threadgroup tile, cooperative load, then process Q8_0 blocks from fast SRAM with inline RMSNorm. Wired into `fusedDecodePassOpt` as the primary QKV dispatch.
+- **Result:** 203.6 → 201.7 tok/s median (-0.9%, within noise). Correctness PASSED (token hash preserved).
+- **Root cause:** For dim=1024, x[] is only 4KB — fits in L1 cache. The threadgroup barrier overhead (~1-2μs per tile × 1 tile) cancels any bandwidth benefit. This matches the plain tiled GEMV kernel which also showed no measurable change.
+- **Status:** ROLLED BACK
+
+### Experiment 36: Remove KV Cache Memory Barrier — ROLLED BACK
+- **Hypothesis:** `memoryBarrier(.buffers)` between QKV and mega-kernel dispatches is redundant within a single command encoder (Metal guarantees in-order execution). Removing 28 barriers × ~2μs should save ~0.05ms per decode.
+- **Change:** Removed the `enc.memoryBarrier(scope: .buffers)` call between DISPATCH 1 (QKV) and DISPATCH 2 (mega-kernel) in `fusedDecodePassOpt`.
+- **Result:** 203.6 → 188.5 tok/s median (-7.4%). Correctness PASSED (token hash preserved).
+- **Root cause:** The barrier provides implicit GPU scheduling slack — without it, the mega-kernel starts reading V cache before QKV completes its write, causing memory stalls that outweigh the barrier cost. The explicit sync helps the GPU scheduler pipeline work efficiently.
+- **Status:** ROLLED BACK
+
+### Experiment 37: Use Metal Hazard Tracking for KV Cache Buffers — KEPT
+- **Hypothesis:** Switching KV cache buffers from `.hazardTrackingModeUntracked` to default tracked mode lets Metal handle synchronization automatically, eliminating the explicit `memoryBarrier(.buffers)` call and potentially improving GPU scheduling efficiency.
+- **Change:** Removed `.hazardTrackingModeUntracked` from KV cache buffer creation in `KVCache.swift`. Removed the explicit `enc.memoryBarrier(scope: .buffers)` call between QKV and mega-kernel dispatches in `fusedDecodePassOpt`, relying on Metal's automatic hazard tracking instead.
+- **Result:** 203.6 → 205.4 tok/s median (+0.9%, within noise). Correctness PASSED (token hash preserved). Code simplified (removed barrier conditional).
+- **Status:** KEPT (marginal perf gain + code simplification)
 - **Change:** Rewrote the aggressive decode kernel to decode base-plane codes as sequential 2-bit words for the fixed `128 x 2-bit` layout, while keeping the existing sideband/outlier path unchanged.
 - **Result:** KEPT. Exact breakdown improved from `decode_attention=1.055 ms` to `0.964 ms`, `small_quantize_kv=0.531 ms` to `0.471 ms`, and real long-context aggressive TurboQuant moved to `22.58 tok/s` at prompt `512` and `17.33 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `254.8 tok/s`.
 - **Status:** KEPT

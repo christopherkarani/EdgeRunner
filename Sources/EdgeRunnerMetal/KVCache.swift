@@ -131,11 +131,11 @@ public final class KVCache: Sendable {
             for _ in 0..<numLayers {
                 guard let keyBuffer = device.makeBuffer(
                     length: bufferLength,
-                    options: [.storageModeShared, .hazardTrackingModeUntracked]
+                    options: [.storageModeShared]
                 ),
                 let valueBuffer = device.makeBuffer(
                     length: bufferLength,
-                    options: [.storageModeShared, .hazardTrackingModeUntracked]
+                    options: [.storageModeShared]
                 ) else {
                     throw KVCacheError.allocationFailed
                 }

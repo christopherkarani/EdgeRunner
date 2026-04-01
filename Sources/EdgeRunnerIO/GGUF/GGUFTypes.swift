@@ -47,6 +47,7 @@ public enum GGUFTensorType: UInt32, Sendable {
     case iq3_s = 26
     case iq2_s = 27
     case iq4_xs = 28
+    case q1_0_g128 = 41
 
     public var tensorDataType: TensorDataType? {
         switch self {
@@ -71,6 +72,8 @@ public enum GGUFTensorType: UInt32, Sendable {
         case .f64: .f64
         case .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq4_nl, .iq3_s, .iq2_s, .iq4_xs:
             nil
+        case .q1_0_g128:
+            .q1_0_g128
         }
     }
 }
