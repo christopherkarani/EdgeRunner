@@ -648,6 +648,24 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Change:** Removed `.hazardTrackingModeUntracked` from KV cache buffer creation in `KVCache.swift`. Removed the explicit `enc.memoryBarrier(scope: .buffers)` call between QKV and mega-kernel dispatches in `fusedDecodePassOpt`, relying on Metal's automatic hazard tracking instead.
 - **Result:** 203.6 → 205.4 tok/s median (+0.9%, within noise). Correctness PASSED (token hash preserved). Code simplified (removed barrier conditional).
 - **Status:** KEPT (marginal perf gain + code simplification)
-- **Change:** Rewrote the aggressive decode kernel to decode base-plane codes as sequential 2-bit words for the fixed `128 x 2-bit` layout, while keeping the existing sideband/outlier path unchanged.
-- **Result:** KEPT. Exact breakdown improved from `decode_attention=1.055 ms` to `0.964 ms`, `small_quantize_kv=0.531 ms` to `0.471 ms`, and real long-context aggressive TurboQuant moved to `22.58 tok/s` at prompt `512` and `17.33 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `254.8 tok/s`.
-- **Status:** KEPT
+
+### Experiment 38: FFN Block Mega-Kernel — ROLLED BACK
+- **Hypothesis:** The `dequant_q8_0_fused_ffn_block` kernel fuses Wo + RMSNorm + Gate+Up+SwiGLU + Down into a single 1024-thread dispatch, reducing 3 dispatches per layer (84 total) to 1 (28 total). This should save ~0.2ms of dispatch overhead.
+- **Change:** Added `fusedFFNBlockPipeline` to `LlamaLanguageModel.swift`. Replaced DISPATCH 3-5 (Wo, Gate+Up, Down) in `fusedDecodePassOpt` with a single `fusedFFNBlockPipeline` dispatch per layer.
+- **Result:** 205.4 → 37.7 tok/s median (-81.6%). Correctness PASSED (token hash preserved).
+- **Root cause:** The 1024-thread mega-kernel uses `threadgroup_barrier(mem_flags::mem_device)` between phases, causing GPU pipeline stalls. The cross-simdgroup RMSNorm reduction adds overhead. The kernel's single-threadgroup architecture underutilizes GPU compute units (32 simdgroups saturated on one core vs 7 TGs/core with 32-thread dispatches). The current 5-dispatch architecture with 32 threads/TG provides better GPU occupancy and pipelining.
+- **Status:** ROLLED BACK
+
+### Experiment 39: Metal 4 Argument Table Path — ROLLED BACK
+- **Hypothesis:** The `fusedDecodePassMetal4` path uses `setArgumentTable` + `setAddress` which writes GPU addresses directly into a Metal argument table. This should be faster than Metal 3's `setBuffer` which has more driver overhead for buffer offset tracking.
+- **Change:** Ran benchmark with `EDGERUNNER_DECODE_PREFER_METAL4=1` to activate the Metal 4 decode path (`fusedDecodePassMetal4`).
+- **Result:** 205.4 → 180.8 tok/s median (-12.0%). Correctness PASSED (token hash preserved).
+- **Root cause:** Metal 4 argument tables require additional overhead for buffer residency management and resource tracking. The per-dispatch `setAddress` savings are outweighed by the Metal 4 runtime overhead (residency set binding, argument table snapshots).
+- **Status:** ROLLED BACK
+
+### Experiment 40: Decode Warmup Count — ROLLED BACK
+- **Hypothesis:** More warmup passes (15 or 10) should help the GPU reach thermal equilibrium and compile Metal shaders more thoroughly, improving steady-state throughput.
+- **Change:** Tested warmup counts of 15 and 10 in `beginDecodeWarmupIfNeeded()`.
+- **Result:** 5 warmup: 205.4 tok/s baseline. 10 warmup: 203.3 tok/s (-1.0%). 15 warmup: 202.9 tok/s (-1.2%).
+- **Root cause:** More warmup passes add latency to model load time. The GPU reaches thermal equilibrium after ~5 passes. Additional warmup doesn't improve steady-state performance and adds to initial latency.
+- **Status:** ROLLED BACK
