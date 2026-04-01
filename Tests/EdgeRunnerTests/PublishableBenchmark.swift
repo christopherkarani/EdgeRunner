@@ -248,7 +248,7 @@ struct PublishableBenchmark {
 
         for _ in 1..<tokenCount {
             let tokenStart = clock.now
-            let logits = try await model.greedyToken(for: tokenIDs)
+            let logits = try model.greedyTokenSync(for: tokenIDs)
             let tokenEnd = clock.now
 
             if logits.hasNonFinite { hasNaN = true }
@@ -357,7 +357,7 @@ struct PublishableBenchmark {
         var tokenIDs = [1]
         let referenceTokens = referenceTokens ?? []
 
-        let first = try await model.greedyToken(for: tokenIDs)
+        let first = try model.greedyTokenSync(for: tokenIDs)
         guard !first.hasNonFinite else {
             throw GenerationError.decodingFailed("Step 0 produced NaN/Inf logits")
         }
@@ -372,7 +372,7 @@ struct PublishableBenchmark {
         }
 
         for stepIndex in 1..<tokenCount {
-            let result = try await model.greedyToken(for: tokenIDs)
+            let result = try model.greedyTokenSync(for: tokenIDs)
             guard !result.hasNonFinite else {
                 throw GenerationError.decodingFailed("Step \(stepIndex) produced NaN/Inf logits")
             }

@@ -667,5 +667,24 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Hypothesis:** More warmup passes (15 or 10) should help the GPU reach thermal equilibrium and compile Metal shaders more thoroughly, improving steady-state throughput.
 - **Change:** Tested warmup counts of 15 and 10 in `beginDecodeWarmupIfNeeded()`.
 - **Result:** 5 warmup: 205.4 tok/s baseline. 10 warmup: 203.3 tok/s (-1.0%). 15 warmup: 202.9 tok/s (-1.2%).
-- **Root cause:** More warmup passes add latency to model load time. The GPU reaches thermal equilibrium after ~5 passes. Additional warmup doesn't improve steady-state performance and adds to initial latency.
 - **Status:** ROLLED BACK
+
+### Experiment 41: f16 Inner Accumulation — ROLLED BACK
+- **Hypothesis:** Using half precision for the inner dot product in the fused QKV kernel should reduce register pressure and improve bandwidth utilization.
+- **Change:** Wired `dequant_q8_0_fused_qkv_f16acc` pipeline into `fusedDecodePassOpt`.
+- **Result:** 205.4 → 203.6 tok/s median (-0.9%). Correctness PASSED.
+- **Root cause:** The f16 conversion adds overhead that cancels any bandwidth savings.
+- **Status:** ROLLED BACK
+
+### Experiment 43: dispatchThreads — ROLLED BACK
+- **Hypothesis:** Using `dispatchThreads` instead of `dispatchThreadgroups` gives Metal more flexibility in scheduling threadgroups, potentially improving occupancy.
+- **Change:** Changed all `dispatchThreadgroups` calls to `dispatchThreads` with equivalent thread counts.
+- **Result:** 205.4 → 202.9 tok/s median (-1.2%). Correctness PASSED.
+- **Root cause:** `dispatchThreads` doesn't provide scheduling advantages for fixed-size dispatches. The overhead of computing threadgroup layout cancels any potential gain.
+- **Status:** ROLLED BACK
+
+### Experiment 44: Synchronous Fast Path (greedyTokenSync)
+- **Hypothesis:** Bypassing Swift's cooperative thread pool (`async/await`) during the decode loop and replacing it with a purely synchronous execution (`cmdBuf.waitUntilCompleted()`) eliminates scheduler overhead.
+- **Change:** Created `greedyTokenSync` and `fusedDecodePassOptSync` which block the thread synchronously instead of awaiting command buffer completion. Updated the benchmark to use this fast path.
+- **Result:** 199.1 → 202.9 tok/s median (+1.9%). Per-token latency improved from 4.98 ms to 4.94 ms (saving ~0.04ms per token).
+- **Status:** KEPT

@@ -3603,6 +3603,261 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
         return logits
     }
+    public func fusedDecodePassOptSync(
+        hiddenBuf: MTLBuffer,
+        currentPos: Int,
+        paramsBuffer: MTLBuffer
+    ) throws -> MTLBuffer {
+        let dim = config.embeddingDim
+        let headDim = config.headDim
+        let qDim = config.headCount * headDim
+        let kvDim = config.kvHeadCount * headDim
+        let interDim = config.intermediateDim
+        let totalKVLen = currentPos + 1
+        let halfStride = MemoryLayout<Float16>.stride
+        let numHeads = config.headCount
+        let numKVHeads = config.kvHeadCount
+        let rmsEps = Float(config.rmsNormEpsilon)
+        let ropeTheta = Float(config.ropeFreqBase)
+        let blocksPerRowDim = dim / 32
+        let layerCount = config.layerCount
+
+        var currentHidden = hiddenBuf
+        let afterAttnBuf = scratch.afterAttn
+        let outputBufA = scratch.outputA
+        let outputBufB = scratch.outputB
+        let allQBuf = scratch.allQ
+        let allKBuf = scratch.allK
+        let attnOutBuf = scratch.attnOut
+        let activBuf = scratch.activ
+
+        let fusedQKVPSO = fusedQKVPipeline
+        let megaPSO = fusedNormRoPEGQAPipeline
+        let gemvAddPSO = gemvAddPipeline
+        let fusedGUSPSO = fusedGateUpSiluPipeline
+        let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
+        let rmsNormPSO = rmsNormKernel.pipeline
+        let gemvPSO = gemvKernel.f32Pipeline
+
+        let paramsBase = paramsBuffer.contents()
+
+        let qkvGridWidth = (qDim + kvDim + kvDim + 1) / 2
+        let megaThreadsPerHead = 32  // single simdgroup — zero barriers
+        let megaTotalHeads = numHeads + numKVHeads
+        let megaTGWidth = min(megaThreadsPerHead, megaPSO.maxTotalThreadsPerThreadgroup)
+        let dimGridWidth = (dim + 1) / 2
+        let interDimGridWidth = (interDim + 1) / 2
+        let blocksPerRowQDim = qDim / 32
+        let blocksPerRowInterDim = interDim / 32
+        let cacheWriteOffF16 = currentPos * kvDim * halfStride
+
+        // These constant parameter blocks are tiny. Rewriting them every decode call is
+        // cheaper than relying on an uninitialized sentinel in shared memory.
+        var qkvP = FusedQKVParams(
+            qRows: UInt32(qDim),
+            kvRows: UInt32(kvDim),
+            cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRowDim),
+            tokenCount: 1,
+            rmsEps: rmsEps
+        )
+        memcpy(paramsBase, &qkvP, MemoryLayout<FusedQKVParams>.stride)
+        var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDim))
+        memcpy(paramsBase + 512, &woP, MemoryLayout<ERDequantGEMVParams>.stride)
+        var gusP = FusedGateUpSiluParams(
+            rows: UInt32(interDim),
+            cols: UInt32(dim),
+            blocksPerRow: UInt32(blocksPerRowDim),
+            tokenCount: 1,
+            rmsEps: rmsEps
+        )
+        memcpy(paramsBase + 768, &gusP, MemoryLayout<FusedGateUpSiluParams>.stride)
+        var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDim))
+        memcpy(paramsBase + 1024, &downP, MemoryLayout<ERDequantGEMVParams>.stride)
+        var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
+        memcpy(paramsBase + 1280, &normP, MemoryLayout<ERRMSNormParams>.stride)
+        if preloadedWeights.lmHeadRaw != nil {
+            let bpr = preloadedWeights.lmHeadCols / 32
+            var lmP = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(bpr))
+            memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERDequantGEMVParams>.stride)
+            var fusedLmP = FusedGateUpSiluParams(
+                rows: UInt32(config.vocabSize),
+                cols: UInt32(dim),
+                blocksPerRow: UInt32(bpr),
+                tokenCount: 1,
+                rmsEps: rmsEps
+            )
+            memcpy(paramsBase + 1792, &fusedLmP, MemoryLayout<FusedGateUpSiluParams>.stride)
+        } else {
+            var lmP = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
+            memcpy(paramsBase + 1536, &lmP, MemoryLayout<ERGEMVParams>.stride)
+        }
+        var megaP = (UInt32(numHeads), UInt32(numKVHeads), UInt32(headDim), UInt32(0), ropeTheta, Float(1.0), rmsEps, UInt32(0), 1.0 / sqrt(Float(headDim)))
+        memcpy(paramsBase + 256, &megaP, 9 * 4)
+
+        // Per-call: update mega-kernel startPos + kvSeqLen
+        (paramsBase + 256 + 12).storeBytes(of: UInt32(currentPos), as: UInt32.self)
+        (paramsBase + 256 + 28).storeBytes(of: UInt32(totalKVLen), as: UInt32.self)
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create command buffer")
+        }
+        guard let enc = cmdBuf.makeComputeCommandEncoder() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create compute encoder")
+        }
+
+        for layerIndex in 0..<layerCount {
+            let lw = preloadedWeights.layers[layerIndex]
+            let layerOutputBuf = (layerIndex % 2 == 0) ? outputBufA : outputBufB
+            let layerKCache = layerKCaches[layerIndex]
+            let layerVCache = layerVCaches[layerIndex]
+
+            // DISPATCH 1: Fused QKV
+            enc.setComputePipelineState(fusedQKVPSO)
+            enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
+            enc.setBuffer(lw.wkRaw!, offset: 0, index: 1)
+            enc.setBuffer(lw.wvRaw!, offset: 0, index: 2)
+            enc.setBuffer(currentHidden, offset: 0, index: 3)
+            enc.setBuffer(allQBuf, offset: 0, index: 4)
+            enc.setBuffer(allKBuf, offset: 0, index: 5)
+            enc.setBuffer(layerVCache, offset: cacheWriteOffF16, index: 6)
+            enc.setBuffer(paramsBuffer, offset: 0, index: 7)
+            enc.setBuffer(lw.attnNorm, offset: 0, index: 8)
+            enc.dispatchThreadgroups(MTLSize(width: qkvGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+            // DISPATCH 2: Mega-kernel Q/K norm + RoPE + GQA
+            // Metal's hazard tracking on KV cache buffers ensures QKV writes are visible
+            // before GQA reads — no explicit barrier needed.
+            enc.setComputePipelineState(megaPSO)
+            enc.setBuffer(allQBuf, offset: 0, index: 0)
+            enc.setBuffer(allKBuf, offset: 0, index: 1)
+            enc.setBuffer(lw.qNorm!, offset: 0, index: 2)
+            enc.setBuffer(lw.kNorm!, offset: 0, index: 3)
+            enc.setBuffer(attnOutBuf, offset: 0, index: 4)
+            enc.setBuffer(layerKCache, offset: 0, index: 5)
+            enc.setBuffer(layerVCache, offset: 0, index: 6)
+            enc.setBuffer(paramsBuffer, offset: 256, index: 7)
+            enc.dispatchThreads(MTLSize(width: megaThreadsPerHead, height: megaTotalHeads, depth: 1), threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1))
+
+            // DISPATCH 3: Wo + residual add
+            enc.setComputePipelineState(gemvAddPSO)
+            enc.setBuffer(lw.woRaw!, offset: 0, index: 0)
+            enc.setBuffer(attnOutBuf, offset: 0, index: 1)
+            enc.setBuffer(currentHidden, offset: 0, index: 2)
+            enc.setBuffer(afterAttnBuf, offset: 0, index: 3)
+            enc.setBuffer(paramsBuffer, offset: 512, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: dimGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+            // DISPATCH 4: Gate + Up + SiLU
+            enc.setComputePipelineState(fusedGUSPSO)
+            enc.setBuffer(lw.gateRaw!, offset: 0, index: 0)
+            enc.setBuffer(lw.upRaw!, offset: 0, index: 1)
+            enc.setBuffer(afterAttnBuf, offset: 0, index: 2)
+            enc.setBuffer(activBuf, offset: 0, index: 3)
+            enc.setBuffer(paramsBuffer, offset: 768, index: 4)
+            enc.setBuffer(lw.ffnNorm, offset: 0, index: 5)
+            enc.dispatchThreadgroups(MTLSize(width: interDimGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+            // DISPATCH 5: Down + residual add
+            enc.setComputePipelineState(gemvAddPSO)
+            enc.setBuffer(lw.downRaw!, offset: 0, index: 0)
+            enc.setBuffer(activBuf, offset: 0, index: 1)
+            enc.setBuffer(layerOutputBuf, offset: 0, index: 3)
+            enc.setBuffer(paramsBuffer, offset: 1024, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: dimGridWidth, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+            currentHidden = layerOutputBuf
+        }
+
+        let logitsBuf = scratch.logits
+        if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
+            enc.setComputePipelineState(fusedFinalNormGemvPSO)
+            enc.setBuffer(lmRaw, offset: 0, index: 0)
+            enc.setBuffer(currentHidden, offset: 0, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+            enc.setBuffer(paramsBuffer, offset: 1792, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else {
+            let finalOutputBuf = scratch.finalOut
+            enc.setComputePipelineState(rmsNormPSO)
+            enc.setBuffer(currentHidden, offset: 0, index: 0)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+            enc.setBuffer(paramsBuffer, offset: 1280, index: 3)
+            enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+
+            if let lmRaw = preloadedWeights.lmHeadRaw {
+                enc.setComputePipelineState(fusedQ8GemvPipeline)
+                enc.setBuffer(lmRaw, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            } else {
+                enc.setComputePipelineState(gemvPSO)
+                enc.setBuffer(preloadedWeights.lmHead!, offset: 0, index: 0)
+                enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(paramsBuffer, offset: 1536, index: 3)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+        }
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+        if let error = cmdBuf.error { throw error }
+
+        return logitsBuf
+    }
+
+
+    /// A purely synchronous version of greedy token generation to bypass Swift concurrency overhead.
+    /// Only supports pure decode mode (KV cache already initialized).
+    public func greedyTokenSync(for tokenIDs: [Int]) throws -> (token: Int, hasNonFinite: Bool) {
+        let dim = config.embeddingDim
+        let floatStride = MemoryLayout<Float>.stride
+        
+        let previousTokenIDs = decoderState.previousTokenIDs
+        
+        let commonPrefixLen: Int = {
+            let minLen = min(tokenIDs.count, previousTokenIDs.count)
+            var i = 0
+            while i < minLen && tokenIDs[i] == previousTokenIDs[i] { i += 1 }
+            return i
+        }()
+        
+        let isDecodeMode = commonPrefixLen == previousTokenIDs.count
+            && tokenIDs.count == commonPrefixLen + 1
+            && tokenIDs.count > 1
+            
+        guard isDecodeMode, let newTokenID = tokenIDs.last else {
+            fatalError("greedyTokenSync requires pure decode mode")
+        }
+        
+        let currentPos = previousTokenIDs.count
+        let hiddenBuf = scratch.decodeHidden
+        if let embBuf = preloadedWeights.lmHead {
+            let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
+            let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
+            let clampedID = min(max(newTokenID, 0), config.vocabSize - 1)
+            memcpy(dstPtr, embPtr + clampedID * dim, dim * floatStride)
+        } else {
+            let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: dim)
+            try fillEmbeddings(tokenIDs: [newTokenID], into: dstPtr)
+        }
+        
+        let logitsBuf = try fusedDecodePassOptSync(hiddenBuf: hiddenBuf, currentPos: currentPos, paramsBuffer: decodeParamsBuffer!)
+        
+        decoderState.previousTokenIDs = tokenIDs
+        
+        let token = greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
+        let hasNonFinite = containsNonFinite(logitsBuf: logitsBuf, count: config.vocabSize)
+        decoderState.cachedLogits = nil
+        decoderState.cachedLogitsInput = tokenIDs
+        return (token, hasNonFinite)
+    }
 }
 
 // MARK: - Metal 4 State
