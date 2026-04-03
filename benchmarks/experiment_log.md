@@ -688,3 +688,41 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Change:** Created `greedyTokenSync` and `fusedDecodePassOptSync` which block the thread synchronously instead of awaiting command buffer completion. Updated the benchmark to use this fast path.
 - **Result:** 199.1 → 202.9 tok/s median (+1.9%). Per-token latency improved from 4.98 ms to 4.94 ms (saving ~0.04ms per token).
 - **Status:** KEPT
+
+### Experiment 45: Combined Argmax + Non-Finite Check (Single vDSP Pass)
+- **Hypothesis:** `greedyTokenSync` does TWO passes over 151,936 logits: vDSP `vDSP_maxvi` for argmax (~0.05ms) + scalar `containsNonFinite` loop (~0.1ms). Since `vDSP_maxvi` returns the max value, checking `!maxValue.isFinite` eliminates the second pass entirely.
+- **Change:** Replaced separate `greedyArgmax` + `containsNonFinite` calls in `greedyTokenSync` with a single `vDSP_maxvi` call that extracts both the token index and non-finite validity from the max value.
+- **Result:** 204.3 → 204.9 tok/s median (+0.3%, within system variance). Architecturally cleaner (one pass instead of two).
+- **Status:** KEPT (no regression, cleaner code)
+
+### Experiment 46: Batched Buffer Bindings (`setBuffers`) — ROLLED BACK
+- **Hypothesis:** Replacing 33 individual `setBuffer` calls per layer with 5 `setBuffers` (plural) calls would reduce CPU encoding overhead.
+- **Change:** Pre-allocated buffer arrays per dispatch type, populated per layer, passed via `setBuffers(_:offsets:range:)`.
+- **Result:** Correctness FAILED — token hash changed from `0afae14a84cf0df8` to divergent output. The `nil` entry in the down dispatch buffer array (index 2) or array lifetime issue caused incorrect GPU reads.
+- **Status:** ROLLED BACK
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Current median | 204.9 tok/s |
+| Current peak | 206.2 tok/s |
+| **Total improvement** | **3,533x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+12%** |
+| MLX reference | 278 tok/s |
+| **Gap to MLX** | **-73 tok/s (-26%)** |
+
+## Remaining Gap Analysis
+
+At 204.9 tok/s = 4.88ms/token, the breakdown is:
+- GPU execution: ~3.4ms (604MB Q8_0 weights at ~177 GB/s effective)
+- CPU dispatch encoding: ~0.6ms (141 dispatches × ~4μs each)
+- Swift overhead + argmax: ~0.9ms
+
+The remaining 26% gap to MLX likely requires:
+1. **Weight layout optimization** — interleaving weights for better cache locality (MLX does this)
+2. **Graph fusion** — compiling the entire forward pass as a single Metal kernel (MLX's lazy evaluation)
+3. **ICB (Indirect Command Buffers)** — pre-record decode pass, replay with updated addresses
+4. **Non-async forward pass** — eliminate Swift concurrency overhead entirely
