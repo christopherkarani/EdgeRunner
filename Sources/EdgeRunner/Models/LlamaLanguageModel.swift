@@ -3852,8 +3852,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         
         decoderState.previousTokenIDs = tokenIDs
         
-        let token = greedyArgmax(logitsBuf: logitsBuf, count: config.vocabSize)
-        let hasNonFinite = containsNonFinite(logitsBuf: logitsBuf, count: config.vocabSize)
+        let ptr = logitsBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
+        var maxValue: Float = 0
+        var maxIndex: vDSP_Length = 0
+        vDSP_maxvi(ptr, 1, &maxValue, &maxIndex, vDSP_Length(config.vocabSize))
+        let token = Int(maxIndex)
+        let hasNonFinite = !maxValue.isFinite
         decoderState.cachedLogits = nil
         decoderState.cachedLogitsInput = tokenIDs
         return (token, hasNonFinite)
