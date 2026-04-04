@@ -753,21 +753,40 @@ The optimization removes redundant float32 weight caches that existed for a pref
 | llama.cpp reference | 183 tok/s |
 | **vs llama.cpp** | **+11-17%** |
 
-## 2x Target Analysis (400+ tok/s)
+## 2x Target (444 tok/s) — FAILED
 
 Attempted optimizations that did NOT work:
 1. ✗ Fused Q1 QKV/Gate+Up kernels — 47% regression (separate GEMV is faster for Q1)
 2. ✗ Q1 raw layer weights — 79% regression (pre-dequantized float is faster)
 3. ✗ Metal 4 decode path for Q1 — correctness failure (only 2 tokens generated)
-4. ✗ Float LM head dequantization — no change (memory-bound, not compute-bound)
+4. ✗ Float LM head dequantization — no change (memory-bound, not dequant-bound)
+5. ✗ Q1 GEMV for LM head — kernel crashes during execution (SIGTRAP)
+6. ✗ Keep LM head as Q1_0_g128 (not dequantized) — Q1 GEMV kernel crashes in prefill
 
-Bottleneck breakdown at 213 tok/s (4.69ms/token):
-- LM head (151K×2048): ~1.88ms (40%) — memory bandwidth limited
-- 28 layers: ~2.6ms (55%) — ~93μs per layer, ~15 dispatches each
-- Other (RMSNorm, argmax, Swift overhead): ~0.21ms (5%)
+Root cause of Q1 GEMV crash: The `dequant_q1_0_g128_gemv` kernel crashes when used
+for the LM head (151K rows × 2048 cols). The kernel works correctly for layer weights
+(2048 rows × 2048 cols) but fails for the much larger LM head matrix. This suggests a
+threadgroup memory or index out-of-bounds issue in the kernel for large row counts.
 
-Realistic paths to 2x:
-1. **Speculative decoding** — draft 2-3 tokens, verify with full model
-2. **Batched decode** — process multiple tokens simultaneously
-3. **Smaller model** — not applicable (Bonsai is already the target)
-4. **Custom fused layer kernel** — entire layer in 1-2 dispatches (complex, high risk)
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 202.7 tok/s |
+| Bonsai 1.7B Q1_0_g128 median | 222.2 tok/s |
+| **Total improvement** | **3,831x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+17-21%** |
+
+## Bottleneck Analysis (Bonsai 1.7B at 222 tok/s = 4.5ms/token)
+
+| Component | Time (ms) | % | Notes |
+|-----------|-----------|---|-------|
+| LM head (151K×2048 float) | ~1.8 | 40% | Memory bandwidth bound |
+| 28 layers | ~2.5 | 56% | ~89μs per layer |
+| Other (argmax, etc) | ~0.2 | 4% | Swift overhead |
+
+To reach 444 tok/s (2.25ms/token), would need to eliminate ~2.25ms. The LM head alone
+takes 1.8ms, and the 28 layers take 2.5ms. No single optimization can cut both in half
+without a draft model or architectural change.
