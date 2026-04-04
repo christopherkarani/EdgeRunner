@@ -15,6 +15,12 @@ public final class DequantQ1_0_g128Kernel: Sendable {
     private let device: MTLDevice
     private let dequantPipeline: MTLComputePipelineState
     private let gemvPipeline: MTLComputePipelineState
+    private let fusedQKVPipeline: MTLComputePipelineState
+    private let fusedGateUpPipeline: MTLComputePipelineState
+
+    public var gemvPSO: MTLComputePipelineState { gemvPipeline }
+    public var fusedQKVPSO: MTLComputePipelineState { fusedQKVPipeline }
+    public var fusedGateUpPSO: MTLComputePipelineState { fusedGateUpPipeline }
 
     private static let blockByteCount = 18
     private static let weightsPerBlock = 128
@@ -24,6 +30,8 @@ public final class DequantQ1_0_g128Kernel: Sendable {
         let registry = try KernelRegistry(device: device)
         self.dequantPipeline = try registry.pipeline(for: "dequant_q1_0_g128")
         self.gemvPipeline = try registry.pipeline(for: "dequant_q1_0_g128_gemv")
+        self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q1_0_g128_fused_qkv")
+        self.fusedGateUpPipeline = try registry.pipeline(for: "dequant_q1_0_g128_fused_gate_up")
     }
 
     public func dequantise(

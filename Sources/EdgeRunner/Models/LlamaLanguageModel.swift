@@ -509,7 +509,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private static func validateQuantizationTypes(_ weightMap: WeightMap) throws {
         let supportedTypes: Set<TensorDataType> = [
             .float32, .float16, .q4_0, .q8_0, .q4_K,
-            .q6_K, .q5_K, .q3_K, .q2_K, .q5_0, .q5_1
+            .q6_K, .q5_K, .q3_K, .q2_K, .q5_0, .q5_1,
+            .q1_0_g128
         ]
 
         var unsupportedTypes = Set<TensorDataType>()
@@ -3413,6 +3414,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 blockData: blockData, blockCount: blockCount, commandQueue: commandQueue
             )
 
+        case .q1_0_g128:
+            let weightsPerBlock = 128
+            guard elementCount % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "\(storage.name): elementCount \(elementCount) not divisible by \(weightsPerBlock) for Q1_0_g128"
+                )
+            }
+            let blockCount = elementCount / weightsPerBlock
+            let byteCount = blockCount * 18
+            let ptr = basePtr.bindMemory(to: UInt8.self, capacity: byteCount)
+            var result = [Float](repeating: 0, count: elementCount)
+            for b in 0..<blockCount {
+                let blockStart = b * 18
+                let scaleBits = UInt16(ptr[blockStart]) | (UInt16(ptr[blockStart + 1]) << 8)
+                let scale = Float(Float16(bitPattern: scaleBits))
+                let qs = ptr + blockStart + 2
+                for j in 0..<16 {
+                    let bits = qs[j]
+                    for k in 0..<8 {
+                        let bit = (bits >> k) & 1
+                        let val = Int(bit) * 2 - 1
+                        result[b * weightsPerBlock + j * 8 + k] = scale * Float(val)
+                    }
+                }
+            }
+            return result
+
         default:
             throw GenerationError.modelLoadFailed(
                 reason: "Unsupported weight data type \(storage.dataType)"
@@ -3552,6 +3580,33 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         let hi = Int(byte >> 4) - 8
                         destination[dstOffset + block * elementsPerBlock + j * 2] = scale * Float(lo)
                         destination[dstOffset + block * elementsPerBlock + j * 2 + 1] = scale * Float(hi)
+                    }
+                }
+            }
+
+        case .q1_0_g128:
+            let bytesPerBlock = 18
+            let elementsPerBlock = 128
+            let blocksPerRow = dim / elementsPerBlock
+            let bytesPerRow = blocksPerRow * bytesPerBlock
+            let rawPtr = basePtr.bindMemory(to: UInt8.self, capacity: storage.elementCount / elementsPerBlock * bytesPerBlock)
+
+            for (i, tokenID) in tokenIDs.enumerated() {
+                let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
+                let rowStart = clampedID * bytesPerRow
+                let dstOffset = i * dim
+                for block in 0..<blocksPerRow {
+                    let blockStart = rowStart + block * bytesPerBlock
+                    let scaleBits = UInt16(rawPtr[blockStart]) | (UInt16(rawPtr[blockStart + 1]) << 8)
+                    let scale = Float(Float16(bitPattern: scaleBits))
+                    let qs = rawPtr + blockStart + 2
+                    for j in 0..<16 {
+                        let bits = qs[j]
+                        for k in 0..<8 {
+                            let bit = (bits >> k) & 1
+                            let val = Int(bit) * 2 - 1  // 0 -> -1, 1 -> +1
+                            destination[dstOffset + block * elementsPerBlock + j * 8 + k] = scale * Float(val)
+                        }
                     }
                 }
             }
