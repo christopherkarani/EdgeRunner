@@ -148,4 +148,88 @@ struct BonsaiBenchmark {
 
         #expect(Bool(true), "Bonsai-1.7B Q1_0_g128 benchmark completed: \(String(format: "%.1f", median)) tok/s median decode")
     }
+
+    @Test("Bonsai 1.7B Q1_0_g128 coherence check")
+    func bonsaiCoherenceCheck() async throws {
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            #expect(Bool(false), "Bonsai model not found at \(Self.modelPath)")
+            return
+        }
+
+        // Load weight map to inspect tensors
+        let loader = try GGUFLoader(url: URL(fileURLWithPath: Self.modelPath))
+        let weightMap = try await loader.load(from: URL(fileURLWithPath: Self.modelPath))
+
+        print("=== Tensor dtype distribution ===")
+        var dtypeCounts = [String: Int]()
+        var firstQ1: String?
+        var firstEmbd: String?
+        for name in weightMap.tensorNames.sorted() {
+            let tensor = weightMap[name]!
+            let dtypeStr = "\(tensor.dataType)"
+            dtypeCounts[dtypeStr, default: 0] += 1
+            if tensor.dataType == .q1_0_g128 && firstQ1 == nil { firstQ1 = name }
+            if name.contains("embd") || name == "output.weight" || name == "output_norm.weight" {
+                firstEmbd = name
+                print("  Embedding/LM head tensor: \(name), dtype=\(tensor.dataType), shape=\(tensor.shape)")
+            }
+        }
+        for (dtype, count) in dtypeCounts.sorted(by: { $0.key < $1.key }) {
+            print("  \(dtype): \(count) tensors")
+        }
+        print("  First Q1_0_g128 tensor: \(firstQ1 ?? "none")")
+        print("  Embedding tensor: \(firstEmbd ?? "none")")
+        if let firstEmbd, let embdTensor = weightMap[firstEmbd] {
+            print("  Embedding shape: \(embdTensor.shape), elementCount: \(embdTensor.elementCount)")
+            print("  Expected: [vocab=\(loader.modelConfig.metadata["qwen3.vocab_size"]?.intValue ?? -1), dim=\(loader.modelConfig.metadata["qwen3.embedding_length"]?.intValue ?? -1)]")
+        }
+
+        // Also check Qwen3 for comparison
+        print("\n=== Qwen3 0.6B comparison ===")
+        let qwen3Path = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
+        if FileManager.default.fileExists(atPath: qwen3Path) {
+            let qwen3Loader = try GGUFLoader(url: URL(fileURLWithPath: qwen3Path))
+            let qwen3WeightMap = try await qwen3Loader.load(from: URL(fileURLWithPath: qwen3Path))
+            for name in qwen3WeightMap.tensorNames.sorted() where name.contains("token_embd") || name == "output.weight" || name == "output_norm.weight" {
+                if let tensor = qwen3WeightMap[name] {
+                    print("  \(name): dtype=\(tensor.dataType), shape=\(tensor.shape), elements=\(tensor.elementCount)")
+                }
+            }
+        }
+
+        // Now try loading the model
+        let model = try await LlamaLanguageModel.load(
+            from: URL(fileURLWithPath: Self.modelPath),
+            configuration: ModelConfiguration(contextWindowSize: 2048)
+        )
+
+        let prompt = "Explain quantum computing in simple terms:"
+        var tokenIDs = model.tokenize(prompt)
+        if let bos = model.bosTokenID, tokenIDs.first != bos {
+            tokenIDs.insert(bos, at: 0)
+        }
+        print("\nPrompt token IDs: \(tokenIDs)")
+
+        var generatedText = ""
+        for i in 0..<32 {
+            let result = try await model.greedyToken(for: tokenIDs)
+            let decoded = model.detokenize([result.token])
+            print("  Token \(i): ID=\(result.token), text=\(repr(decoded)), hasNaN=\(result.hasNonFinite)")
+            if result.token == 151645 || result.token == 2 || result.token == 0 { break }
+            tokenIDs.append(result.token)
+            generatedText += decoded
+        }
+        print("\nOutput: \(generatedText)")
+        #expect(!generatedText.contains("FBFB"), "Output should not contain repeating 'FB'")
+    }
+}
+
+private func repr(_ s: String) -> String {
+    let escaped = s.unicodeScalars.map { c in
+        if c.isASCII && c.value >= 32 && c.value < 127 {
+            return String(Character(c))
+        }
+        return String(format: "\\u{%04X}", c.value)
+    }.joined()
+    return "'\(escaped)'"
 }
