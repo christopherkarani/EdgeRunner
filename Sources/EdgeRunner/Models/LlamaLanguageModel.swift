@@ -1878,6 +1878,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // 5+6. Fused output projection + residual add (saves 1 dispatch for seqLen=1)
             let blocksPerRowQDim = qDim / 32
+            let blocksPerRowQDimQ1 = qDim / 128
             if useQ8Fused && seqLen == 1, let woRaw = lw.woRaw {
                 let gemvAddPSO = gemvAddPipeline
                 enc.setComputePipelineState(gemvAddPSO)
@@ -1901,6 +1902,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
                         enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
                         enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                        enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    } else if let q1PSO = fusedQ1PSO, let woRawQ1 = lw.woRawQ1 {
+                        // Q1_0_g128: raw Q1 GEMV
+                        enc.setComputePipelineState(q1PSO)
+                        var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDimQ1))
+                        enc.setBuffer(woRawQ1, offset: 0, index: 0)
+                        enc.setBuffer(attnOutBuf, offset: t * qDim * floatStride, index: 1)
+                        enc.setBuffer(projBuf, offset: t * dim * floatStride, index: 2)
+                        enc.setBytes(&woP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                         enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     } else {
@@ -1955,6 +1966,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         threadsPerThreadgroup: MTLSize(width: min(seqLen, rmsNormPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
                 // Gate + Up projections
+                let blocksPerRowDimQ1 = dim / 128
                 for t in 0..<seqLen {
                     let tokOff = t * dim * floatStride
                     let intOff = t * interDim * floatStride
@@ -1971,6 +1983,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                         enc.setBuffer(upRaw, offset: 0, index: 0)
                         enc.setBuffer(upOutBuf, offset: intOff, index: 2)
+                        enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    } else if let q1PSO = fusedQ1PSO, let gateRawQ1 = lw.gateRawQ1, let upRawQ1 = lw.upRawQ1 {
+                        // Q1_0_g128: raw Q1 GEMV
+                        enc.setComputePipelineState(q1PSO)
+                        var gateP = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDimQ1))
+                        enc.setBuffer(gateRawQ1, offset: 0, index: 0)
+                        enc.setBuffer(ffnNormedBuf, offset: tokOff, index: 1)
+                        enc.setBuffer(gateOutBuf, offset: intOff, index: 2)
+                        enc.setBytes(&gateP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                        enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                        enc.setComputePipelineState(q1PSO)
+                        enc.setBuffer(upRawQ1, offset: 0, index: 0)
+                        enc.setBuffer(upOutBuf, offset: intOff, index: 2)
+                        enc.setBytes(&gateP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                         enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     } else {
@@ -2003,6 +2031,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // 10+11. Fused down projection + residual add (saves 1 dispatch for seqLen=1)
             let blocksPerRowInterDim = interDim / 32
+            let blocksPerRowInterDimQ1 = interDim / 128
             if useQ8Fused && seqLen == 1, let downRaw = lw.downRaw {
                 let gemvAddPSO = gemvAddPipeline
                 enc.setComputePipelineState(gemvAddPSO)
@@ -2026,6 +2055,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
                         enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
                         enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
+                        enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    } else if let q1PSO = fusedQ1PSO, let downRawQ1 = lw.downRawQ1 {
+                        // Q1_0_g128: raw Q1 GEMV
+                        enc.setComputePipelineState(q1PSO)
+                        var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDimQ1))
+                        enc.setBuffer(downRawQ1, offset: 0, index: 0)
+                        enc.setBuffer(activBuf, offset: t * interDim * floatStride, index: 1)
+                        enc.setBuffer(downOutBuf, offset: t * dim * floatStride, index: 2)
+                        enc.setBytes(&downP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                         enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
                     } else {
@@ -2072,6 +2111,26 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(logitsBuf, offset: 0, index: 2)
             enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
             enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else if let lmRawQ1 = preloadedWeights.lmHeadRawQ1, let q1PSO = fusedQ1PSO {
+            // Q1_0_g128: raw Q1 GEMV for LM head
+            let finalOutputBuf = scratch.finalOut
+            var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
+            enc.setComputePipelineState(rmsNormPSO)
+            enc.setBuffer(currentHidden, offset: lastHiddenOff, index: 0)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 1)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 2)
+            enc.setBytes(&normP, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
+            enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+            let blocksPerRowQ1 = preloadedWeights.lmHeadCols / 128
+            var q1P = ERDequantGEMVParams(rows: UInt32(config.vocabSize), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowQ1))
+            enc.setComputePipelineState(q1PSO)
+            enc.setBuffer(lmRawQ1, offset: 0, index: 0)
+            enc.setBuffer(finalOutputBuf, offset: 0, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBytes(&q1P, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         } else {
