@@ -68,6 +68,20 @@ struct BonsaiBenchmark {
         model.resetGenerationState(keepDecodeWarmup: true)
         print("Warmup complete. Starting benchmark...\n")
 
+        // Profile LM head latency
+        print("=== LM Head Profiling ===")
+        do {
+            let lmHeadMs = try await model.measureLMHeadLatency(samples: 10)
+            let decodeMsPerToken = 1000.0 / 222.6  // from baseline
+            let lmHeadPct = (lmHeadMs / decodeMsPerToken) * 100
+            print("LM head avg latency: \(String(format: "%.2f", lmHeadMs)) ms")
+            print("Decode ms/token (total): \(String(format: "%.2f", decodeMsPerToken))")
+            print("LM head % of decode: \(String(format: "%.1f", lmHeadPct))%")
+        } catch {
+            print("LM head profiling failed: \(error)")
+        }
+        print()
+
         var timings: [Double] = []
 
         for run in 0..<5 {
