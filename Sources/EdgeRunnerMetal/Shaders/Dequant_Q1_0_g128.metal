@@ -271,19 +271,25 @@ kernel void dequant_q1_0_g128_fused_gate_up(
 /// Fused Q1_0_g128 GEMV with RMSNorm for LM head projection.
 /// Computes: logits = Q1_GEMV(RMSNorm(hidden)) in a single dispatch.
 /// Dispatch: (vocabSize + 255) / 256 threadgroups of 256 threads
+/// Buffer 4: packed params — uint2 dims (8 bytes) + float rmsEps (4 bytes) = 12 bytes
+struct Q1FusedLMHeadParams {
+    uint2 dims;  // x=vocabSize, y=dim
+    float rmsEps;
+};
+
 kernel void dequant_q1_0_g128_fused_final_norm_gemv(
     device const uchar* lmHeadW [[buffer(0)]],
     device const float* hidden [[buffer(1)]],
     device float* logits [[buffer(2)]],
     device const float* rmsNormW [[buffer(3)]],
-    constant uint2& dims [[buffer(4)]],  // x=vocabSize, y=dim
-    constant float& rmsEps [[buffer(5)]],
+    constant Q1FusedLMHeadParams& params [[buffer(4)]],
     uint ti [[thread_position_in_threadgroup]],
     uint tg [[threadgroup_position_in_grid]]
 ) {
     constexpr uint THREADS = 256;
-    const uint vocabSize = dims.x;
-    const uint dim = dims.y;
+    const uint vocabSize = params.dims.x;
+    const uint dim = params.dims.y;
+    const float rmsEps = params.rmsEps;
     const uint nb = dim / q1_0_g128WeightsPerBlock;
     const uint row = tg * THREADS + ti;
     if (row >= vocabSize) return;

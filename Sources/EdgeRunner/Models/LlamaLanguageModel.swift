@@ -1453,7 +1453,15 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let lmHeadName = tiedEmbeddingWeightName
             let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
             let lmHeadRawQ1Buf = makeRawQ1BufferIfAvailable(lmHeadName)
-            let lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
+            // For Q1 models, dequantize LM head at init time to avoid slow Q1 GEMV
+            let lmHeadBuf: MTLBuffer?
+            if let lmHeadRawBuf {
+                lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
+            } else if lmHeadRawQ1Buf != nil {
+                lmHeadBuf = try await readWeightBuffer(lmHeadName)
+            } else {
+                lmHeadBuf = nil
+            }
             let lmHeadCols = dim
 
             preloadedWeights.load(
@@ -2667,21 +2675,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        } else if let lmRawQ1 = preloadedWeights.lmHeadRawQ1,
-                  let fusedQ1PSO = fusedQ1FinalNormLMHeadPSO,
-                  !decodeDebugOptions.disableFusedFinalNormLMHead {
-            // Q1_0_g128 fused final norm + LM head
-            var lmDims = SIMD2<UInt32>(UInt32(config.vocabSize), UInt32(dim))
-            var lmRmsEps = rmsEps
-            enc.setComputePipelineState(fusedQ1PSO)
-            enc.setBuffer(lmRawQ1, offset: 0, index: 0)
-            enc.setBuffer(currentHidden, offset: 0, index: 1)
-            enc.setBuffer(logitsBuf, offset: 0, index: 2)
-            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
-            enc.setBytes(&lmDims, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 4)
-            enc.setBytes(&lmRmsEps, length: MemoryLayout<Float>.stride, index: 5)
-            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 255) / 256, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         } else {
             let finalOutputBuf = scratch.finalOut
             var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
@@ -2704,8 +2697,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else {
-                let lmHeadBuf = preloadedWeights.lmHead!
+            } else if let lmHeadBuf = preloadedWeights.lmHead {
+                // Float LM head (dequantized at init time for Q1 models)
                 enc.setComputePipelineState(gemvPSO)
                 var p = ERGEMVParams(M: UInt32(config.vocabSize), K: UInt32(dim), lda: UInt32(dim))
                 enc.setBuffer(lmHeadBuf, offset: 0, index: 0)
@@ -2713,6 +2706,20 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(logitsBuf, offset: 0, index: 2)
                 enc.setBytes(&p, length: MemoryLayout<ERGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            } else if let lmRawQ1 = preloadedWeights.lmHeadRawQ1,
+                      let fusedQ1PSO = fusedQ1FinalNormLMHeadPSO {
+                // Q1_0_g128 fused final norm + LM head (fallback if not dequantized)
+                var lmDims = SIMD2<UInt32>(UInt32(config.vocabSize), UInt32(dim))
+                var lmRmsEps = rmsEps
+                enc.setComputePipelineState(fusedQ1PSO)
+                enc.setBuffer(lmRawQ1, offset: 0, index: 0)
+                enc.setBuffer(currentHidden, offset: 0, index: 1)
+                enc.setBuffer(logitsBuf, offset: 0, index: 2)
+                enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+                enc.setBytes(&lmDims, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 4)
+                enc.setBytes(&lmRmsEps, length: MemoryLayout<Float>.stride, index: 5)
+                enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 255) / 256, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             }
         }
