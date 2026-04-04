@@ -742,16 +742,25 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Result:** 213 → 213 tok/s (no change) — LM head is memory-bound, not dequant-bound
 - **Status:** KEPT (no regression, enables future optimizations)
 
+### Bonsai Investigation: Q1_0_g128 GGUF tensor layout verification
+- **Hypothesis:** GGUF tensor dimensions are being misinterpreted
+- **Change:** Added comprehensive Q1_0_g128 infrastructure: dequantizeToFloatArray, fillEmbeddings, raw Q1 buffers (wqRawQ1, etc.), Q1 GEMV path in fusedDecodePass
+- **Result:** Model loads and runs at 223 tok/s but produces garbage ("FBFBFB..." repeating). Q1 GEMV kernel verified correct via unit tests (2048×2048 matrix test passes). Weight name mapping verified correct. GGUF tensor shape [2048, 151669] matches GGUF column-major spec.
+- **Status:** INCONCLUSIVE — model runs but output quality is broken. Tested with PrismML's llama.cpp fork — model works correctly there (coherent output at 236 tok/s). Root cause unidentified after extensive investigation.
+- **Verification:** Q1 GEMV kernel unit test passes with max error < 1.0 for 2048×2048 matrix. Dequantization single-block and multi-block tests pass.
+
 ## Current Performance
 
 | Metric | Value |
 |--------|-------|
 | Baseline (Exp 0) | 0.058 tok/s |
-| Qwen3 0.6B Q8_0 median | 202.4 tok/s |
-| Bonsai 1.7B Q1_0_g128 median | 213.9 tok/s |
-| **Total improvement** | **3,688x** |
+| Qwen3 0.6B Q8_0 median | 205.3 tok/s |
+| Bonsai 1.7B Q1_0_g128 (throughput) | 223 tok/s |
+| Bonsai 1.7B Q1_0_g128 (quality) | BROKEN — produces "FBFBFB..." |
+| Bonsai via PrismML llama.cpp | 236 tok/s, coherent output |
+| **Total improvement** | **3,540x** |
 | llama.cpp reference | 183 tok/s |
-| **vs llama.cpp** | **+11-17%** |
+| **vs llama.cpp** | **+12%** |
 
 ## 2x Target (444 tok/s) — FAILED
 
@@ -767,6 +776,21 @@ Root cause of Q1 GEMV crash: The `dequant_q1_0_g128_gemv` kernel crashes when us
 for the LM head (151K rows × 2048 cols). The kernel works correctly for layer weights
 (2048 rows × 2048 cols) but fails for the much larger LM head matrix. This suggests a
 threadgroup memory or index out-of-bounds issue in the kernel for large row counts.
+
+### Bonsai Quality Issue
+
+The Bonsai model loads and runs at 223 tok/s but produces garbage output ("FBFBFB..." repeating token 16208). Extensive investigation found:
+- Q1 GEMV kernel is correct (verified by unit tests with 2048×2048 matrices)
+- Weight name mapping is correct (GGUF → EdgeRunner names verified)
+- Tokenizer produces same token IDs as Qwen3
+- GGUF tensor shapes match GGUF column-major spec
+- Dequantization format matches PrismML's reference implementation
+- **PrismML's llama.cpp fork produces coherent output** (236 tok/s)
+
+The root cause remains unidentified. Possible causes:
+- Subtle GGUF tensor dimension misinterpretation
+- KV cache population issue during prefill for Q1_0_g128 weights
+- Numerical issue specific to Bonsai's weight distribution
 
 ## Current Performance
 
