@@ -727,36 +727,47 @@ The optimization removes redundant float32 weight caches that existed for a pref
 ### Bonsai Experiment 4: Q1_0_g128 Layer Decode Path
 - **Hypothesis:** Using Q1 raw buffers for layer weights instead of float-dequantized weights
 - **Change:** Added wqRawQ1/wkRawQ1/etc. buffers, Q1 GEMV dispatch path for QKV projections
-- **Result:** 216 tok/s — same as float baseline (Q1 GEMV ≈ float GEMV for single-token decode)
-- **Status:** KEPT (complete Q1 support)
+- **Result:** 216 → 46 tok/s (-79%) — Q1 on-the-fly dequant is SLOWER than pre-dequantized float
+- **Status:** ROLLED BACK — pre-dequantized float weights are faster for layers
+
+### Bonsai Experiment 5: Metal 4 Decode Path for Q1
+- **Hypothesis:** Metal 4 argument tables would cut dispatch overhead by 80%
+- **Change:** Added full Q1 dispatch paths to fusedDecodePassMetal4
+- **Result:** Only 2 tokens generated (EOS immediately) — Q1 Metal 4 path has correctness issues
+- **Status:** ROLLED BACK — Metal 4 disabled for Q1 models
+
+### Bonsai Experiment 6: Float LM Head Dequantization
+- **Hypothesis:** Dequantizing 151K×2048 LM head from Q1→float at init time would speed up LM head
+- **Change:** Dequantize LM head at load time; use float GEMV path instead of Q1 fused kernel
+- **Result:** 213 → 213 tok/s (no change) — LM head is memory-bound, not dequant-bound
+- **Status:** KEPT (no regression, enables future optimizations)
 
 ## Current Performance
 
 | Metric | Value |
 |--------|-------|
 | Baseline (Exp 0) | 0.058 tok/s |
-| Qwen3 0.6B Q8_0 median | 210.2 tok/s |
-| Bonsai 1.7B Q1_0_g128 median | 222.6 tok/s |
-| **Total improvement** | **3,838x** |
+| Qwen3 0.6B Q8_0 median | 202.4 tok/s |
+| Bonsai 1.7B Q1_0_g128 median | 213.9 tok/s |
+| **Total improvement** | **3,688x** |
 | llama.cpp reference | 183 tok/s |
-| **vs llama.cpp** | **+15-21%** |
+| **vs llama.cpp** | **+11-17%** |
 
-## Remaining Gap Analysis (Qwen3 0.6B)
+## 2x Target Analysis (400+ tok/s)
 
-At 204.9 tok/s = 4.88ms/token, the breakdown is:
-- GPU execution: ~3.4ms (604MB Q8_0 weights at ~177 GB/s effective)
-- CPU dispatch encoding: ~0.6ms (141 dispatches × ~4μs each)
-- Swift overhead + argmax: ~0.9ms
+Attempted optimizations that did NOT work:
+1. ✗ Fused Q1 QKV/Gate+Up kernels — 47% regression (separate GEMV is faster for Q1)
+2. ✗ Q1 raw layer weights — 79% regression (pre-dequantized float is faster)
+3. ✗ Metal 4 decode path for Q1 — correctness failure (only 2 tokens generated)
+4. ✗ Float LM head dequantization — no change (memory-bound, not compute-bound)
 
-## Remaining Gap Analysis (Bonsai 1.7B)
+Bottleneck breakdown at 213 tok/s (4.69ms/token):
+- LM head (151K×2048): ~1.88ms (40%) — memory bandwidth limited
+- 28 layers: ~2.6ms (55%) — ~93μs per layer, ~15 dispatches each
+- Other (RMSNorm, argmax, Swift overhead): ~0.21ms (5%)
 
-At 222 tok/s = 4.5ms/token:
-- LM head: 1.86ms (41.5%) — 151K vocab × 2048 dim Q1_0_g128
-- 28 layers: ~2.6ms (58.5%) — ~93μs per layer
-- Per-layer breakdown: RMSNorm + QKV(3) + V-convert + barrier + GQA + Wo(2) + RMSNorm + Gate(2) + Up + SwiGLU + Down(2) = ~15 dispatches
-
-The remaining gap to 1000 tok/s requires:
-1. **ICB (Indirect Command Buffers)** — pre-record decode pass for Q1 models
-2. **Metal 4 path for Q1** — argument table approach with zero setBytes overhead
-3. **Speculative decoding** — draft multiple tokens, verify in batch
-4. **Speculative sampling with draft model** — use smaller model to propose tokens
+Realistic paths to 2x:
+1. **Speculative decoding** — draft 2-3 tokens, verify with full model
+2. **Batched decode** — process multiple tokens simultaneously
+3. **Smaller model** — not applicable (Bonsai is already the target)
+4. **Custom fused layer kernel** — entire layer in 1-2 dispatches (complex, high risk)
