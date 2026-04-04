@@ -267,3 +267,90 @@ kernel void dequant_q1_0_g128_fused_gate_up(
         }
     }
 }
+
+/// Fused Q1_0_g128 GEMV with RMSNorm for LM head projection.
+/// Computes: logits = Q1_GEMV(RMSNorm(hidden)) in a single dispatch.
+/// Dispatch: (vocabSize + 255) / 256 threadgroups of 256 threads
+kernel void dequant_q1_0_g128_fused_final_norm_gemv(
+    device const uchar* lmHeadW [[buffer(0)]],
+    device const float* hidden [[buffer(1)]],
+    device float* logits [[buffer(2)]],
+    device const float* rmsNormW [[buffer(3)]],
+    constant uint2& dims [[buffer(4)]],  // x=vocabSize, y=dim
+    constant float& rmsEps [[buffer(5)]],
+    uint ti [[thread_position_in_threadgroup]],
+    uint tg [[threadgroup_position_in_grid]]
+) {
+    constexpr uint THREADS = 256;
+    const uint vocabSize = dims.x;
+    const uint dim = dims.y;
+    const uint nb = dim / q1_0_g128WeightsPerBlock;
+    const uint row = tg * THREADS + ti;
+    if (row >= vocabSize) return;
+
+    // Phase 1: Compute RMSNorm of hidden in threadgroup memory
+    threadgroup float xNorm[2048];
+    const uint floatsPerThread = (dim + THREADS - 1) / THREADS;
+    const uint loadStart = ti * floatsPerThread;
+    const uint loadEnd = min(loadStart + floatsPerThread, dim);
+
+    // First pass: compute sum of squares
+    float localSumSq = 0.f;
+    for (uint i = loadStart; i < loadEnd; i++) {
+        localSumSq += hidden[i] * hidden[i];
+    }
+
+    // Reduce across threads in threadgroup
+    threadgroup float sharedSum[256];
+    sharedSum[ti] = localSumSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Simple tree reduction
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (ti < s) {
+            sharedSum[ti] += sharedSum[ti + s];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float invRms = rsqrt(sharedSum[0] * (1.0f / float(dim)) + rmsEps);
+
+    // Second pass: normalize and cache
+    for (uint i = loadStart; i < loadEnd; i++) {
+        xNorm[i] = hidden[i] * invRms * rmsNormW[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Compute GEMV for this row
+    float sum = 0.f;
+    device const uchar* wRow = lmHeadW + row * nb * q1_0_g128BlockBytes;
+
+    for (uint ib = 0; ib < nb; ib++) {
+        device const uchar* block = wRow + ib * q1_0_g128BlockBytes;
+        float scale = float(as_type<half>(*(device const ushort*)(block)));
+        device const uchar* qs = block + 2;
+        const uint xBase = ib * q1_0_g128WeightsPerBlock;
+
+        for (uint bi = 0; bi < 16; bi++) {
+            uchar bits = qs[bi];
+            const uint eb = xBase + bi * 8;
+            float4 xv0 = float4(xNorm[eb],   xNorm[eb+1], xNorm[eb+2], xNorm[eb+3]);
+            float4 xv1 = float4(xNorm[eb+4], xNorm[eb+5], xNorm[eb+6], xNorm[eb+7]);
+            float4 s0 = float4(
+                (((bits >> 0) & 1) * 2 - 1) * scale,
+                (((bits >> 1) & 1) * 2 - 1) * scale,
+                (((bits >> 2) & 1) * 2 - 1) * scale,
+                (((bits >> 3) & 1) * 2 - 1) * scale
+            );
+            float4 s1 = float4(
+                (((bits >> 4) & 1) * 2 - 1) * scale,
+                (((bits >> 5) & 1) * 2 - 1) * scale,
+                (((bits >> 6) & 1) * 2 - 1) * scale,
+                (((bits >> 7) & 1) * 2 - 1) * scale
+            );
+            sum += dot(s0, xv0) + dot(s1, xv1);
+        }
+    }
+
+    logits[row] = sum;
+}

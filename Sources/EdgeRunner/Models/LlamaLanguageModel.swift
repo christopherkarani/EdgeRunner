@@ -148,6 +148,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let dequantQ2K: DequantQ2KKernel
     private let dequantQ5_0: DequantQ5_0Kernel
     private let dequantQ5_1: DequantQ5_1Kernel
+    private let dequantQ1_0_g128: DequantQ1_0_g128Kernel?
     private let turboQuantKernel: TurboQuantKernel?
     private let turboQuantLayout: TurboQuantLayout?
 
@@ -256,6 +257,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.dequantQ2K = try DequantQ2KKernel(device: device)
         self.dequantQ5_0 = try DequantQ5_0Kernel(device: device)
         self.dequantQ5_1 = try DequantQ5_1Kernel(device: device)
+        self.dequantQ1_0_g128 = try? DequantQ1_0_g128Kernel(device: device)
         self.turboQuantKernel = resolvedKVCacheCompression == .disabled ? nil : try TurboQuantKernel(device: device)
         let turboPreset: TurboQuantPreset?
         switch resolvedKVCacheCompression {
@@ -1440,6 +1442,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
             let lmHeadName = tiedEmbeddingWeightName
             let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
+            let lmHeadRawQ1Buf = makeRawQ1BufferIfAvailable(lmHeadName)
             let lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
             let lmHeadCols = dim
 
@@ -1448,6 +1451,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 finalNorm: try await readWeightBuffer("finalNorm.weight"),
                 lmHead: lmHeadBuf,
                 lmHeadRaw: lmHeadRawBuf,
+                lmHeadRawQ1: lmHeadRawQ1Buf,
                 lmHeadCols: lmHeadCols
             )
 
@@ -2110,6 +2114,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         _ = fusedQ8GemvPipeline  // Unused: we use tiled variant for decode
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
+        let fusedQ1FinalNormLMHeadPSO = dequantQ1_0_g128?.fusedFinalNormLMHeadPSO
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -2620,6 +2625,21 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBytes(&p, length: MemoryLayout<FusedGateUpSiluParams>.stride, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 1) / 2, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else if let lmRawQ1 = preloadedWeights.lmHeadRawQ1,
+                  let fusedQ1PSO = fusedQ1FinalNormLMHeadPSO,
+                  !decodeDebugOptions.disableFusedFinalNormLMHead {
+            // Q1_0_g128 fused final norm + LM head
+            var lmDims = SIMD2<UInt32>(UInt32(config.vocabSize), UInt32(dim))
+            var lmRmsEps = rmsEps
+            enc.setComputePipelineState(fusedQ1PSO)
+            enc.setBuffer(lmRawQ1, offset: 0, index: 0)
+            enc.setBuffer(currentHidden, offset: 0, index: 1)
+            enc.setBuffer(logitsBuf, offset: 0, index: 2)
+            enc.setBuffer(preloadedWeights.finalNorm!, offset: 0, index: 3)
+            enc.setBytes(&lmDims, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 4)
+            enc.setBytes(&lmRmsEps, length: MemoryLayout<Float>.stride, index: 5)
+            enc.dispatchThreadgroups(MTLSize(width: (config.vocabSize + 255) / 256, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         } else {
             let finalOutputBuf = scratch.finalOut
             var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
@@ -3465,6 +3485,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         )
     }
 
+    /// Exposes the original Q1_0_g128 payload without materializing a Float32 copy.
+    private func makeRawQ1BufferIfAvailable(_ name: String) -> MTLBuffer? {
+        guard let storage = weights[name], storage.dataType == .q1_0_g128 else {
+            return nil
+        }
+
+        let blockCount = storage.elementCount / 128
+        let byteCount = blockCount * 18
+        return device.makeBuffer(
+            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+            length: byteCount,
+            options: .storageModeShared,
+            deallocator: nil
+        )
+    }
+
     /// Float32 fallback buffers are only needed when a fused raw Q8 path is unavailable.
     private func readWeightBufferIfNeeded(_ name: String, rawBuffer: MTLBuffer?) async throws -> MTLBuffer? {
         guard rawBuffer == nil else {
@@ -4174,15 +4210,17 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
     private(set) var lmHead: MTLBuffer?
     private(set) var isLoaded = false
     private(set) var lmHeadRaw: MTLBuffer?
+    private(set) var lmHeadRawQ1: MTLBuffer?
     private(set) var lmHeadCols: Int = 0
     func load(layers: [LayerWeightBuffers], finalNorm: MTLBuffer, lmHead: MTLBuffer?,
-              lmHeadRaw: MTLBuffer? = nil, lmHeadCols: Int = 0) {
+              lmHeadRaw: MTLBuffer? = nil, lmHeadRawQ1: MTLBuffer? = nil, lmHeadCols: Int = 0) {
         lock.lock()
         defer { lock.unlock() }
         self.layers = layers
         self.finalNorm = finalNorm
         self.lmHead = lmHead
         self.lmHeadRaw = lmHeadRaw
+        self.lmHeadRawQ1 = lmHeadRawQ1
         self.lmHeadCols = lmHeadCols
         self.isLoaded = true
     }
