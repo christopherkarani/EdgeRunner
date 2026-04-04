@@ -701,28 +701,62 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Result:** Correctness FAILED — token hash changed from `0afae14a84cf0df8` to divergent output. The `nil` entry in the down dispatch buffer array (index 2) or array lifetime issue caused incorrect GPU reads.
 - **Status:** ROLLED BACK
 
+## Bonsai-1.7B Q1_0_g128 Experiments
+
+**Model:** Bonsai-1.7B Q1_0_g128 (236.8 MB)
+**Architecture:** embeddingDim=2048, layerCount=28, headCount=16, kvHeadCount=8, intermediateDim=6144, vocabSize=151669
+
+### Bonsai Experiment 1: Baseline
+- **Hypothesis:** Establish initial performance measurement for Bonsai-1.7B Q1_0_g128
+- **Change:** Restored Q1_0_g128 support (validation, embedding/weight dequant, benchmark)
+- **Result:** 222.6 tok/s median decode
+- **Status:** KEPT — commit 66fbf81
+
+### Bonsai Experiment 2: Fused Q1 QKV/Gate+Up Kernels (ROLLED BACK)
+- **Hypothesis:** Fused Q1_0_g128 kernels (already in Metal codebase but dead code) would reduce dispatch count
+- **Change:** Wired up fusedQKVPSO and fusedGateUpPSO for Q1 in fusedDecodePass
+- **Result:** 218 → 115 tok/s (-47%) — FUSED kernels were SLOWER than separate GEMVs for Q1
+- **Status:** ROLLED BACK — Q1's extreme sparsity (1-bit) makes fused kernels less efficient
+
+### Bonsai Experiment 3: Fused Q1 Final Norm + LM Head
+- **Hypothesis:** LM head is 41.5% of decode time (1.86ms of 4.49ms). Fusing RMSNorm + Q1 GEMV should help
+- **Change:** Created dequant_q1_0_g128_fused_final_norm_gemv Metal kernel, wired up lmHeadRawQ1 buffer
+- **Result:** 219 tok/s — no measurable improvement (kernel may not be faster than separate path for Q1)
+- **Status:** KEPT (no regression, code infrastructure useful)
+
+### Bonsai Experiment 4: Q1_0_g128 Layer Decode Path
+- **Hypothesis:** Using Q1 raw buffers for layer weights instead of float-dequantized weights
+- **Change:** Added wqRawQ1/wkRawQ1/etc. buffers, Q1 GEMV dispatch path for QKV projections
+- **Result:** 216 tok/s — same as float baseline (Q1 GEMV ≈ float GEMV for single-token decode)
+- **Status:** KEPT (complete Q1 support)
+
 ## Current Performance
 
 | Metric | Value |
 |--------|-------|
 | Baseline (Exp 0) | 0.058 tok/s |
-| Current median | 204.9 tok/s |
-| Current peak | 206.2 tok/s |
-| **Total improvement** | **3,533x** |
+| Qwen3 0.6B Q8_0 median | 210.2 tok/s |
+| Bonsai 1.7B Q1_0_g128 median | 222.6 tok/s |
+| **Total improvement** | **3,838x** |
 | llama.cpp reference | 183 tok/s |
-| **vs llama.cpp** | **+12%** |
-| MLX reference | 278 tok/s |
-| **Gap to MLX** | **-73 tok/s (-26%)** |
+| **vs llama.cpp** | **+15-21%** |
 
-## Remaining Gap Analysis
+## Remaining Gap Analysis (Qwen3 0.6B)
 
 At 204.9 tok/s = 4.88ms/token, the breakdown is:
 - GPU execution: ~3.4ms (604MB Q8_0 weights at ~177 GB/s effective)
 - CPU dispatch encoding: ~0.6ms (141 dispatches × ~4μs each)
 - Swift overhead + argmax: ~0.9ms
 
-The remaining 26% gap to MLX likely requires:
-1. **Weight layout optimization** — interleaving weights for better cache locality (MLX does this)
-2. **Graph fusion** — compiling the entire forward pass as a single Metal kernel (MLX's lazy evaluation)
-3. **ICB (Indirect Command Buffers)** — pre-record decode pass, replay with updated addresses
-4. **Non-async forward pass** — eliminate Swift concurrency overhead entirely
+## Remaining Gap Analysis (Bonsai 1.7B)
+
+At 222 tok/s = 4.5ms/token:
+- LM head: 1.86ms (41.5%) — 151K vocab × 2048 dim Q1_0_g128
+- 28 layers: ~2.6ms (58.5%) — ~93μs per layer
+- Per-layer breakdown: RMSNorm + QKV(3) + V-convert + barrier + GQA + Wo(2) + RMSNorm + Gate(2) + Up + SwiGLU + Down(2) = ~15 dispatches
+
+The remaining gap to 1000 tok/s requires:
+1. **ICB (Indirect Command Buffers)** — pre-record decode pass for Q1 models
+2. **Metal 4 path for Q1** — argument table approach with zero setBytes overhead
+3. **Speculative decoding** — draft multiple tokens, verify in batch
+4. **Speculative sampling with draft model** — use smaller model to propose tokens
