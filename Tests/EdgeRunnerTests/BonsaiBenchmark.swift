@@ -7,7 +7,7 @@ import Foundation
 
 @Suite("Bonsai 1.7B Benchmark")
 struct BonsaiBenchmark {
-    static let modelPath = "/tmp/edgerunner-models/Bonsai-1.7B.gguf"
+    static let modelPath = (NSHomeDirectory() as NSString).appendingPathComponent("edgerunner-models/Bonsai-1.7B.gguf")
 
     @Test("Bonsai 1.7B Q1_0_g128 coherence check")
     func bonsaiCoherenceCheck() async throws {
@@ -16,69 +16,50 @@ struct BonsaiBenchmark {
             return
         }
 
-        // Load weight map to inspect Q1 tensor details
+        // Load weight map to check tensor details
         let loader = try GGUFLoader(url: URL(fileURLWithPath: Self.modelPath))
         let weightMap = try await loader.load(from: URL(fileURLWithPath: Self.modelPath))
 
-        // Check a specific Q1 tensor
-        let qName = "blk.0.attn_q.weight"
-        if let qStorage = weightMap[qName] {
-            let ec = qStorage.elementCount
-            let bc = ec / 128
-            let expectedBytes = bc * 18
-            print("=== \(qName) ===")
-            print("  shape=\(qStorage.shape), elementCount=\(ec)")
-            print("  blocks=\(bc), expectedBytes=\(expectedBytes)")
-            print("  actualBufferLength=\(qStorage.byteCount)")
+        // Check embedding table
+        let embdName = weightMap.tensorNames.first { $0.contains("token_embd") } ?? ""
+        if let embdStorage = weightMap[embdName] {
+            print("=== Embedding table ===")
+            print("  name=\(embdName), shape=\(embdStorage.shape), dtype=\(embdStorage.dataType)")
+            print("  elementCount=\(embdStorage.elementCount)")
+            print("  byteCount=\(embdStorage.byteCount)")
 
-            // Read first block directly from GGUF
-            let basePtr = qStorage.buffer.contents() + qStorage.byteOffset
-            let rawPtr = basePtr.bindMemory(to: UInt8.self, capacity: min(36, qStorage.byteCount))
-            let scale0 = Float(Float16(bitPattern: UInt16(rawPtr[0]) | (UInt16(rawPtr[1]) << 8)))
-            let scale1 = Float(Float16(bitPattern: UInt16(rawPtr[18]) | (UInt16(rawPtr[19]) << 8)))
-            print("  Block 0 scale=\(String(format: "%.4f", scale0)), bits=0x\(String(rawPtr[2], radix: 16))")
-            print("  Block 1 scale=\(String(format: "%.4f", scale1)), bits=0x\(String(rawPtr[20], radix: 16))")
+            // Check BOS token (151643) embedding
+            let dim = 2048
+            let blocksPerRow = dim / 128
+            let bytesPerRow = blocksPerRow * 18
+            let bosOffset = 151643 * bytesPerRow
+            let basePtr = embdStorage.buffer.contents() + embdStorage.byteOffset
+            let rawPtr = basePtr.bindMemory(to: UInt8.self, capacity: embdStorage.byteCount)
 
-            // Dequantize first block manually
-            let bits = rawPtr[2]
-            var dequantBlock0 = [String]()
-            for k in 0..<8 {
-                let bit = (bits >> k) & 1
-                let val = bit == 1 ? scale0 : -scale0
-                dequantBlock0.append(String(format: "%+.4f", val))
+            if bosOffset + 18 <= embdStorage.byteCount {
+                let scaleBits = UInt16(rawPtr[bosOffset]) | (UInt16(rawPtr[bosOffset + 1]) << 8)
+                let scale = Float(Float16(bitPattern: scaleBits))
+                let bits = rawPtr[bosOffset + 2]
+                print("  BOS token embedding: scale=\(String(format: "%.4f", scale)), bits=0x\(String(bits, radix: 16))")
             }
-            print("  Block 0 first 8 weights: \(dequantBlock0.joined(separator: " "))")
+
+            // Also check token 1 embedding
+            let token1Offset = 1 * bytesPerRow
+            if token1Offset + 18 <= embdStorage.byteCount {
+                let scaleBits = UInt16(rawPtr[token1Offset]) | (UInt16(rawPtr[token1Offset + 1]) << 8)
+                let scale = Float(Float16(bitPattern: scaleBits))
+                let bits = rawPtr[token1Offset + 2]
+                print("  Token 1 embedding: scale=\(String(format: "%.4f", scale)), bits=0x\(String(bits, radix: 16))")
+            }
         }
 
-        // Check mapped name
-        let mappedName = LlamaWeightNameMapper.mapGGUFName(qName)
-        print("\nMapped name: \(qName) → \(mappedName)")
-        if let mappedStorage = weightMap[mappedName] {
-            print("  Found as \(mappedName): shape=\(mappedStorage.shape), dtype=\(mappedStorage.dataType)")
-        } else {
-            print("  NOT FOUND as \(mappedName)")
-        }
-
-        // Load model and verify weights
+        // Load model and test
         let model = try await LlamaLanguageModel.load(
             from: URL(fileURLWithPath: Self.modelPath),
             configuration: ModelConfiguration(contextWindowSize: 2048)
         )
 
-        print("\n=== Test 1: Hello prompt ===")
-        var tokenIDs = model.tokenize("Hello")
-        if let bos = model.bosTokenID, tokenIDs.first != bos {
-            tokenIDs.insert(bos, at: 0)
-        }
-        print("Prompt tokens: \(tokenIDs)")
-        for i in 0..<4 {
-            let result = try await model.greedyToken(for: tokenIDs)
-            tokenIDs.append(result.token)
-            print("  Token \(i): ID=\(result.token), text='\(model.detokenize([result.token]))'")
-        }
-
-        // Test 2: Use benchmark-style seed [1]
-        print("\n=== Test 2: Seed [1] (like benchmark) ===")
+        print("\n=== Test: Seed [1] ===")
         var seedIDs = [1]
         for i in 0..<8 {
             let result = try await model.greedyToken(for: seedIDs)
@@ -87,8 +68,19 @@ struct BonsaiBenchmark {
             if result.token == 151645 || result.token == 2 || result.token == 0 { break }
         }
 
-        // Test 3: BOS token only
-        print("\n=== Test 3: BOS token [151643] ===")
+        print("\n=== Test: 'Hello' ===")
+        var helloIDs = model.tokenize("Hello")
+        if let bos = model.bosTokenID, helloIDs.first != bos {
+            helloIDs.insert(bos, at: 0)
+        }
+        print("  Prompt IDs: \(helloIDs)")
+        for i in 0..<4 {
+            let result = try await model.greedyToken(for: helloIDs)
+            helloIDs.append(result.token)
+            print("  Token \(i): ID=\(result.token), text='\(model.detokenize([result.token]))'")
+        }
+
+        print("\n=== Test: BOS only ===")
         guard let bos = model.bosTokenID else { return }
         var bosIDs = [bos]
         for i in 0..<4 {
@@ -96,24 +88,66 @@ struct BonsaiBenchmark {
             bosIDs.append(result.token)
             print("  Token \(i): ID=\(result.token), text='\(model.detokenize([result.token]))'")
         }
+    }
 
-        // Test 4: Compare with Qwen3 on same seed [1]
-        print("\n=== Test 4: Qwen3 seed [1] ===")
-        let qwen3Path = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
-        guard FileManager.default.fileExists(atPath: qwen3Path) else {
-            print("Qwen3 not found")
+    @Test("Bonsai 1.7B Q1_0_g128 end-to-end benchmark")
+    func bonsaiEndToEndBenchmark() async throws {
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            #expect(Bool(false), "Bonsai model not found at \(Self.modelPath)")
             return
         }
-        let qwen3 = try await LlamaLanguageModel.load(
-            from: URL(fileURLWithPath: qwen3Path),
+
+        let model = try await LlamaLanguageModel.load(
+            from: URL(fileURLWithPath: Self.modelPath),
             configuration: ModelConfiguration(contextWindowSize: 2048)
         )
-        var qwen3IDs = [1]
-        for i in 0..<8 {
-            let result = try await qwen3.greedyToken(for: qwen3IDs)
-            qwen3IDs.append(result.token)
-            print("  Token \(i): ID=\(result.token), text='\(qwen3.detokenize([result.token]))'")
-            if result.token == 151645 || result.token == 2 || result.token == 0 { break }
+
+        let prompt = "Explain quantum computing in simple terms:"
+        var tokenIDs = model.tokenize(prompt)
+        if let bos = model.bosTokenID, tokenIDs.first != bos {
+            tokenIDs.insert(bos, at: 0)
         }
+        let promptTokenIDs = tokenIDs
+
+        // Warmup
+        var warmupTokens = Array(tokenIDs)
+        for _ in 0..<4 {
+            let result = try await model.greedyToken(for: warmupTokens)
+            warmupTokens.append(result.token)
+        }
+        model.resetGenerationState(keepDecodeWarmup: true)
+
+        var timings: [Double] = []
+        for run in 0..<5 {
+            var tokenIDs = Array(promptTokenIDs)
+            let clock = ContinuousClock()
+            let startTime = clock.now
+            let firstResult = try await model.greedyToken(for: tokenIDs)
+            let prefillDuration = startTime.duration(to: clock.now)
+            let ttftMs = (Double(prefillDuration.components.seconds) + Double(prefillDuration.components.attoseconds) * 1e-18) * 1000.0
+            tokenIDs.append(firstResult.token)
+            var generatedCount = 1
+
+            for _ in 1..<128 {
+                let result = try await model.greedyToken(for: tokenIDs)
+                tokenIDs.append(result.token)
+                generatedCount += 1
+                if result.token == 151645 || result.token == 2 || result.token == 0 { break }
+            }
+
+            let totalDuration = startTime.duration(to: clock.now)
+            let totalSeconds = Double(totalDuration.components.seconds) + Double(totalDuration.components.attoseconds) * 1e-18
+            let decodeSeconds = totalSeconds - (ttftMs / 1000.0)
+            let decodeTokens = generatedCount - 1
+            let decodeTokPerSec = decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0
+            timings.append(decodeTokPerSec)
+            print("Run \(run): decode=\(String(format: "%.1f", decodeTokPerSec)) tok/s  tokens=\(generatedCount)  ttft=\(String(format: "%.1f", ttftMs))ms")
+            model.resetGenerationState(keepDecodeWarmup: true)
+        }
+
+        let sortedTimings = timings.sorted()
+        let median = sortedTimings[sortedTimings.count / 2]
+        print("\nMedian decode: \(String(format: "%.1f", median)) tok/s")
+        #expect(Bool(true), "Bonsai benchmark completed: \(String(format: "%.1f", median)) tok/s")
     }
 }
