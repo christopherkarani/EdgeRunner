@@ -1449,11 +1449,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     wqRawQ1: wqRawQ1, wkRawQ1: wkRawQ1, wvRawQ1: wvRawQ1, woRawQ1: woRawQ1,
                     gateRawQ1: gateRawQ1, upRawQ1: upRawQ1, downRawQ1: downRawQ1
                 ))
-                if i == 0 {
-                    let lastLayer = layers.last!
-                    print("DEBUG layer 0: wqRaw=\(lastLayer.wqRaw != nil), wqRawQ1=\(lastLayer.wqRawQ1 != nil), wqBuf=\(lastLayer.wq != nil)")
-                    if let b = lastLayer.wqRawQ1 { print("DEBUG: wqRawQ1 bytes=\(b.length)") }
-                }
             }
             let lmHeadName = tiedEmbeddingWeightName
             let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
