@@ -4196,6 +4196,15 @@ private struct LayerWeightBuffers {
     let gateRaw: MTLBuffer?
     let upRaw: MTLBuffer?
     let downRaw: MTLBuffer?
+
+    // Raw Q1_0_g128 quantized weight buffers (nil if not Q1_0_g128)
+    let wqRawQ1: MTLBuffer?
+    let wkRawQ1: MTLBuffer?
+    let wvRawQ1: MTLBuffer?
+    let woRawQ1: MTLBuffer?
+    let gateRawQ1: MTLBuffer?
+    let upRawQ1: MTLBuffer?
+    let downRawQ1: MTLBuffer?
 }
 
 /// Thread-safe store for pre-loaded weights. Write-once during first forward pass,
