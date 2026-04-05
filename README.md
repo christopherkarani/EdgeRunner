@@ -194,8 +194,3 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and solutions.
 
 MIT License. See [LICENSE](LICENSE) for details.
 
-## Acknowledgments
-
-- Inspired by [llama.cpp](https://github.com/ggerganov/llama.cpp) and [MLX](https://github.com/ml-explore/mlx)
-- GGUF format by Georgi Gerganov
-- Qwen models by Alibaba Cloud
