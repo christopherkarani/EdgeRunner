@@ -814,3 +814,27 @@ The root cause remains unidentified. Possible causes:
 To reach 444 tok/s (2.25ms/token), would need to eliminate ~2.25ms. The LM head alone
 takes 1.8ms, and the 28 layers take 2.5ms. No single optimization can cut both in half
 without a draft model or architectural change.
+
+### Experiment 45: Qwen3 0.6B Autoresearch Session — ICB Exploration (ROLLED BACK)
+- **Hypothesis:** Metal Indirect Command Buffers (ICB) eliminate per-dispatch encoding overhead (~0.3ms/decode)
+- **Change:** Wired in pre-recorded ICB decode path from `icb_fast_path.swift` as primary decode path
+- **Correctness:** PASSED — [1, 1479, 35, 5371, 1] preserved, token hash 0afae14a84cf0df8
+- **Result:** 214 → 214 tok/s (NO CHANGE) — ICB execute + waitUntilCompleted has same wall-clock cost as regular dispatch encoding on this code state
+- **Root cause:** The 0.3ms dispatch encoding is CPU-side and overlaps with GPU execution. The `waitUntilCompleted()` synchronous wait introduces Swift async scheduling jitter that cancels the encoding savings.
+- **Status:** ROLLED BACK
+- **Additional finding:** Current Qwen3 baseline on this branch is 214 tok/s median, significantly below the 363 tok/s peak from Exp 20. This suggests earlier optimizations were rolled back or the code diverged during Q1_0_g128 Bonsai work.
+
+## Qwen3 0.6B Current Baseline (Post-Bonsai Branch)
+
+| Metric | Value |
+|--------|-------|
+| Baseline (this session) | 214 tok/s median, 215 peak |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| TTFT median | 4.1 ms |
+| Decode latency | 4.67 ms/token |
+| vs historical peak (363) | -41% (code divergence) |
+
+The 214 tok/s represents the current code state's genuine performance ceiling. Reaching higher requires:
+1. Re-applying kernel fusion optimizations that may have been lost
+2. Non-async forward pass (Protocol change)
+3. Metal ICB with async completion (not waitUntilCompleted)
