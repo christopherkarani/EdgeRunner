@@ -970,7 +970,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         if !decodeDebugOptions.requiresBaseDecodePath,
            decodeDebugOptions.preferMetal4DecodePath,
            #available(macOS 26.0, iOS 26.0, *),
-           let m4 = metal4State {
+           let m4 = metal4State,
+           preloadedWeights.layers.first?.wqRaw != nil {
             return try await fusedDecodePassMetal4(
                 hiddenBuf: hiddenBuf,
                 currentPos: currentPos,
@@ -990,7 +991,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         if !decodeDebugOptions.requiresBaseDecodePath,
            #available(macOS 26.0, iOS 26.0, *),
-           let m4 = metal4State {
+           let m4 = metal4State,
+           preloadedWeights.layers.first?.wqRaw != nil {
             return try await fusedDecodePassMetal4(
                 hiddenBuf: hiddenBuf,
                 currentPos: currentPos,
