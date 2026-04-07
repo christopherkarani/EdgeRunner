@@ -71,9 +71,6 @@ public actor EdgeRunner {
             let task = Task {
                 do {
                     var tokenIDs = model.tokenize(prompt)
-                    if let bos = model.bosTokenID, tokenIDs.first != bos {
-                        tokenIDs.insert(bos, at: 0)
-                    }
                     for _ in 0..<maxTokens {
                         try Task.checkCancellation()
                         let tokenID = try await model.nextToken(

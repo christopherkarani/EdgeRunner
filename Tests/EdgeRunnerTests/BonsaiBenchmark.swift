@@ -54,7 +54,7 @@ struct BonsaiBenchmark {
         }
 
         // Load model and test
-        let model = try await LlamaLanguageModel.load(
+        let model = try await BonsaiLanguageModel.load(
             from: URL(fileURLWithPath: Self.modelPath),
             configuration: ModelConfiguration(contextWindowSize: 2048)
         )
@@ -70,9 +70,6 @@ struct BonsaiBenchmark {
 
         print("\n=== Test: 'Hello' ===")
         var helloIDs = model.tokenize("Hello")
-        if let bos = model.bosTokenID, helloIDs.first != bos {
-            helloIDs.insert(bos, at: 0)
-        }
         print("  Prompt IDs: \(helloIDs)")
         for i in 0..<4 {
             let result = try await model.greedyToken(for: helloIDs)
@@ -80,13 +77,14 @@ struct BonsaiBenchmark {
             print("  Token \(i): ID=\(result.token), text='\(model.detokenize([result.token]))'")
         }
 
-        print("\n=== Test: BOS only ===")
-        guard let bos = model.bosTokenID else { return }
-        var bosIDs = [bos]
-        for i in 0..<4 {
-            let result = try await model.greedyToken(for: bosIDs)
-            bosIDs.append(result.token)
+        print("\n=== Test: realistic prompt ===")
+        var promptIDs = model.tokenize("The capital of France is")
+        print("  Prompt IDs: \(promptIDs)")
+        for i in 0..<6 {
+            let result = try await model.greedyToken(for: promptIDs)
+            promptIDs.append(result.token)
             print("  Token \(i): ID=\(result.token), text='\(model.detokenize([result.token]))'")
+            if result.token == model.eosTokenID { break }
         }
     }
 
@@ -97,16 +95,13 @@ struct BonsaiBenchmark {
             return
         }
 
-        let model = try await LlamaLanguageModel.load(
+        let model = try await BonsaiLanguageModel.load(
             from: URL(fileURLWithPath: Self.modelPath),
             configuration: ModelConfiguration(contextWindowSize: 2048)
         )
 
         let prompt = "Explain quantum computing in simple terms:"
-        var tokenIDs = model.tokenize(prompt)
-        if let bos = model.bosTokenID, tokenIDs.first != bos {
-            tokenIDs.insert(bos, at: 0)
-        }
+        let tokenIDs = model.tokenize(prompt)
         let promptTokenIDs = tokenIDs
 
         // Warmup
@@ -149,5 +144,48 @@ struct BonsaiBenchmark {
         let median = sortedTimings[sortedTimings.count / 2]
         print("\nMedian decode: \(String(format: "%.1f", median)) tok/s")
         #expect(Bool(true), "Bonsai benchmark completed: \(String(format: "%.1f", median)) tok/s")
+    }
+
+    @Test("Bonsai 1.7B LM head profile")
+    func bonsaiLMHeadProfile() async throws {
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            #expect(Bool(false), "Bonsai model not found at \(Self.modelPath)")
+            return
+        }
+
+        let model = try await BonsaiLanguageModel.load(
+            from: URL(fileURLWithPath: Self.modelPath),
+            configuration: ModelConfiguration(contextWindowSize: 2048)
+        )
+
+        var warmupTokens = model.tokenize("Explain quantum computing in simple terms:")
+        let warmup = try await model.greedyToken(for: warmupTokens)
+        warmupTokens.append(warmup.token)
+
+        let lmHeadMs = try await model.measureLMHeadLatency(samples: 5)
+        print("BONSAI_PROFILE: lm_head_ms \(String(format: "%.3f", lmHeadMs))")
+        #expect(Bool(true), "Bonsai LM head profile completed")
+    }
+
+    @Test("Bonsai 1.7B Q1 projection profile")
+    func bonsaiQ1ProjectionProfile() async throws {
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            #expect(Bool(false), "Bonsai model not found at \(Self.modelPath)")
+            return
+        }
+
+        let model = try await BonsaiLanguageModel.load(
+            from: URL(fileURLWithPath: Self.modelPath),
+            configuration: ModelConfiguration(contextWindowSize: 2048)
+        )
+
+        let warmupPrompt = model.tokenize("Explain quantum computing in simple terms:")
+        _ = try await model.greedyToken(for: warmupPrompt)
+
+        let results = try await model.measureQ1ProjectionLatencies(samples: 5)
+        for (name, milliseconds) in results {
+            print("BONSAI_PROFILE: q1_\(name)_ms \(String(format: "%.3f", milliseconds))")
+        }
+        #expect(!results.isEmpty, "Bonsai Q1 projection profile completed")
     }
 }

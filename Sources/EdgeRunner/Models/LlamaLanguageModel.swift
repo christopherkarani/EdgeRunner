@@ -100,6 +100,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     public static let modelIdentifier = "llama"
     private static let turboQuantFastHybridDecodeSeqThreshold = 16384
     private static let turboQuantDensePrefillAttentionSeqThreshold = 4096
+    // Bonsai currently benchmarks faster with the raw Q1 layer path on this branch.
+    // Keep it enabled while parity harnesses cover mode-to-mode consistency.
+    private static let prefersRawQ1LayerDecodePath = true
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
@@ -811,6 +814,65 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         return totalMs / Double(max(samples, 1))
+    }
+
+    func measureQ1ProjectionLatencies(samples: Int = 5) async throws -> [(name: String, milliseconds: Double)] {
+        guard let q1Kernel = dequantQ1_0_g128 else {
+            throw GenerationError.modelLoadFailed(reason: "Q1 kernel not available")
+        }
+        guard let layer = preloadedWeights.layers.first else {
+            throw GenerationError.modelLoadFailed(reason: "Layer weights not loaded")
+        }
+
+        let dim = config.embeddingDim
+        let qDim = config.headCount * config.headDim
+        let kvDim = config.kvHeadCount * config.headDim
+        let interDim = config.intermediateDim
+
+        let hiddenBuf = scratch.decodeHidden
+        let attnBuf = scratch.attnOut
+        let activBuf = scratch.activ
+        let outputBuf = scratch.proj
+        memset(hiddenBuf.contents(), 0, hiddenBuf.length)
+        memset(attnBuf.contents(), 0, attnBuf.length)
+        memset(activBuf.contents(), 0, activBuf.length)
+        memset(outputBuf.contents(), 0, outputBuf.length)
+
+        let benches: [(String, MTLBuffer?, MTLBuffer, Int, Int)] = [
+            ("wq", layer.wqRawQ1, hiddenBuf, qDim, dim),
+            ("wk", layer.wkRawQ1, hiddenBuf, kvDim, dim),
+            ("wv", layer.wvRawQ1, hiddenBuf, kvDim, dim),
+            ("wo", layer.woRawQ1, attnBuf, dim, qDim),
+            ("gate", layer.gateRawQ1, hiddenBuf, interDim, dim),
+            ("up", layer.upRawQ1, hiddenBuf, interDim, dim),
+            ("down", layer.downRawQ1, activBuf, dim, interDim),
+        ]
+
+        let clock = ContinuousClock()
+        var results: [(String, Double)] = []
+
+        for (name, weight, input, rows, cols) in benches {
+            guard let weight else { continue }
+            var totalMs: Double = 0
+            for _ in 0..<samples {
+                let start = clock.now
+                try await q1Kernel.gemv(
+                    quantisedWeights: weight,
+                    input: input,
+                    output: outputBuf,
+                    rows: rows,
+                    cols: cols,
+                    commandQueue: commandQueue
+                )
+                let end = clock.now
+                let duration = start.duration(to: end)
+                totalMs += Double(duration.components.seconds) * 1000.0
+                    + Double(duration.components.attoseconds) * 1e-15
+            }
+            results.append((name, totalMs / Double(max(samples, 1))))
+        }
+
+        return results
     }
 
     private func forwardLogitsBuffer(for tokenIDs: [Int]) async throws -> MTLBuffer {
@@ -1593,7 +1655,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBuffer(allVBuf, offset: kvOff, index: 2)
                         enc.dispatchThreadgroups(MTLSize(width: (kvDim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else if let q1PSO = fusedQ1PSO, lw.wqRawQ1 != nil {
+                    } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, lw.wqRawQ1 != nil {
                         // Q1_0_g128: use raw Q1 buffers with Q1 GEMV kernel
                         enc.setComputePipelineState(q1PSO)
                         var qP = ERDequantGEMVParams(rows: UInt32(qDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowQ1))
@@ -1906,7 +1968,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                         enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else if let q1PSO = fusedQ1PSO, let woRawQ1 = lw.woRawQ1 {
+                    } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let woRawQ1 = lw.woRawQ1 {
                         // Q1_0_g128: raw Q1 GEMV
                         enc.setComputePipelineState(q1PSO)
                         var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDimQ1))
@@ -1987,7 +2049,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBuffer(upOutBuf, offset: intOff, index: 2)
                         enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else if let q1PSO = fusedQ1PSO, let gateRawQ1 = lw.gateRawQ1, let upRawQ1 = lw.upRawQ1 {
+                    } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let gateRawQ1 = lw.gateRawQ1, let upRawQ1 = lw.upRawQ1 {
                         // Q1_0_g128: raw Q1 GEMV
                         enc.setComputePipelineState(q1PSO)
                         var gateP = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDimQ1))
@@ -2059,7 +2121,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                         enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                    } else if let q1PSO = fusedQ1PSO, let downRawQ1 = lw.downRawQ1 {
+                    } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let downRawQ1 = lw.downRawQ1 {
                         // Q1_0_g128: raw Q1 GEMV
                         enc.setComputePipelineState(q1PSO)
                         var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDimQ1))
@@ -2290,7 +2352,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let totalQKVRows = qDim + kvDim + kvDim
                 enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else if lw.wqRawQ1 != nil, let q1PSO = fusedQ1PSO {
+            } else if Self.prefersRawQ1LayerDecodePath, lw.wqRawQ1 != nil, let q1PSO = fusedQ1PSO {
                 // Q1_0_g128 path: separate RMSNorm + Q/K/V GEMV
                 do {
                     var p = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
@@ -2645,7 +2707,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
                 enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else if let q1PSO = fusedQ1PSO, let woRawQ1 = lw.woRawQ1 {
+            } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let woRawQ1 = lw.woRawQ1 {
                 // Q1_0_g128: raw Q1 GEMV + separate add
                 enc.setComputePipelineState(q1PSO)
                 var woP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(qDim), blocksPerRow: UInt32(blocksPerRowQDimQ1))
@@ -2697,9 +2759,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBuffer(lw.ffnNorm, offset: 0, index: 5)  // RMSNorm weight
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else if let q1PSO = fusedQ1PSO, let gateRawQ1 = lw.gateRawQ1, let upRawQ1 = lw.upRawQ1 {
+            } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let gateRawQ1 = lw.gateRawQ1, let upRawQ1 = lw.upRawQ1 {
                 // Q1_0_g128: raw Q1 GEMV for gate and up + SwiGLU
-                // RMSNorm first
                 var normP = ERRMSNormParams(rows: 1, cols: UInt32(dim), eps: rmsEps)
                 enc.setComputePipelineState(rmsNormPSO)
                 enc.setBuffer(afterAttnBuf, offset: 0, index: 0)
@@ -2708,7 +2769,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&normP, length: MemoryLayout<ERRMSNormParams>.stride, index: 3)
                 enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-                // Gate projection
                 let blocksPerRowDimQ1 = dim / 128
                 enc.setComputePipelineState(q1PSO)
                 var gateP = ERDequantGEMVParams(rows: UInt32(interDim), cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDimQ1))
@@ -2718,15 +2778,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&gateP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                // Up projection
                 enc.setComputePipelineState(q1PSO)
                 enc.setBuffer(upRawQ1, offset: 0, index: 0)
                 enc.setBuffer(ffnNormedBuf, offset: 0, index: 1)
                 enc.setBuffer(upOutBuf, offset: 0, index: 2)
-                enc.setBytes(&gateP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)  // same params
+                enc.setBytes(&gateP, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 3)
                 enc.dispatchThreadgroups(MTLSize(width: (interDim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-                // SwiGLU
                 var sp = ERActivationParams(count: UInt32(interDim))
                 enc.setComputePipelineState(swigluPSO)
                 enc.setBuffer(gateOutBuf, offset: 0, index: 0)
@@ -2786,7 +2844,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&p, length: MemoryLayout<ERDequantGEMVParams>.stride, index: 4)
                 enc.dispatchThreadgroups(MTLSize(width: (dim + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else if let q1PSO = fusedQ1PSO, let downRawQ1 = lw.downRawQ1 {
+            } else if Self.prefersRawQ1LayerDecodePath, let q1PSO = fusedQ1PSO, let downRawQ1 = lw.downRawQ1 {
                 // Q1_0_g128: raw Q1 GEMV + separate add
                 enc.setComputePipelineState(q1PSO)
                 var downP = ERDequantGEMVParams(rows: UInt32(dim), cols: UInt32(interDim), blocksPerRow: UInt32(blocksPerRowInterDimQ1))
@@ -2828,12 +2886,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         let logitsBuf = scratch.logits
-        if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
-            let blocksPerRow = preloadedWeights.lmHeadCols / 32
-            var p = FusedGateUpSiluParams(
-                rows: UInt32(config.vocabSize),
-                cols: UInt32(dim),
-                blocksPerRow: UInt32(blocksPerRow),
+            if let lmRaw = preloadedWeights.lmHeadRaw, !decodeDebugOptions.disableFusedFinalNormLMHead {
+                let blocksPerRow = preloadedWeights.lmHeadCols / 32
+                var p = FusedGateUpSiluParams(
+                    rows: UInt32(config.vocabSize),
+                    cols: UInt32(dim),
+                    blocksPerRow: UInt32(blocksPerRow),
                 tokenCount: 1,
                 rmsEps: rmsEps
             )

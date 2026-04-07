@@ -36,7 +36,12 @@ public enum ModelLoader: Sendable {
         configuration: ModelConfiguration = ModelConfiguration()
     ) async throws -> any EdgeRunnerLanguageModel {
         let loader = try GGUFLoader(url: url)
-        let architecture = loader.modelConfig.architectureName.lowercased()
+        let modelConfig = loader.modelConfig
+        let architecture = modelConfig.architectureName.lowercased()
+
+        if BonsaiLanguageModel.supports(modelConfig: modelConfig) {
+            return try await BonsaiLanguageModel.load(from: url, configuration: configuration)
+        }
 
         if llamaCompatibleArchitectures.contains(architecture) {
             return try await LlamaLanguageModel.load(from: url, configuration: configuration)
