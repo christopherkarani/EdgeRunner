@@ -859,3 +859,34 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 | **Total improvement** | **3,880x** |
 | llama.cpp reference | 183 tok/s |
 | **vs llama.cpp** | **+22%** |
+
+### Experiment 48: KV Cache Layout Transposition [pos,head,dim] → [head,pos,dim] — ROLLED BACK
+- **Hypothesis:** Changing the KV cache memory layout from `[position, numKVHeads, headDim]` to `[head, position, headDim]` reduces the inter-position stride from 2048 bytes to 256 bytes, improving GPU hardware prefetcher effectiveness for the GQA attention loop.
+- **Change:** Added `maxSeqLen` to mega-kernel params, `headDim`/`maxSeqLen`/`currentPos` to QKV params. Updated K cache writes in mega-kernel, V cache writes in QKV kernel, and K/V reads in GQA loop to use head-first indexing. Changed V cache buffer binding from position-offset to zero-offset. Updated all decode paths (sync, async, Metal 4).
+- **Files modified:** RoPE.metal, Dequant_Q8_0.metal, GQA.metal, AttentionParams.h, LlamaLanguageModel.swift, GQAKernel.swift, GQATests.swift
+- **Result:** 224.3 → 201.7 tok/s median (-10.1%). Correctness PASSED (token hash 0afae14a84cf0df8).
+- **Root cause:** Integer division/modulo in V write path (`vLocalRow / headDim`, `vLocalRow % headDim`) adds ALU overhead per V output thread. Apple Silicon's hardware prefetcher handles the 2048-byte stride effectively already. The GQA read improvement doesn't offset the V write regression.
+- **Status:** ROLLED BACK
+
+### Experiment 49: 2-Simdgroup Position-Split GQA — KEPT (MAJOR WIN)
+- **Hypothesis:** The GQA attention loop is memory-latency-bound with a serial dependency chain of N KV positions (online softmax correction creates inter-iteration dependency). Splitting positions between 2 simdgroups halves the serial chain length, with a single threadgroup barrier + merge at the end.
+- **Change:** Expanded the mega-kernel from 32 to 64 threads per TG (2 simdgroups). SG 0 processes even KV positions, SG 1 processes odd. Both SGs redundantly compute Phase 1 (RMSNorm + RoPE) to avoid an extra barrier. After the GQA loop, SG 1 writes its accumulator to threadgroup memory, SG 0 reads it and merges using online softmax correction (2 exp() + standard merge math). K heads still use only SG 0 (SG 1 exits immediately). Updated all 4 mega-kernel dispatch sites from 32 to 64 threads per TG.
+- **Files modified:** RoPE.metal, LlamaLanguageModel.swift
+- **Result:** 224.3 → 248.2 tok/s median (+10.7%), peak 254.2 tok/s. Token hash 0afae14a84cf0df8 preserved. Very tight variance (240.8-254.2 across runs).
+- **Root cause:** At 128 KV positions, the serial dependency chain (runMax→correction→acc update) was the dominant GQA bottleneck. Splitting to 64 positions per SG + 1 barrier merge is faster than 128 sequential positions. The merge overhead (1 barrier + 130 floats of threadgroup memory + merge math) is negligible compared to the loop savings.
+- **Status:** KEPT
+- **Commit:** 4a97a1f
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 248.2 tok/s |
+| Per-token decode latency | 4.03 ms |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| **Total improvement** | **4,289x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+36%** |
+| MLX reference | 277.8 tok/s |
+| **Gap to MLX** | **-29.6 tok/s (-10.7%)** |
