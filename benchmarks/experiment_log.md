@@ -838,3 +838,24 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 1. Re-applying kernel fusion optimizations that may have been lost
 2. Non-async forward pass (Protocol change)
 3. Metal ICB with async completion (not waitUntilCompleted)
+
+### Experiment 47: Uniform Online Softmax in GQA Mega-Kernel — KEPT
+- **Hypothesis:** The GQA attention inner loop uses a thread-divergent pattern: lane 0 computes online softmax (correction, prob via exp()), then broadcasts to all 31 other lanes via 3× simd_broadcast_first. Since `score` is already uniform across the simdgroup (result of simd_sum), all 32 threads can compute correction/prob independently, eliminating 3 broadcast synchronizations per KV position. The redundant exp() ALU work is hidden by memory latency in this memory-bound loop.
+- **Change:** Removed `if (dimIdx == 0)` conditional and 3× `simd_broadcast_first` calls from the GQA loop in `fused_qk_norm_rope_gqa`. All threads now compute `correction = exp(oldMax - runMax)` and `prob = exp(score - runMax)` uniformly.
+- **Files modified:** RoPE.metal
+- **Result:** 215.8 → 224.3 tok/s median (+3.9%), 216.9 → 224.5 peak (+3.5%). Confirmed on second run: 223.1 tok/s median. Per-token latency 4.71 → 4.48 ms. Token hash 0afae14a84cf0df8 preserved.
+- **Root cause:** At 128 KV positions × 28 layers × 16 Q heads = 57,344 loop iterations, the 3 broadcast synchronizations per iteration created significant pipeline stalls. Since the GQA loop is memory-latency-bound (reading K/V cache from DRAM), the ALU cycles for redundant exp() on 31 extra threads are effectively free — they fill compute slots that would otherwise idle during memory fetches.
+- **Status:** KEPT
+- **Commit:** 9e8a9f7
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 224.3 tok/s |
+| Per-token decode latency | 4.48 ms |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| **Total improvement** | **3,880x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+22%** |
