@@ -306,75 +306,75 @@ kernel void fused_qk_norm_rope_gqa(
     device half  *kCache [[buffer(5)]],           // K cache [kvSeqLen, numKVHeads, headDim]
     device half  *vCache [[buffer(6)]],           // V cache [kvSeqLen, numKVHeads, headDim]
     constant ERFusedNormRoPEGQAParams &p [[buffer(7)]],
-    uint2 tid [[thread_position_in_grid]]
+    uint2 tid [[thread_position_in_grid]],
+    uint tiisg [[thread_index_in_simdgroup]],
+    uint sgIdx [[simdgroup_index_in_threadgroup]]
 ) {
-    uint dimIdx = tid.x;       // 0..31 (32 threads per head)
+    // 64 threads per TG (2 simdgroups). Each SG has 32 threads covering all 128 head dims.
+    // K heads: SG 1 exits immediately (only SG 0 does K work).
+    // Q heads: both SGs run Phase 1 identically, then split KV positions in Phase 2.
+    uint dimIdx = tiisg;           // 0..31 (same dimension mapping in both SGs)
     uint headIdx = tid.y;
     uint halfDim = p.headDim / 2;  // 64
     uint totalHeads = p.numHeads + p.numKVHeads;
-    if (dimIdx >= 32 || headIdx >= totalHeads) return;
+    if (headIdx >= totalHeads) return;
 
     bool isQ = headIdx < p.numHeads;
+
+    // K heads only need 1 simdgroup — SG 1 exits immediately
+    if (!isQ && sgIdx == 1) return;
+
     uint head = isQ ? headIdx : (headIdx - p.numHeads);
     device const float* src = isQ ? Q : K;
     device const float* nw = isQ ? qNormW : kNormW;
     uint hb = head * p.headDim;
 
     // === Phase 1: Per-head RMSNorm + RoPE ===
-    // Each thread handles 4 elements: [dimIdx, dimIdx+32, dimIdx+64, dimIdx+96]
-    // NeoX RoPE pairs: (dimIdx, dimIdx+halfDim) and (dimIdx+32, dimIdx+32+halfDim)
-    float raw_a0 = src[hb + dimIdx];                    // position i
-    float raw_a1 = src[hb + dimIdx + halfDim];           // position i+64 (NeoX pair)
-    float raw_b0 = src[hb + dimIdx + 32];                // position i+32
-    float raw_b1 = src[hb + dimIdx + 32 + halfDim];      // position i+96
+    // Both SGs compute identically (redundant for Q, but avoids a barrier)
+    float raw_a0 = src[hb + dimIdx];
+    float raw_a1 = src[hb + dimIdx + halfDim];
+    float raw_b0 = src[hb + dimIdx + 32];
+    float raw_b1 = src[hb + dimIdx + 32 + halfDim];
 
-    // RMSNorm: sum of squares of all 4 values, simd_sum gives full head total
     float sq = raw_a0 * raw_a0 + raw_a1 * raw_a1 + raw_b0 * raw_b0 + raw_b1 * raw_b1;
-    float sumSq = simd_sum(sq);  // 32 threads cover all 128 dims — NO barrier needed
+    float sumSq = simd_sum(sq);
 
     float rs = rsqrt(sumSq / float(p.headDim) + p.rmsEps);
 
-    // Apply norm weights
     float x_a0 = raw_a0 * rs * nw[dimIdx];
     float x_a1 = raw_a1 * rs * nw[dimIdx + halfDim];
     float x_b0 = raw_b0 * rs * nw[dimIdx + 32];
     float x_b1 = raw_b1 * rs * nw[dimIdx + 32 + halfDim];
 
-    // RoPE for pair_a (frequency based on dimIdx)
     float freq_a = 1.0f / pow(p.theta, float(2 * dimIdx) / float(p.headDim));
     float angle_a = float(p.startPos) * (freq_a / p.scalingFactor);
     float ca = cos(angle_a), sa = sin(angle_a);
     float q_a0 = x_a0 * ca - x_a1 * sa;
     float q_a1 = x_a0 * sa + x_a1 * ca;
 
-    // RoPE for pair_b (frequency based on dimIdx+32)
     float freq_b = 1.0f / pow(p.theta, float(2 * (dimIdx + 32)) / float(p.headDim));
     float angle_b = float(p.startPos) * (freq_b / p.scalingFactor);
     float cb = cos(angle_b), sb = sin(angle_b);
     float q_b0 = x_b0 * cb - x_b1 * sb;
     float q_b1 = x_b0 * sb + x_b1 * cb;
 
-    // K heads: write 4 values to cache and exit
+    // K heads: write 4 values to cache and exit (SG 0 only, SG 1 already returned)
     if (!isQ) {
         uint cacheBase = p.startPos * p.numKVHeads * p.headDim + hb;
         kCache[cacheBase + dimIdx]              = half(q_a0);
         kCache[cacheBase + dimIdx + halfDim]    = half(q_a1);
         kCache[cacheBase + dimIdx + 32]         = half(q_b0);
         kCache[cacheBase + dimIdx + 32 + halfDim] = half(q_b1);
-        return;  // K threads done — only Q threads continue to GQA
+        return;
     }
 
-    // === Phase 2: GQA — Q threads compute attention inline ===
-    // 32 threads per Q head, each handling 4 dims. simd_sum gives full 128-dim
-    // dot product with ZERO barriers.
-    uint kvHead = headIdx / (p.numHeads / p.numKVHeads);  // GQA grouping
+    // === Phase 2: GQA — 2 simdgroups per Q head, position-split ===
+    // SG 0 processes even KV positions, SG 1 processes odd positions.
+    // This halves the serial dependency chain, reducing GQA latency.
+    uint kvHead = headIdx / (p.numHeads / p.numKVHeads);
     uint kvStride = p.numKVHeads * p.headDim;
 
-    // The newest K slice is written by separate K threadgroups in this same dispatch.
-    // Metal provides no cross-threadgroup barrier, so Q threadgroups must not read that
-    // just-written position back out of global cache. Instead, each Q head recomputes the
-    // current-token K vector for its shared kvHead locally and uses that value only for the
-    // current position; K threadgroups still write the canonical cache slice for future steps.
+    // Re-derive current-position K locally (avoids cross-TG race with K writers)
     uint kvBaseCurrent = kvHead * p.headDim;
     float raw_k_a0 = K[kvBaseCurrent + dimIdx];
     float raw_k_a1 = K[kvBaseCurrent + dimIdx + halfDim];
@@ -396,19 +396,17 @@ kernel void fused_qk_norm_rope_gqa(
     float runSum = 0.0f;
     float acc_a0 = 0.0f, acc_a1 = 0.0f, acc_b0 = 0.0f, acc_b1 = 0.0f;
 
-    for (uint kv = 0; kv < p.kvSeqLen; kv++) {
+    // Position-split loop: SG 0 handles even positions, SG 1 handles odd
+    for (uint kvPair = 0; kvPair < (p.kvSeqLen + 1) / 2; kvPair++) {
+        uint kv = kvPair * 2 + sgIdx;
+        if (kv >= p.kvSeqLen) break;
+
         uint kvBase = kv * kvStride + kvHead * p.headDim;
 
-        // Dot product: Q[head] . K[kv, kvHead] — 4 elements per thread
-        float dk_a0;
-        float dk_a1;
-        float dk_b0;
-        float dk_b1;
+        float dk_a0, dk_a1, dk_b0, dk_b1;
         if (kv == p.startPos) {
-            dk_a0 = current_k_a0;
-            dk_a1 = current_k_a1;
-            dk_b0 = current_k_b0;
-            dk_b1 = current_k_b1;
+            dk_a0 = current_k_a0; dk_a1 = current_k_a1;
+            dk_b0 = current_k_b0; dk_b1 = current_k_b1;
         } else {
             dk_a0 = float(kCache[kvBase + dimIdx]);
             dk_a1 = float(kCache[kvBase + dimIdx + halfDim]);
@@ -417,32 +415,58 @@ kernel void fused_qk_norm_rope_gqa(
         }
 
         float partial = q_a0 * dk_a0 + q_a1 * dk_a1 + q_b0 * dk_b0 + q_b1 * dk_b1;
-        float score = simd_sum(partial) * p.attnScale;  // full dot product, NO barrier!
+        float score = simd_sum(partial) * p.attnScale;
 
-        // Online softmax — uniform computation across all 32 lanes.
-        // `score` is already identical across the simdgroup (from simd_sum), so every
-        // thread computes the same correction/prob values independently. This eliminates
-        // 3× simd_broadcast_first synchronization per KV position. The redundant exp()
-        // ALU work is hidden by memory latency (GQA loop is memory-bound, not compute-bound).
         float oldMax = runMax;
         runMax = max(runMax, score);
         float correction = exp(oldMax - runMax);
         float prob = exp(score - runMax);
         runSum = runSum * correction + prob;
 
-        // Weighted V accumulation
         acc_a0 = acc_a0 * correction + prob * float(vCache[kvBase + dimIdx]);
         acc_a1 = acc_a1 * correction + prob * float(vCache[kvBase + dimIdx + halfDim]);
         acc_b0 = acc_b0 * correction + prob * float(vCache[kvBase + dimIdx + 32]);
         acc_b1 = acc_b1 * correction + prob * float(vCache[kvBase + dimIdx + 32 + halfDim]);
     }
 
-    // Normalize and write 4 output values
-    float invSum = runSum > 0.0f ? 1.0f / runSum : 0.0f;
-    outAttn[hb + dimIdx]              = acc_a0 * invSum;
-    outAttn[hb + dimIdx + halfDim]    = acc_a1 * invSum;
-    outAttn[hb + dimIdx + 32]         = acc_b0 * invSum;
-    outAttn[hb + dimIdx + 32 + halfDim] = acc_b1 * invSum;
+    // === Merge: combine SG 0 and SG 1 accumulators via threadgroup memory ===
+    threadgroup float tg_acc[128];  // SG 1's per-dim accumulator values
+    threadgroup float tg_max1;
+    threadgroup float tg_sum1;
+
+    if (sgIdx == 1) {
+        tg_acc[dimIdx]              = acc_a0;
+        tg_acc[dimIdx + halfDim]    = acc_a1;
+        tg_acc[dimIdx + 32]         = acc_b0;
+        tg_acc[dimIdx + 32 + halfDim] = acc_b1;
+        if (dimIdx == 0) {
+            tg_max1 = runMax;
+            tg_sum1 = runSum;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgIdx == 0) {
+        float max1 = tg_max1;
+        float sum1 = tg_sum1;
+
+        // Online softmax merge of two independent accumulators
+        float maxFinal = max(runMax, max1);
+        float c0 = exp(runMax - maxFinal);
+        float c1 = exp(max1 - maxFinal);
+        float sumFinal = runSum * c0 + sum1 * c1;
+        float invSum = sumFinal > 0.0f ? 1.0f / sumFinal : 0.0f;
+
+        float other_a0 = tg_acc[dimIdx];
+        float other_a1 = tg_acc[dimIdx + halfDim];
+        float other_b0 = tg_acc[dimIdx + 32];
+        float other_b1 = tg_acc[dimIdx + 32 + halfDim];
+
+        outAttn[hb + dimIdx]              = (acc_a0 * c0 + other_a0 * c1) * invSum;
+        outAttn[hb + dimIdx + halfDim]    = (acc_a1 * c0 + other_a1 * c1) * invSum;
+        outAttn[hb + dimIdx + 32]         = (acc_b0 * c0 + other_b0 * c1) * invSum;
+        outAttn[hb + dimIdx + 32 + halfDim] = (acc_b1 * c0 + other_b1 * c1) * invSum;
+    }
 }
 
 /// NeoX RoPE with f16 output — eliminates separate f32→f16 conversion dispatch.

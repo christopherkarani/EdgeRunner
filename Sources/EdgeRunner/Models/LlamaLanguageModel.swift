@@ -1754,9 +1754,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                          UInt32(1 + startPosition), 1.0 / sqrt(Float(headDim)))  // kvSeqLen includes cached prefix
                 enc.setBytes(&p, length: 9 * 4, index: 7)
                 let totalHeads = numHeads + numKVHeads
-                // 32 threads per head (single simdgroup) — eliminates all threadgroup barriers
-                enc.dispatchThreads(MTLSize(width: 32, height: totalHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(32, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                // 64 threads per TG (2 simdgroups): position-split GQA
+                enc.dispatchThreads(MTLSize(width: 64, height: totalHeads, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 ropeQOut = attnOutBuf  // mega-kernel writes attention output directly
             } else {
                 // Fallback: separate Q/K norm + RoPE (for seqLen > 1 or no Q/K norm)
@@ -2496,9 +2496,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                          UInt32(totalKVLen), 1.0 / sqrt(Float(headDim)))
                 enc.setBytes(&p, length: 9 * 4, index: 7)
                 let totalHeads = numHeads + numKVHeads
-                // 32 threads per head (single simdgroup) — eliminates all threadgroup barriers
-                enc.dispatchThreads(MTLSize(width: 32, height: totalHeads, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(32, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                // 64 threads per TG (2 simdgroups): position-split GQA
+                enc.dispatchThreads(MTLSize(width: 64, height: totalHeads, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(64, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             } else {
                 // Fallback path used for models without Q/K norm, or when the mega decode
                 // kernel is explicitly disabled during correctness bisects.
@@ -3004,9 +3004,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let paramsBase = paramsBuffer.contents()
 
         let qkvGridWidth = (qDim + kvDim + kvDim + 1) / 2
-        let megaThreadsPerHead = 32  // single simdgroup — zero barriers
+        let megaThreadsPerTG = 64  // 2 simdgroups per TG: position-split GQA
         let megaTotalHeads = numHeads + numKVHeads
-        let megaTGWidth = min(megaThreadsPerHead, megaPSO.maxTotalThreadsPerThreadgroup)
+        let megaTGWidth = min(megaThreadsPerTG, megaPSO.maxTotalThreadsPerThreadgroup)
         let dimGridWidth = (dim + 1) / 2
         let interDimGridWidth = (interDim + 1) / 2
         let blocksPerRowQDim = qDim / 32
@@ -3099,7 +3099,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(layerKCache, offset: 0, index: 5)
             enc.setBuffer(layerVCache, offset: 0, index: 6)
             enc.setBuffer(paramsBuffer, offset: 256, index: 7)
-            enc.dispatchThreads(MTLSize(width: megaThreadsPerHead, height: megaTotalHeads, depth: 1), threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1))
+            enc.dispatchThreads(MTLSize(width: megaThreadsPerTG, height: megaTotalHeads, depth: 1), threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1))
 
             // DISPATCH 3: Wo + residual add
             enc.setComputePipelineState(gemvAddPSO)
@@ -3313,9 +3313,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         // === PRE-COMPUTE DISPATCH SIZES (hoisted out of layer loop) ===
         let qkvGridWidth = (qDim + kvDim + kvDim + 1) / 2
-        let megaThreadsPerHead = 32  // single simdgroup — zero barriers
+        let megaThreadsPerTG = 64  // 2 simdgroups per TG: position-split GQA
         let megaTotalHeads = numHeads + numKVHeads
-        let megaTGWidth = min(megaThreadsPerHead, megaPSO.maxTotalThreadsPerThreadgroup)
+        let megaTGWidth = min(megaThreadsPerTG, megaPSO.maxTotalThreadsPerThreadgroup)
         let dimGridWidth = (dim + 1) / 2
         let interDimGridWidth = (interDim + 1) / 2
         let cacheWriteOffF16 = currentPos * kvDim * halfStride
@@ -3371,7 +3371,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 argTable.setAddress(megaParamsAddr, index: 7)
 
                 enc.dispatchThreads(
-                    threadsPerGrid: MTLSize(width: megaThreadsPerHead, height: megaTotalHeads, depth: 1),
+                    threadsPerGrid: MTLSize(width: megaThreadsPerTG, height: megaTotalHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1)
                 )
             }
@@ -4010,9 +4010,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let paramsBase = paramsBuffer.contents()
 
         let qkvGridWidth = (qDim + kvDim + kvDim + 1) / 2
-        let megaThreadsPerHead = 32  // single simdgroup — zero barriers
+        let megaThreadsPerTG = 64  // 2 simdgroups per TG: position-split GQA
         let megaTotalHeads = numHeads + numKVHeads
-        let megaTGWidth = min(megaThreadsPerHead, megaPSO.maxTotalThreadsPerThreadgroup)
+        let megaTGWidth = min(megaThreadsPerTG, megaPSO.maxTotalThreadsPerThreadgroup)
         let dimGridWidth = (dim + 1) / 2
         let interDimGridWidth = (interDim + 1) / 2
         let blocksPerRowQDim = qDim / 32
@@ -4105,7 +4105,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             enc.setBuffer(layerKCache, offset: 0, index: 5)
             enc.setBuffer(layerVCache, offset: 0, index: 6)
             enc.setBuffer(paramsBuffer, offset: 256, index: 7)
-            enc.dispatchThreads(MTLSize(width: megaThreadsPerHead, height: megaTotalHeads, depth: 1), threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1))
+            enc.dispatchThreads(MTLSize(width: megaThreadsPerTG, height: megaTotalHeads, depth: 1), threadsPerThreadgroup: MTLSize(width: megaTGWidth, height: 1, depth: 1))
 
             // DISPATCH 3: Wo + residual add
             enc.setComputePipelineState(gemvAddPSO)
