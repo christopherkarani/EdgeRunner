@@ -32,14 +32,14 @@ inline float q1_subblock_dot(
     for (short bi = 0; bi < 4; bi++) {
         uchar bits = qs[bi];
         const short base = bi * 8;
-        B += select(0.f, xl[base + 0], bool(bits & 0x01));
-        B += select(0.f, xl[base + 1], bool(bits & 0x02));
-        B += select(0.f, xl[base + 2], bool(bits & 0x04));
-        B += select(0.f, xl[base + 3], bool(bits & 0x08));
-        B += select(0.f, xl[base + 4], bool(bits & 0x10));
-        B += select(0.f, xl[base + 5], bool(bits & 0x20));
-        B += select(0.f, xl[base + 6], bool(bits & 0x40));
-        B += select(0.f, xl[base + 7], bool(bits & 0x80));
+        // Vectorized: extract bit masks → float4, dot with x values
+        float4 x0 = float4(xl[base+0], xl[base+1], xl[base+2], xl[base+3]);
+        float4 x1 = float4(xl[base+4], xl[base+5], xl[base+6], xl[base+7]);
+        float4 m0 = float4(float((bits>>0)&1), float((bits>>1)&1),
+                           float((bits>>2)&1), float((bits>>3)&1));
+        float4 m1 = float4(float((bits>>4)&1), float((bits>>5)&1),
+                           float((bits>>6)&1), float((bits>>7)&1));
+        B += dot(m0, x0) + dot(m1, x1);
     }
     return scale * (2.f * B - xSum);
 }

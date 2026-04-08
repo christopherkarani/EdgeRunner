@@ -3947,10 +3947,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             return nil
         }
 
-        let q1WeightsPerBlock = 128
-        let q1BytesPerBlock = 18
+        let q1WeightsPerBlock = DequantQ1_0_g128Kernel.weightsPerBlock
+        let q1BytesPerBlock = DequantQ1_0_g128Kernel.blockByteCount
         let q8WeightsPerBlock = 32
-        let q8BytesPerBlock = 34
+        let q8BytesPerBlock = 34  // Q8_0: 2B f16 scale + 32B int8 values
 
         let elementCount = storage.elementCount
         guard elementCount % q1WeightsPerBlock == 0 else { return nil }

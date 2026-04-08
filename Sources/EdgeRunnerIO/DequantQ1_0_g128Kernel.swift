@@ -28,8 +28,8 @@ public final class DequantQ1_0_g128Kernel: Sendable {
     public var fusedGateUpV2PSO: MTLComputePipelineState { fusedGateUpV2Pipeline }
     public var fusedFinalNormLMHeadPSO: MTLComputePipelineState { fusedFinalNormLMHeadPipeline }
 
-    private static let blockByteCount = 18
-    private static let weightsPerBlock = 128
+    public static let blockByteCount = 18
+    public static let weightsPerBlock = 128
 
     public init(device: MTLDevice) throws {
         self.device = device
