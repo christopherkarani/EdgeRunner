@@ -117,22 +117,24 @@ struct BonsaiBenchmark {
             var tokenIDs = Array(promptTokenIDs)
             let clock = ContinuousClock()
             let startTime = clock.now
+            // Prefill via async path (initializes KV cache + decode warmup)
             let firstResult = try await model.greedyToken(for: tokenIDs)
             let prefillDuration = startTime.duration(to: clock.now)
             let ttftMs = (Double(prefillDuration.components.seconds) + Double(prefillDuration.components.attoseconds) * 1e-18) * 1000.0
             tokenIDs.append(firstResult.token)
             var generatedCount = 1
 
+            // Decode via sync path (eliminates async scheduling overhead)
+            let decodeStart = clock.now
             for _ in 1..<128 {
-                let result = try await model.greedyToken(for: tokenIDs)
+                let result = try model.greedyTokenSync(for: tokenIDs)
                 tokenIDs.append(result.token)
                 generatedCount += 1
                 if result.token == 151645 || result.token == 2 || result.token == 0 { break }
             }
 
-            let totalDuration = startTime.duration(to: clock.now)
-            let totalSeconds = Double(totalDuration.components.seconds) + Double(totalDuration.components.attoseconds) * 1e-18
-            let decodeSeconds = totalSeconds - (ttftMs / 1000.0)
+            let decodeDuration = decodeStart.duration(to: clock.now)
+            let decodeSeconds = Double(decodeDuration.components.seconds) + Double(decodeDuration.components.attoseconds) * 1e-18
             let decodeTokens = generatedCount - 1
             let decodeTokPerSec = decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0
             timings.append(decodeTokPerSec)

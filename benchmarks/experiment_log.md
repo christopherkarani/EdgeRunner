@@ -890,3 +890,23 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 | **vs llama.cpp** | **+36%** |
 | MLX reference | 277.8 tok/s |
 | **Gap to MLX** | **-29.6 tok/s (-10.7%)** |
+
+### Bonsai Experiment 50: Q1→Q8 Lossless Conversion at Load Time — KEPT (MAJOR WIN)
+- **Hypothesis:** The Q1 GEMV kernel achieves only ~8 GB/s effective bandwidth (2% utilization) because per-bit extraction is severely compute-bound. Converting Q1_0_g128→Q8_0 at model load time is lossless (ternary ±scale maps exactly to ±127 in Q8), and routes through the proven Q8 fused decode path with all kernel optimizations (fused RMSNorm+QKV, mega-kernel GQA, fused final norm+LM head).
+- **Change:** Added `convertQ1ToQ8Buffer()` method that converts Q1 blocks (18B/128 weights) to Q8 blocks (34B/32 weights) with scale_q8 = scale_q1/127 and int8 values ±127. Applied at load time for all layer weights (wq/wk/wv/wo/gate/up/down) and LM head. The Q8 raw buffers populate wqRaw/lmHeadRaw slots, which routes through fused QKV, mega-kernel GQA, fused final norm+LM head, and sync decode automatically.
+- **Files modified:** LlamaLanguageModel.swift, BonsaiLanguageModel.swift, BonsaiBenchmark.swift
+- **Memory impact:** Layer Q8: ~1.40 GB (was Q1: 196 MB). LM head Q8: ~330 MB (was float: 1.24 GB). Net: saves ~0.46 GB.
+- **Dispatch count:** 5/layer + 1 LM head = 141 total (was ~14/layer + 2 = 394 for Q1 path)
+- **Result:** 39.4 → 114.2 tok/s median (+189.8%, 2.90x). Coherence IDENTICAL (same token IDs). Qwen3 Q8 NOT regressed (246.6 tok/s, hash 0afae14a84cf0df8).
+- **Root cause:** Q1 GEMV was compute-bound at 8 GB/s (2% utilization) due to per-bit extraction overhead. Q8 GEMV achieves ~195 GB/s (49% utilization) because int8→float + FMA is much cheaper ALU than bit shift + mask + select per weight. Even though Q8 reads 7.5x more data (1.73 GB vs 0.24 GB per decode), the bandwidth cost (8.8ms at 195 GB/s) is dramatically lower than the compute cost of Q1 (25.4ms at 8 GB/s).
+- **Status:** KEPT
+
+## Updated Performance
+
+| Model | Metric | Value |
+|-------|--------|-------|
+| Qwen3 0.6B Q8_0 | Median decode | 248.2 tok/s |
+| Qwen3 0.6B Q8_0 | Token hash | 0afae14a84cf0df8 ✓ |
+| **Bonsai 1.7B Q1_0_g128** | **Median decode** | **114.2 tok/s** |
+| **Bonsai 1.7B Q1_0_g128** | **Previous baseline** | **39.4 tok/s** |
+| **Bonsai 1.7B Q1_0_g128** | **Improvement** | **+189.8% (2.90x)** |

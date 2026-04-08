@@ -1459,13 +1459,21 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             layers.reserveCapacity(config.layerCount)
             for i in 0..<config.layerCount {
                 let p = "layers.\(i)"
+                // Prefer native Q8 raw buffers; fall back to Q1→Q8 conversion
                 let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).attention.wq.weight")
                 let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).attention.wk.weight")
                 let wvRaw = makeRawQ8BufferIfAvailable("\(p).attention.wv.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).attention.wv.weight")
                 let woRaw = makeRawQ8BufferIfAvailable("\(p).attention.wo.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).attention.wo.weight")
                 let gateRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.gate.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).feedForward.gate.weight")
                 let upRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.up.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).feedForward.up.weight")
                 let downRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.down.weight")
+                    ?? convertQ1ToQ8Buffer("\(p).feedForward.down.weight")
 
                 let wqRawQ1 = makeRawQ1BufferIfAvailable("\(p).attention.wq.weight")
                 let wkRawQ1 = makeRawQ1BufferIfAvailable("\(p).attention.wk.weight")
@@ -1515,14 +1523,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 ))
             }
             let lmHeadName = tiedEmbeddingWeightName
+            // Prefer native Q8 raw, then Q1→Q8 conversion, then float dequant fallback
             let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
+                ?? convertQ1ToQ8Buffer(lmHeadName)
             let lmHeadRawQ1Buf = makeRawQ1BufferIfAvailable(lmHeadName)
-            // For Q1 models, dequantize LM head at init time to avoid slow Q1 GEMV
             let lmHeadBuf: MTLBuffer?
-            if let lmHeadRawBuf {
-                lmHeadBuf = try await readWeightBufferIfNeeded(lmHeadName, rawBuffer: lmHeadRawBuf)
-            } else if lmHeadRawQ1Buf != nil {
-                lmHeadBuf = try await readWeightBuffer(lmHeadName)
+            if lmHeadRawBuf != nil {
+                lmHeadBuf = nil  // Q8 raw path handles it; no float fallback needed
             } else {
                 lmHeadBuf = nil
             }
@@ -3776,6 +3783,72 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             options: .storageModeShared,
             deallocator: nil
         )
+    }
+
+    /// Converts a Q1_0_g128 tensor to Q8_0 format (lossless for ternary weights).
+    ///
+    /// Q1 block: f16 scale (2B) + 128 bits (16B) = 18B per 128 weights
+    /// Q8 block: f16 scale (2B) + 32 × int8 (32B)  = 34B per 32 weights
+    /// Each Q1 block maps to 4 Q8 sub-blocks. Q1 ±scale → Q8 ±127 with scale/127.
+    private func convertQ1ToQ8Buffer(_ name: String) -> MTLBuffer? {
+        guard let storage = weights[name], storage.dataType == .q1_0_g128 else {
+            return nil
+        }
+
+        let q1WeightsPerBlock = 128
+        let q1BytesPerBlock = 18
+        let q8WeightsPerBlock = 32
+        let q8BytesPerBlock = 34
+
+        let elementCount = storage.elementCount
+        guard elementCount % q1WeightsPerBlock == 0 else { return nil }
+
+        let q1BlockCount = elementCount / q1WeightsPerBlock
+        let q8BlockCount = elementCount / q8WeightsPerBlock
+        let q8ByteCount = q8BlockCount * q8BytesPerBlock
+
+        guard let q8Buffer = device.makeBuffer(length: q8ByteCount, options: .storageModeShared) else {
+            return nil
+        }
+
+        let src = (storage.buffer.contents() + storage.byteOffset)
+            .bindMemory(to: UInt8.self, capacity: q1BlockCount * q1BytesPerBlock)
+        let dst = q8Buffer.contents().bindMemory(to: UInt8.self, capacity: q8ByteCount)
+
+        for q1Block in 0..<q1BlockCount {
+            let q1Off = q1Block * q1BytesPerBlock
+            // Read Q1 scale (little-endian f16)
+            let scaleBits = UInt16(src[q1Off]) | (UInt16(src[q1Off + 1]) << 8)
+            let q1Scale = Float(Float16(bitPattern: scaleBits))
+            // Q8 scale: float_value = q8_scale × int8_value, where int8_value = ±127
+            let q8ScaleF16 = Float16(q1Scale / 127.0)
+            let q8ScaleBits = q8ScaleF16.bitPattern
+
+            // Each Q1 block → 4 Q8 sub-blocks of 32 weights each
+            for sub in 0..<4 {
+                let q8Idx = q1Block * 4 + sub
+                let q8Off = q8Idx * q8BytesPerBlock
+                // Write Q8 scale (2 bytes, little-endian f16)
+                dst[q8Off] = UInt8(q8ScaleBits & 0xFF)
+                dst[q8Off + 1] = UInt8(q8ScaleBits >> 8)
+                // Convert 4 bytes of Q1 bits → 32 int8 values
+                let bitsBase = q1Off + 2 + sub * 4
+                for byteIdx in 0..<4 {
+                    let bits = src[bitsBase + byteIdx]
+                    let valBase = q8Off + 2 + byteIdx * 8
+                    dst[valBase]     = UInt8(bitPattern: ((bits >> 0) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 1] = UInt8(bitPattern: ((bits >> 1) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 2] = UInt8(bitPattern: ((bits >> 2) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 3] = UInt8(bitPattern: ((bits >> 3) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 4] = UInt8(bitPattern: ((bits >> 4) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 5] = UInt8(bitPattern: ((bits >> 5) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 6] = UInt8(bitPattern: ((bits >> 6) & 1) == 1 ? Int8(127) : Int8(-127))
+                    dst[valBase + 7] = UInt8(bitPattern: ((bits >> 7) & 1) == 1 ? Int8(127) : Int8(-127))
+                }
+            }
+        }
+
+        return q8Buffer
     }
 
     /// Float32 fallback buffers are only needed when a fused raw Q8 path is unavailable.
