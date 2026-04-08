@@ -19,6 +19,33 @@ struct ERDequantQ1_0_g128GEMVParams {
 constant uint q1_0_g128BlockBytes = 18;
 constant uint q1_0_g128WeightsPerBlock = 128;
 
+// ─── Shared v2 helper ────────────────────────────────────────────────
+// Computes the bit-selected sum B for one 4-byte (32-weight) sub-block.
+// Returns: scale × (2×B - xSum), the dot product contribution.
+inline float q1_subblock_dot(
+    thread const float* xl, // 32 cached x (or normed-x) values in thread address space
+    float xSum,             // precomputed sum of xl[0..31]
+    device const uchar* qs, // 4 bytes of Q1 bit data for this sub-block
+    float scale             // Q1 block scale (shared across 4 sub-blocks)
+) {
+    float B = 0.f;
+    for (short bi = 0; bi < 4; bi++) {
+        uchar bits = qs[bi];
+        const short base = bi * 8;
+        B += select(0.f, xl[base + 0], bool(bits & 0x01));
+        B += select(0.f, xl[base + 1], bool(bits & 0x02));
+        B += select(0.f, xl[base + 2], bool(bits & 0x04));
+        B += select(0.f, xl[base + 3], bool(bits & 0x08));
+        B += select(0.f, xl[base + 4], bool(bits & 0x10));
+        B += select(0.f, xl[base + 5], bool(bits & 0x20));
+        B += select(0.f, xl[base + 6], bool(bits & 0x40));
+        B += select(0.f, xl[base + 7], bool(bits & 0x80));
+    }
+    return scale * (2.f * B - xSum);
+}
+
+// ─── Basic dequantization kernel ─────────────────────────────────────
+
 kernel void dequant_q1_0_g128(
     device const uchar* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -42,6 +69,8 @@ kernel void dequant_q1_0_g128(
         }
     }
 }
+
+// ─── v1 GEMV (legacy, kept for EDGERUNNER_Q1_USE_V2_KERNEL=0 fallback) ──
 
 kernel void dequant_q1_0_g128_gemv(
     device const uchar* quantisedW [[buffer(0)]],
@@ -102,17 +131,8 @@ kernel void dequant_q1_0_g128_gemv(
     }
 }
 
-/// Optimized Q1_0_g128 GEMV using sign-flip approach and sub-block granularity.
-///
-/// Key optimizations vs original dequant_q1_0_g128_gemv:
-/// 1. Sub-block granularity: 32-weight sub-blocks (4 bytes bits + shared scale)
-///    instead of full 128-weight blocks. With dim=2048 → 64 sub-blocks/row,
-///    all 32 threads stay active (vs 50% idle with 16 blocks/row).
-/// 2. Sign-flip math: dot = scale × Σ select(-x[i], x[i], bit[i])
-///    Avoids per-element scale multiply (1 mul at end vs 128 muls).
-/// 3. x cached in registers: 32 floats cached per sub-block, reused across NR rows.
-/// 4. Precomputed sub-block x sum: S = Σx[i], then dot = scale × (2×B - S)
-///    where B = Σ{bit=1} x[i]. Reduces to 32 conditional adds per sub-block.
+// ─── v2 standalone GEMV (sign-flip + sub-block granularity) ──────────
+
 kernel void dequant_q1_0_g128_gemv_v2(
     device const uchar* quantisedW [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -125,63 +145,36 @@ kernel void dequant_q1_0_g128_gemv_v2(
     const uint row0 = tgIndex * LOCAL_NR;
     if (row0 >= params.rows) return;
 
-    const uint nb = params.blocksPerRow;          // Q1 blocks per row (128 weights each)
-    const uint nbSub = nb * 4;                     // sub-blocks per row (32 weights each)
+    const uint nb = params.blocksPerRow;
+    const uint nbSub = nb * 4;
 
     float sumf[LOCAL_NR] = { 0.f };
 
-    // Row pointers
     device const uchar* ax[LOCAL_NR];
     for (short row = 0; row < LOCAL_NR; row++) {
         uint r = row0 + row;
         ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q1_0_g128BlockBytes;
     }
 
-    // Main loop: each thread processes 1 sub-block (32 weights = 4 bytes) per iteration
     for (uint isb = tiisg; isb < nbSub; isb += 32) {
         const uint parentBlock = isb / 4;
         const uint subIdx = isb % 4;
         const uint xBase = parentBlock * q1_0_g128WeightsPerBlock + subIdx * 32;
 
-        // Cache 32 x values in registers (reused across NR rows)
         float xl[32];
-        device const float* xp = x + xBase;
-        for (short i = 0; i < 32; i++) xl[i] = xp[i];
-
-        // Precompute sum of x for this sub-block (constant across rows)
         float xSum = 0.f;
-        for (short i = 0; i < 32; i++) xSum += xl[i];
+        device const float* xp = x + xBase;
+        for (short i = 0; i < 32; i++) { xl[i] = xp[i]; xSum += xl[i]; }
 
         for (short row = 0; row < LOCAL_NR; row++) {
             if (row0 + row >= params.rows) break;
-
             device const uchar* block = ax[row] + parentBlock * q1_0_g128BlockBytes;
             float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2 + subIdx * 4;
-
-            // Compute B = sum of x[i] where bit[i] == 1 for this sub-block
-            float B = 0.f;
-            for (short bi = 0; bi < 4; bi++) {
-                uchar bits = qs[bi];
-                const short base = bi * 8;
-                B += select(0.f, xl[base + 0], bool(bits & 0x01));
-                B += select(0.f, xl[base + 1], bool(bits & 0x02));
-                B += select(0.f, xl[base + 2], bool(bits & 0x04));
-                B += select(0.f, xl[base + 3], bool(bits & 0x08));
-                B += select(0.f, xl[base + 4], bool(bits & 0x10));
-                B += select(0.f, xl[base + 5], bool(bits & 0x20));
-                B += select(0.f, xl[base + 6], bool(bits & 0x40));
-                B += select(0.f, xl[base + 7], bool(bits & 0x80));
-            }
-            // dot = scale × (2B - S)
-            sumf[row] += scale * (2.f * B - xSum);
+            sumf[row] += q1_subblock_dot(xl, xSum, block + 2 + subIdx * 4, scale);
         }
     }
 
-    // Simdgroup reduction
-    for (short row = 0; row < LOCAL_NR; row++) {
-        sumf[row] = simd_sum(sumf[row]);
-    }
+    for (short row = 0; row < LOCAL_NR; row++) sumf[row] = simd_sum(sumf[row]);
     if (tiisg == 0) {
         for (short row = 0; row < LOCAL_NR; row++) {
             if (row0 + row >= params.rows) break;
@@ -190,15 +183,8 @@ kernel void dequant_q1_0_g128_gemv_v2(
     }
 }
 
-/// Fused Q1 v2 QKV: RMSNorm + Q + K + V in one dispatch using sign-flip math.
-///
-/// Matches the Q8 fused QKV dispatch pattern: NR=2 rows per TG, cooperative RMSNorm,
-/// inline normalization, and writes V as f16 directly to KV cache.
-/// Uses sub-block granularity (32 weights per iteration) for full thread utilization.
-///
-/// Dispatch: ((qRows + 2*kvRows + 1) / 2, tokenCount) threadgroups of 32 threads.
-/// Buffer layout matches Q8 version: wq[0], wk[1], wv[2], x[3], outQ[4], outK[5], outV[6],
-///   params[7], normWeight[8].
+// ─── v2 fused QKV: RMSNorm + Q + K + V in one dispatch ──────────────
+
 kernel void dequant_q1_0_g128_fused_qkv_v2(
     device const uchar* wq [[buffer(0)]],
     device const uchar* wk [[buffer(1)]],
@@ -207,7 +193,7 @@ kernel void dequant_q1_0_g128_fused_qkv_v2(
     device float* outQ [[buffer(4)]],
     device float* outK [[buffer(5)]],
     device half* outV [[buffer(6)]],
-    constant ERDequantQ1_0_g128GEMVParams& params [[buffer(7)]],  // rows=totalQKVRows, cols=dim, blocksPerRow=Q1 blocks
+    constant ERDequantQ1_0_g128GEMVParams& params [[buffer(7)]],
     device const float* normWeight [[buffer(8)]],
     constant float& rmsEps [[buffer(9)]],
     constant uint& qRows [[buffer(10)]],
@@ -216,57 +202,42 @@ kernel void dequant_q1_0_g128_fused_qkv_v2(
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
-
     const uint totalRows = qRows + kvRows + kvRows;
     const uint row0 = tgIndex * LOCAL_NR;
     if (row0 >= totalRows) return;
 
-    const uint nb = params.blocksPerRow;           // Q1 blocks per row
-    const uint nbSub = nb * 4;                      // sub-blocks per row (32 weights each)
+    const uint nb = params.blocksPerRow;
+    const uint nbSub = nb * 4;
     const uint cols = params.cols;
-
     float sumf[LOCAL_NR] = { 0.f };
 
-    // Determine which weight matrix each row belongs to
     device const uchar* ax[LOCAL_NR];
     for (short r = 0; r < LOCAL_NR; r++) {
         uint globalRow = row0 + r;
         if (globalRow >= totalRows) { ax[r] = wq; continue; }
         uint localRow;
         device const uchar* weights;
-        if (globalRow < qRows) {
-            localRow = globalRow;
-            weights = wq;
-        } else if (globalRow < qRows + kvRows) {
-            localRow = globalRow - qRows;
-            weights = wk;
-        } else {
-            localRow = globalRow - qRows - kvRows;
-            weights = wv;
-        }
+        if (globalRow < qRows) { localRow = globalRow; weights = wq; }
+        else if (globalRow < qRows + kvRows) { localRow = globalRow - qRows; weights = wk; }
+        else { localRow = globalRow - qRows - kvRows; weights = wv; }
         ax[r] = weights + localRow * nb * q1_0_g128BlockBytes;
     }
 
-    // === Phase 1: Cooperative RMSNorm ===
-    // Each thread sums squares for its assigned sub-blocks
+    // Cooperative RMSNorm
     float sumSq = 0.0f;
     for (uint isb = tiisg; isb < nbSub; isb += 32) {
         const uint xBase = (isb / 4) * q1_0_g128WeightsPerBlock + (isb % 4) * 32;
-        for (short i = 0; i < 32; i++) {
-            float v = x[xBase + i];
-            sumSq += v * v;
-        }
+        for (short i = 0; i < 32; i++) { float v = x[xBase + i]; sumSq += v * v; }
     }
     sumSq = simd_sum(sumSq);
     const float rmsScale = rsqrt(sumSq / float(cols) + rmsEps);
 
-    // === Phase 2: Main GEMV loop with inline RMSNorm + Q1 v2 sign-flip ===
+    // GEMV with inline RMSNorm
     for (uint isb = tiisg; isb < nbSub; isb += 32) {
         const uint parentBlock = isb / 4;
         const uint subIdx = isb % 4;
         const uint xBase = parentBlock * q1_0_g128WeightsPerBlock + subIdx * 32;
 
-        // Cache normed x in registers (reused across NR rows)
         float xl[32];
         float xSum = 0.f;
         for (short i = 0; i < 32; i++) {
@@ -276,51 +247,27 @@ kernel void dequant_q1_0_g128_fused_qkv_v2(
 
         for (short r = 0; r < LOCAL_NR; r++) {
             if (row0 + r >= totalRows) break;
-
             device const uchar* block = ax[r] + parentBlock * q1_0_g128BlockBytes;
             float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2 + subIdx * 4;
-
-            // Compute B = sum of xl[i] where bit[i] == 1
-            float B = 0.f;
-            for (short bi = 0; bi < 4; bi++) {
-                uchar bits = qs[bi];
-                const short base = bi * 8;
-                B += select(0.f, xl[base + 0], bool(bits & 0x01));
-                B += select(0.f, xl[base + 1], bool(bits & 0x02));
-                B += select(0.f, xl[base + 2], bool(bits & 0x04));
-                B += select(0.f, xl[base + 3], bool(bits & 0x08));
-                B += select(0.f, xl[base + 4], bool(bits & 0x10));
-                B += select(0.f, xl[base + 5], bool(bits & 0x20));
-                B += select(0.f, xl[base + 6], bool(bits & 0x40));
-                B += select(0.f, xl[base + 7], bool(bits & 0x80));
-            }
-            sumf[r] += scale * (2.f * B - xSum);
+            sumf[r] += q1_subblock_dot(xl, xSum, block + 2 + subIdx * 4, scale);
         }
     }
 
-    // === Phase 3: Simdgroup reduction + write ===
     for (short r = 0; r < LOCAL_NR; r++) sumf[r] = simd_sum(sumf[r]);
-
     if (tiisg == 0) {
         for (short r = 0; r < LOCAL_NR; r++) {
             uint globalRow = row0 + r;
             if (globalRow >= totalRows) break;
-
             float total = sumf[r];
-            if (globalRow < qRows) {
-                outQ[globalRow] = total;
-            } else if (globalRow < qRows + kvRows) {
-                outK[globalRow - qRows] = total;
-            } else {
-                outV[globalRow - qRows - kvRows] = half(total);
-            }
+            if (globalRow < qRows) { outQ[globalRow] = total; }
+            else if (globalRow < qRows + kvRows) { outK[globalRow - qRows] = total; }
+            else { outV[globalRow - qRows - kvRows] = half(total); }
         }
     }
 }
 
-/// Fused Q1 v2 GEMV + residual add: computes y = Q1_GEMV(w, x) + residual
-/// Used for Wo projection + residual and Down projection + residual.
+// ─── v2 fused GEMV + residual add ────────────────────────────────────
+
 kernel void dequant_q1_0_g128_gemv_add_v2(
     device const uchar* quantisedW [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -336,7 +283,6 @@ kernel void dequant_q1_0_g128_gemv_add_v2(
 
     const uint nb = params.blocksPerRow;
     const uint nbSub = nb * 4;
-
     float sumf[LOCAL_NR] = { 0.f };
 
     device const uchar* ax[LOCAL_NR];
@@ -353,36 +299,17 @@ kernel void dequant_q1_0_g128_gemv_add_v2(
         float xl[32];
         float xSum = 0.f;
         device const float* xp = x + xBase;
-        for (short i = 0; i < 32; i++) {
-            xl[i] = xp[i];
-            xSum += xl[i];
-        }
+        for (short i = 0; i < 32; i++) { xl[i] = xp[i]; xSum += xl[i]; }
 
         for (short row = 0; row < LOCAL_NR; row++) {
             if (row0 + row >= params.rows) break;
             device const uchar* block = ax[row] + parentBlock * q1_0_g128BlockBytes;
             float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2 + subIdx * 4;
-
-            float B = 0.f;
-            for (short bi = 0; bi < 4; bi++) {
-                uchar bits = qs[bi];
-                const short base = bi * 8;
-                B += select(0.f, xl[base + 0], bool(bits & 0x01));
-                B += select(0.f, xl[base + 1], bool(bits & 0x02));
-                B += select(0.f, xl[base + 2], bool(bits & 0x04));
-                B += select(0.f, xl[base + 3], bool(bits & 0x08));
-                B += select(0.f, xl[base + 4], bool(bits & 0x10));
-                B += select(0.f, xl[base + 5], bool(bits & 0x20));
-                B += select(0.f, xl[base + 6], bool(bits & 0x40));
-                B += select(0.f, xl[base + 7], bool(bits & 0x80));
-            }
-            sumf[row] += scale * (2.f * B - xSum);
+            sumf[row] += q1_subblock_dot(xl, xSum, block + 2 + subIdx * 4, scale);
         }
     }
 
     for (short row = 0; row < LOCAL_NR; row++) sumf[row] = simd_sum(sumf[row]);
-
     if (tiisg == 0) {
         for (short row = 0; row < LOCAL_NR; row++) {
             if (row0 + row >= params.rows) break;
@@ -391,60 +318,48 @@ kernel void dequant_q1_0_g128_gemv_add_v2(
     }
 }
 
-/// Fused Q1 v2 Gate+Up+SwiGLU with inline RMSNorm.
-/// Computes: activated[row] = silu(gate_proj[row]) * up_proj[row]
-/// where gate_proj = Q1_GEMV(Wgate, RMSNorm(x)), up_proj = Q1_GEMV(Wup, RMSNorm(x))
-///
-/// Dispatch: ((gateRows * 2 + 1) / 2, 1) threadgroups of 32 threads.
-inline float q1_silu_fn(float x) { return x / (1.0f + exp(-x)); }
+// ─── v2 fused RMSNorm + Gate + Up (SwiGLU applied by caller) ────────
 
-kernel void dequant_q1_0_g128_fused_gate_up_silu_v2(
+kernel void dequant_q1_0_g128_fused_gate_up_v2(
     device const uchar* wGate [[buffer(0)]],
     device const uchar* wUp [[buffer(1)]],
     device const float* x [[buffer(2)]],
     device float* activated [[buffer(3)]],
     device const float* normWeight [[buffer(4)]],
-    constant ERDequantQ1_0_g128GEMVParams& params [[buffer(5)]],  // rows=gateRows, cols=dim
+    constant ERDequantQ1_0_g128GEMVParams& params [[buffer(5)]],
     constant float& rmsEps [[buffer(6)]],
     uint tgIndex [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]]
 ) {
     constexpr short LOCAL_NR = 2;
-    const uint rows = params.rows;     // gate/up rows (intermediateDim)
-    const uint totalRows = rows * 2;   // gate + up concatenated
+    const uint rows = params.rows;
+    const uint totalRows = rows * 2;
     const uint row0 = tgIndex * LOCAL_NR;
     if (row0 >= totalRows) return;
 
     const uint nb = params.blocksPerRow;
     const uint nbSub = nb * 4;
     const uint cols = params.cols;
-
     float sumf[LOCAL_NR] = { 0.f };
 
     device const uchar* ax[LOCAL_NR];
     for (short r = 0; r < LOCAL_NR; r++) {
         uint globalRow = row0 + r;
         if (globalRow >= totalRows) { ax[r] = wGate; continue; }
-        if (globalRow < rows) {
-            ax[r] = wGate + globalRow * nb * q1_0_g128BlockBytes;
-        } else {
-            ax[r] = wUp + (globalRow - rows) * nb * q1_0_g128BlockBytes;
-        }
+        if (globalRow < rows) { ax[r] = wGate + globalRow * nb * q1_0_g128BlockBytes; }
+        else { ax[r] = wUp + (globalRow - rows) * nb * q1_0_g128BlockBytes; }
     }
 
     // Cooperative RMSNorm
     float sumSq = 0.0f;
     for (uint isb = tiisg; isb < nbSub; isb += 32) {
         const uint xBase = (isb / 4) * q1_0_g128WeightsPerBlock + (isb % 4) * 32;
-        for (short i = 0; i < 32; i++) {
-            float v = x[xBase + i];
-            sumSq += v * v;
-        }
+        for (short i = 0; i < 32; i++) { float v = x[xBase + i]; sumSq += v * v; }
     }
     sumSq = simd_sum(sumSq);
     const float rmsScale = rsqrt(sumSq / float(cols) + rmsEps);
 
-    // Main GEMV loop with inline RMSNorm + Q1 v2
+    // GEMV with inline RMSNorm
     for (uint isb = tiisg; isb < nbSub; isb += 32) {
         const uint parentBlock = isb / 4;
         const uint subIdx = isb % 4;
@@ -461,221 +376,22 @@ kernel void dequant_q1_0_g128_fused_gate_up_silu_v2(
             if (row0 + r >= totalRows) break;
             device const uchar* block = ax[r] + parentBlock * q1_0_g128BlockBytes;
             float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2 + subIdx * 4;
-
-            float B = 0.f;
-            for (short bi = 0; bi < 4; bi++) {
-                uchar bits = qs[bi];
-                const short base = bi * 8;
-                B += select(0.f, xl[base + 0], bool(bits & 0x01));
-                B += select(0.f, xl[base + 1], bool(bits & 0x02));
-                B += select(0.f, xl[base + 2], bool(bits & 0x04));
-                B += select(0.f, xl[base + 3], bool(bits & 0x08));
-                B += select(0.f, xl[base + 4], bool(bits & 0x10));
-                B += select(0.f, xl[base + 5], bool(bits & 0x20));
-                B += select(0.f, xl[base + 6], bool(bits & 0x40));
-                B += select(0.f, xl[base + 7], bool(bits & 0x80));
-            }
-            sumf[r] += scale * (2.f * B - xSum);
+            sumf[r] += q1_subblock_dot(xl, xSum, block + 2 + subIdx * 4, scale);
         }
     }
 
     for (short r = 0; r < LOCAL_NR; r++) sumf[r] = simd_sum(sumf[r]);
-
-    // Apply SwiGLU: activated[row] = silu(gate[row]) * up[row]
-    // Gate rows: row0 < rows, Up rows: row0 >= rows
-    // We need to pair gate[i] with up[i], but each TG processes 2 adjacent rows
-    // from the concatenated space. So we can only apply SwiGLU when both gate and up
-    // are computed. Write raw values first; SwiGLU applied separately if row pairs
-    // don't align. OR: write to separate gate/up buffers and apply SwiGLU in a separate dispatch.
-    //
-    // For simplicity: write gate and up values separately and let the caller apply SwiGLU.
-    // This means this kernel does RMSNorm + Gate + Up (3 ops fused) but NOT SwiGLU.
     if (tiisg == 0) {
         for (short r = 0; r < LOCAL_NR; r++) {
             uint globalRow = row0 + r;
             if (globalRow >= totalRows) break;
-            if (globalRow < rows) {
-                // Gate output — write to first half of activated buffer
-                activated[globalRow] = sumf[r];
-            } else {
-                // Up output — write to second half
-                activated[globalRow] = sumf[r];
-            }
+            activated[globalRow] = sumf[r];
         }
     }
 }
 
-/// Fused Q1 QKV GEMV: processes Q, K, V matrices in one dispatch.
-/// Reads x once, computes all three projections, writes three separate outputs.
-/// Eliminates 2 redundant x reads and 2 dispatch overheads per layer.
-///
-/// Layout: Q weights [qRows×cols], K weights [kvRows×cols], V weights [kvRows×cols]
-/// Outputs: Q out [qRows], K out [kvRows], V out [kvRows]
-///
-/// Dispatch: 1 threadgroup of 256 threads, each processes totalRows/256 rows
-kernel void dequant_q1_0_g128_fused_qkv(
-    device const uchar* wq [[buffer(0)]],
-    device const uchar* wk [[buffer(1)]],
-    device const uchar* wv [[buffer(2)]],
-    device const float* x [[buffer(3)]],
-    device float* qOut [[buffer(4)]],
-    device float* kOut [[buffer(5)]],
-    device float* vOut [[buffer(6)]],
-    constant uint3& dims [[buffer(7)]],  // x=qRows, y=kvRows, z=cols
-    uint ti [[thread_position_in_threadgroup]]
-) {
-    constexpr uint THREADS = 256;
-    const uint qRows = dims.x;
-    const uint kvRows = dims.y;
-    const uint cols = dims.z;
-    const uint nb = cols / q1_0_g128WeightsPerBlock;
-    const uint totalRows = qRows + kvRows + kvRows;
+// ─── Fused Q1 final norm + LM head (v1 pattern, 256 threads/TG) ─────
 
-    // Phase 1: Cache x in threadgroup memory (cooperative load)
-    threadgroup float xShared[8192];
-    const uint floatsPerThread = (cols + THREADS - 1) / THREADS;
-    const uint loadStart = ti * floatsPerThread;
-    const uint loadEnd = min(loadStart + floatsPerThread, cols);
-    for (uint i = loadStart; i < loadEnd; i++) {
-        xShared[i] = x[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Phase 2: Each thread processes its assigned rows across Q, K, V
-    const uint rowsPerThread = (totalRows + THREADS - 1) / THREADS;
-    const uint rowStart = ti * rowsPerThread;
-    const uint rowEnd = min(rowStart + rowsPerThread, totalRows);
-
-    for (uint row = rowStart; row < rowEnd; row++) {
-        float sum = 0.f;
-        device const uchar* wRow;
-        if (row < qRows) {
-            wRow = wq + row * nb * q1_0_g128BlockBytes;
-        } else if (row < qRows + kvRows) {
-            wRow = wk + (row - qRows) * nb * q1_0_g128BlockBytes;
-        } else {
-            wRow = wv + (row - qRows - kvRows) * nb * q1_0_g128BlockBytes;
-        }
-
-        for (uint ib = 0; ib < nb; ib++) {
-            device const uchar* block = wRow + ib * q1_0_g128BlockBytes;
-            float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2;
-            const uint xBase = ib * q1_0_g128WeightsPerBlock;
-
-            for (uint bi = 0; bi < 16; bi++) {
-                uchar bits = qs[bi];
-                const uint eb = xBase + bi * 8;
-                float4 xv0 = float4(xShared[eb],   xShared[eb+1], xShared[eb+2], xShared[eb+3]);
-                float4 xv1 = float4(xShared[eb+4], xShared[eb+5], xShared[eb+6], xShared[eb+7]);
-                float4 s0 = float4(
-                    (((bits >> 0) & 1) * 2 - 1) * scale,
-                    (((bits >> 1) & 1) * 2 - 1) * scale,
-                    (((bits >> 2) & 1) * 2 - 1) * scale,
-                    (((bits >> 3) & 1) * 2 - 1) * scale
-                );
-                float4 s1 = float4(
-                    (((bits >> 4) & 1) * 2 - 1) * scale,
-                    (((bits >> 5) & 1) * 2 - 1) * scale,
-                    (((bits >> 6) & 1) * 2 - 1) * scale,
-                    (((bits >> 7) & 1) * 2 - 1) * scale
-                );
-                sum += dot(s0, xv0) + dot(s1, xv1);
-            }
-        }
-
-        // Write to correct output buffer
-        if (row < qRows) {
-            qOut[row] = sum;
-        } else if (row < qRows + kvRows) {
-            kOut[row - qRows] = sum;
-        } else {
-            vOut[row - qRows - kvRows] = sum;
-        }
-    }
-}
-
-/// Fused Q1 Gate+Up GEMV: processes Gate and Up matrices in one dispatch.
-/// Same pattern as fused QKV but for FFN gate/up projections.
-kernel void dequant_q1_0_g128_fused_gate_up(
-    device const uchar* wGate [[buffer(0)]],
-    device const uchar* wUp [[buffer(1)]],
-    device const float* x [[buffer(2)]],
-    device float* gateOut [[buffer(3)]],
-    device float* upOut [[buffer(4)]],
-    constant uint2& dims [[buffer(5)]],  // x=rows, y=cols
-    uint ti [[thread_position_in_threadgroup]]
-) {
-    constexpr uint THREADS = 256;
-    const uint rows = dims.x;
-    const uint cols = dims.y;
-    const uint nb = cols / q1_0_g128WeightsPerBlock;
-    const uint totalRows = rows * 2;  // Gate + Up
-
-    // Phase 1: Cache x
-    threadgroup float xShared[8192];
-    const uint floatsPerThread = (cols + THREADS - 1) / THREADS;
-    const uint loadStart = ti * floatsPerThread;
-    const uint loadEnd = min(loadStart + floatsPerThread, cols);
-    for (uint i = loadStart; i < loadEnd; i++) {
-        xShared[i] = x[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Phase 2: Each thread processes Gate + Up rows
-    const uint rowsPerThread = (totalRows + THREADS - 1) / THREADS;
-    const uint rowStart = ti * rowsPerThread;
-    const uint rowEnd = min(rowStart + rowsPerThread, totalRows);
-
-    for (uint row = rowStart; row < rowEnd; row++) {
-        float sum = 0.f;
-        device const uchar* wRow;
-        if (row < rows) {
-            wRow = wGate + row * nb * q1_0_g128BlockBytes;
-        } else {
-            wRow = wUp + (row - rows) * nb * q1_0_g128BlockBytes;
-        }
-
-        for (uint ib = 0; ib < nb; ib++) {
-            device const uchar* block = wRow + ib * q1_0_g128BlockBytes;
-            float scale = float(as_type<half>(*(device const ushort*)(block)));
-            device const uchar* qs = block + 2;
-            const uint xBase = ib * q1_0_g128WeightsPerBlock;
-
-            for (uint bi = 0; bi < 16; bi++) {
-                uchar bits = qs[bi];
-                const uint eb = xBase + bi * 8;
-                float4 xv0 = float4(xShared[eb],   xShared[eb+1], xShared[eb+2], xShared[eb+3]);
-                float4 xv1 = float4(xShared[eb+4], xShared[eb+5], xShared[eb+6], xShared[eb+7]);
-                float4 s0 = float4(
-                    (((bits >> 0) & 1) * 2 - 1) * scale,
-                    (((bits >> 1) & 1) * 2 - 1) * scale,
-                    (((bits >> 2) & 1) * 2 - 1) * scale,
-                    (((bits >> 3) & 1) * 2 - 1) * scale
-                );
-                float4 s1 = float4(
-                    (((bits >> 4) & 1) * 2 - 1) * scale,
-                    (((bits >> 5) & 1) * 2 - 1) * scale,
-                    (((bits >> 6) & 1) * 2 - 1) * scale,
-                    (((bits >> 7) & 1) * 2 - 1) * scale
-                );
-                sum += dot(s0, xv0) + dot(s1, xv1);
-            }
-        }
-
-        if (row < rows) {
-            gateOut[row] = sum;
-        } else {
-            upOut[row - rows] = sum;
-        }
-    }
-}
-
-/// Fused Q1_0_g128 GEMV with RMSNorm for LM head projection.
-/// Computes: logits = Q1_GEMV(RMSNorm(hidden)) in a single dispatch.
-/// Dispatch: (vocabSize + 255) / 256 threadgroups of 256 threads
-/// Buffer 4: packed params — uint2 dims (8 bytes) + float rmsEps (4 bytes) = 12 bytes
 struct Q1FusedLMHeadParams {
     uint2 dims;  // x=vocabSize, y=dim
     float rmsEps;
@@ -698,49 +414,37 @@ kernel void dequant_q1_0_g128_fused_final_norm_gemv(
     const uint row = tg * THREADS + ti;
     if (row >= vocabSize) return;
 
-    // Phase 1: Compute RMSNorm of hidden in threadgroup memory
     threadgroup float xNorm[2048];
     const uint floatsPerThread = (dim + THREADS - 1) / THREADS;
     const uint loadStart = ti * floatsPerThread;
     const uint loadEnd = min(loadStart + floatsPerThread, dim);
 
-    // First pass: compute sum of squares
     float localSumSq = 0.f;
     for (uint i = loadStart; i < loadEnd; i++) {
         localSumSq += hidden[i] * hidden[i];
     }
 
-    // Reduce across threads in threadgroup
     threadgroup float sharedSum[256];
     sharedSum[ti] = localSumSq;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Simple tree reduction
     for (uint s = 128; s > 0; s >>= 1) {
-        if (ti < s) {
-            sharedSum[ti] += sharedSum[ti + s];
-        }
+        if (ti < s) { sharedSum[ti] += sharedSum[ti + s]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     const float invRms = rsqrt(sharedSum[0] * (1.0f / float(dim)) + rmsEps);
-
-    // Second pass: normalize and cache
     for (uint i = loadStart; i < loadEnd; i++) {
         xNorm[i] = hidden[i] * invRms * rmsNormW[i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 2: Compute GEMV for this row
     float sum = 0.f;
     device const uchar* wRow = lmHeadW + row * nb * q1_0_g128BlockBytes;
-
     for (uint ib = 0; ib < nb; ib++) {
         device const uchar* block = wRow + ib * q1_0_g128BlockBytes;
         float scale = float(as_type<half>(*(device const ushort*)(block)));
         device const uchar* qs = block + 2;
         const uint xBase = ib * q1_0_g128WeightsPerBlock;
-
         for (uint bi = 0; bi < 16; bi++) {
             uchar bits = qs[bi];
             const uint eb = xBase + bi * 8;
@@ -761,6 +465,5 @@ kernel void dequant_q1_0_g128_fused_final_norm_gemv(
             sum += dot(s0, xv0) + dot(s1, xv1);
         }
     }
-
     logits[row] = sum;
 }
