@@ -27,6 +27,7 @@ struct TurboQuantAttentionTests {
         #expect(TurboQuantV2Contract.valuePreset == .turbo3)
         #expect(TurboQuantV2Contract.keyCacheType(forLayer: 0, layerCount: 28) == .turbo3)
         #expect(TurboQuantV2Contract.valueCacheType(forLayer: 0, layerCount: 28) == .turbo3)
+        #expect(TurboQuantV2Contract.innerQ == .disabled)
 
         try withEnv("EDGERUNNER_TURBOQUANT_KEY_TYPE", value: "turbo4") {
             #expect(TurboQuantV2Contract.keyType == .turbo4)
@@ -295,6 +296,16 @@ struct TurboQuantAttentionTests {
         try verifyPrefillAttentionMatchesDecodedCPUReference(kvSeqLen: 130, keyPreset: .turbo3, valuePreset: .turbo3)
     }
 
+    @Test func groupedTurbo3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext() throws {
+        try verifyGroupedPrefillAttentionMatchesDecodedCPUReference(
+            kvSeqLen: 130,
+            numHeads: 16,
+            numKVHeads: 8,
+            keyPreset: .turbo3,
+            valuePreset: .turbo3
+        )
+    }
+
     private func verifyPrefillAttentionMatchesDecodedCPUReference(
         kvSeqLen: Int,
         keyPreset: TurboQuantPreset? = nil,
@@ -403,6 +414,123 @@ struct TurboQuantAttentionTests {
             )
             let outputStart = qIndex * 128
             let actual = Array(gpu[outputStart..<(outputStart + 128)])
+            for (lhs, rhs) in zip(actual, expected) {
+                #expect(abs(lhs - rhs) < 0.30)
+            }
+        }
+    }
+
+    private func verifyGroupedPrefillAttentionMatchesDecodedCPUReference(
+        kvSeqLen: Int,
+        numHeads: Int,
+        numKVHeads: Int,
+        keyPreset: TurboQuantPreset,
+        valuePreset: TurboQuantPreset
+    ) throws {
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: max(kvSeqLen + 2, 8),
+            numLayers: 1,
+            numKVHeads: numKVHeads,
+            headDim: 128,
+            precision: .turboquantV2
+        )
+
+        var keyRowsByToken: [[[Float]]] = []
+        var valueRowsByToken: [[[Float]]] = []
+        for tokenIndex in 0..<kvSeqLen {
+            let keyRows = (0..<numKVHeads).map { kvHead in
+                makeSignal(phase: Float(tokenIndex) * 0.19 + Float(kvHead) * 0.31)
+            }
+            let valueRows = (0..<numKVHeads).map { kvHead in
+                makeSignal(phase: 0.67 + Float(tokenIndex) * 0.13 + Float(kvHead) * 0.29)
+            }
+            try cache.append(
+                layer: 0,
+                keys: keyRows.flatMap { $0 },
+                values: valueRows.flatMap { $0 }
+            )
+            keyRowsByToken.append(keyRows)
+            valueRowsByToken.append(valueRows)
+        }
+
+        let buffers = try cache.turboQuantMetalBuffers(layer: 0)
+        let (_, decodedValues) = try cache.retrieveDecodedTurboQuant(layer: 0)
+        let decodedValuesByToken = decodedValues.chunked(into: 128).chunked(into: numKVHeads)
+        let qRowsByToken = (0..<kvSeqLen).map { tokenIndex in
+            (0..<numHeads).map { headIndex in
+                makeSignal(phase: 0.11 + Float(tokenIndex) * 0.07 + Float(headIndex) * 0.17)
+            }
+        }
+        let flattenedQ = qRowsByToken.flatMap { $0.flatMap { $0 } }
+        let qBuffer = device.makeBuffer(
+            bytes: flattenedQ,
+            length: flattenedQ.count * MemoryLayout<Float>.stride
+        )!
+        let outputBuffer = device.makeBuffer(length: flattenedQ.count * MemoryLayout<Float>.stride)!
+        let kernel = try TurboQuantKernel(device: device)
+        var params = try makeAttentionParams(
+            seqLen: kvSeqLen,
+            kvSeqLen: kvSeqLen,
+            qOffset: 0,
+            keyPreset: keyPreset,
+            valuePreset: valuePreset,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads
+        )
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            Issue.record("Failed to create Metal command buffer")
+            return
+        }
+
+        encoder.setComputePipelineState(kernel.attentionPipeline)
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(buffers.key.codes, offset: 0, index: 1)
+        encoder.setBuffer(buffers.key.residualSigns, offset: 0, index: 2)
+        encoder.setBuffer(buffers.key.outlierMask, offset: 0, index: 3)
+        encoder.setBuffer(buffers.key.metadata, offset: 0, index: 4)
+        encoder.setBuffer(buffers.value.codes, offset: 0, index: 5)
+        encoder.setBuffer(buffers.value.residualSigns, offset: 0, index: 6)
+        encoder.setBuffer(buffers.value.outlierMask, offset: 0, index: 7)
+        encoder.setBuffer(buffers.value.metadata, offset: 0, index: 8)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 9)
+        encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
+        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
+        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (kvSeqLen + GQAKernel.blockSize - 1) / GQAKernel.blockSize, height: numHeads, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let gpu = Array(
+            UnsafeBufferPointer(
+                start: outputBuffer.contents().bindMemory(to: Float.self, capacity: flattenedQ.count),
+                count: flattenedQ.count
+            )
+        )
+        let tokenIndicesToCheck = kvSeqLen <= 8 ? Array(qRowsByToken.indices) : [0, 1, kvSeqLen - 1]
+        for tokenIndex in tokenIndicesToCheck {
+            let expected = try cpuGroupedTurboQuantAttention(
+                qRows: qRowsByToken[tokenIndex],
+                keyRowsByToken: Array(keyRowsByToken.prefix(tokenIndex + 1)),
+                decodedValuesByToken: Array(decodedValuesByToken.prefix(tokenIndex + 1)),
+                numHeads: numHeads,
+                numKVHeads: numKVHeads,
+                keyPreset: keyPreset
+            )
+            let outputStart = tokenIndex * numHeads * 128
+            let actual = Array(gpu[outputStart..<(outputStart + (numHeads * 128))])
             for (lhs, rhs) in zip(actual, expected) {
                 #expect(abs(lhs - rhs) < 0.30)
             }

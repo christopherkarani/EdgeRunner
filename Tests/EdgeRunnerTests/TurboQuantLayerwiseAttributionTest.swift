@@ -488,6 +488,136 @@ struct TurboQuantLayerwiseAttributionTest {
     }
 
     @Test
+    func compareStoredLayer0Turbo3RowsAgainstForkReferenceOnRealActivations() async throws {
+        guard ProcessInfo.processInfo.environment[Self.runEnvKey] == "1" else {
+            return
+        }
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            Issue.record("Missing model file at \(Self.modelPath)")
+            return
+        }
+        guard TurboQuantV2Contract.keyPreset == .turbo3 else {
+            Issue.record("This regression is intended for the active pure turbo3 key path")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+
+        let promptLength = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_V2_LAYERWISE_PROMPT_LEN"] ?? "128") ?? 128
+        let layerIndex = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_V2_REPLAY_LAYER"] ?? "0") ?? 0
+        let guidedDecodeSteps = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_V2_LAYERWISE_GUIDED_STEPS"] ?? "2") ?? 2
+        let prompt = Array(repeating: 9707, count: promptLength)
+        let modelURL = URL(fileURLWithPath: Self.modelPath)
+        let guidedTokens = try await greedyPrefix(
+            modelURL: modelURL,
+            prompt: prompt,
+            steps: guidedDecodeSteps
+        )
+        let traceTokens = prompt + guidedTokens
+        let inputs = try await loadAttentionInputsTrace(
+            modelURL: modelURL,
+            tokenIDs: traceTokens,
+            compression: .disabled
+        )
+
+        let keyRows = inputs.exactKeys[layerIndex]
+        let valueRows = inputs.exactValues[layerIndex]
+        let tokenCount = keyRows.count
+        let numKVHeads = 8
+        let headDim = 128
+
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: max(tokenCount + 2, 8),
+            numLayers: 1,
+            numKVHeads: numKVHeads,
+            headDim: headDim,
+            precision: .turboquantV2
+        )
+        for tokenIndex in 0..<tokenCount {
+            try cache.append(
+                layer: 0,
+                keys: keyRows[tokenIndex],
+                values: valueRows[tokenIndex]
+            )
+        }
+
+        let storedRuntimeRows = try cache.retrieveTurboQuantRuntimeRows(layer: 0).keys
+        var forkRuntimeRows: [ForkTurbo3RowReference] = []
+        forkRuntimeRows.reserveCapacity(storedRuntimeRows.count)
+        for row in keyRows {
+            for kvHead in 0..<numKVHeads {
+                let start = kvHead * headDim
+                let end = start + headDim
+                forkRuntimeRows.append(try forkStyleTurbo3RuntimeRow(Array(row[start..<end])))
+            }
+        }
+
+        var worstCodeWordMismatchRow = -1
+        var worstCodeWordMismatchCount = -1
+        var worstRowNormMismatchRow = -1
+        var worstRowNormDelta: Float = 0
+        var worstDecodedMismatchRow = -1
+        var worstDecodedMaxAbs: Float = 0
+
+        for rowIndex in storedRuntimeRows.indices {
+            let stored = storedRuntimeRows[rowIndex]
+            let fork = forkRuntimeRows[rowIndex]
+            let codeWordMismatchCount = zip(stored.primaryCodes, fork.primaryCodes).reduce(0) { partial, pair in
+                partial + (pair.0 == pair.1 ? 0 : 1)
+            }
+            if codeWordMismatchCount > worstCodeWordMismatchCount {
+                worstCodeWordMismatchCount = codeWordMismatchCount
+                worstCodeWordMismatchRow = rowIndex
+            }
+            let rowNormDelta = abs(stored.rowNorm - fork.rowNorm)
+            if rowNormDelta > worstRowNormDelta {
+                worstRowNormDelta = rowNormDelta
+                worstRowNormMismatchRow = rowIndex
+            }
+
+            let storedDecoded = try TurboQuantReferenceEncoder.approximateDecode(
+                runtimeRow: stored,
+                residualWeight: 0,
+                rotationSeed: TurboQuantSeeds.keyRotation,
+                residualSeed: TurboQuantSeeds.keyResidual
+            )
+            let forkDecoded = try decodeForkStyleTurbo3Row(fork)
+            let decodedMaxAbs = maxAbsoluteDelta(storedDecoded, forkDecoded)
+            if decodedMaxAbs > worstDecodedMaxAbs {
+                worstDecodedMaxAbs = decodedMaxAbs
+                worstDecodedMismatchRow = rowIndex
+            }
+
+            #expect(stored.preset == .turbo3)
+            #expect(stored.primaryCodes == fork.primaryCodes)
+            #expect(stored.residualSigns == fork.residualSigns)
+            #expect(stored.outlierMask == fork.outlierMask)
+            #expect(abs(stored.rowNorm - fork.rowNorm) < 1e-5)
+            #expect(abs(stored.residualNorm - fork.residualNorm) < 1e-8)
+            #expect(decodedMaxAbs < 1e-4)
+        }
+
+        print("""
+        [turboquant-v2-fork-row-parity]
+          prompt_len=\(promptLength)
+          guided_decode_steps=\(guidedDecodeSteps)
+          guided_tokens=\(guidedTokens)
+          layer_index=\(layerIndex)
+          token_count=\(tokenCount)
+          runtime_row_count=\(storedRuntimeRows.count)
+          worst_code_word_mismatch_row=\(worstCodeWordMismatchRow)
+          worst_code_word_mismatch_count=\(worstCodeWordMismatchCount)
+          worst_row_norm_mismatch_row=\(worstRowNormMismatchRow)
+          worst_row_norm_max_abs_delta=\(String(format: "%.8f", worstRowNormDelta))
+          worst_decoded_mismatch_row=\(worstDecodedMismatchRow)
+          worst_decoded_max_abs_delta=\(String(format: "%.8f", worstDecodedMaxAbs))
+        """)
+    }
+
+    @Test
     func compareAttentionInputsAgainstQ8Baseline() async throws {
         guard ProcessInfo.processInfo.environment[Self.runEnvKey] == "1" else {
             return
@@ -1273,6 +1403,84 @@ struct TurboQuantLayerwiseAttributionTest {
         }
     }
 
+    private func forkStyleTurbo3RuntimeRow(_ vector: [Float]) throws -> ForkTurbo3RowReference {
+        let rotated = try TurboQuantTransform.randomizedHadamard(vector.map { $0 }, seed: TurboQuantSeeds.keyRotation)
+        let rowNorm = sqrt(vector.reduce(Float.zero) { partial, value in
+            partial + (value * value)
+        })
+        let layout = try TurboQuantLayout(preset: .turbo3, dimension: vector.count)
+        if rowNorm == 0 {
+            return ForkTurbo3RowReference(
+                dimension: vector.count,
+                codes: [UInt8](repeating: 0, count: vector.count),
+                primaryCodes: [UInt32](repeating: 0, count: layout.runtimeCodeWordsPerRow),
+                residualSigns: [UInt32](repeating: 0, count: TurboQuantLayout.residualWordsPerRow),
+                outlierMask: [UInt32](repeating: 0, count: TurboQuantLayout.outlierMaskWordsPerRow),
+                rowNorm: 0,
+                residualNorm: 0
+            )
+        }
+
+        let normalizedRotated = rotated.map { $0 / rowNorm }
+        let centroids: [Float] = [
+            -0.190685, -0.117832, -0.065717, -0.021460,
+             0.021460,  0.065717,  0.117832,  0.190685,
+        ]
+        let codes = normalizedRotated.map { value -> UInt8 in
+            var bestIndex = 0
+            var bestDelta = Float.infinity
+            for (index, centroid) in centroids.enumerated() {
+                let delta = abs(value - centroid)
+                if delta < bestDelta {
+                    bestDelta = delta
+                    bestIndex = index
+                }
+            }
+            return UInt8(bestIndex)
+        }
+        let reconstructedNorm = sqrt(codes.reduce(Float.zero) { partial, code in
+            let centroid = centroids[Int(code)]
+            return partial + (centroid * centroid)
+        })
+        let correctedNorm = reconstructedNorm > 1e-10 ? (rowNorm / reconstructedNorm) : rowNorm
+
+        return ForkTurbo3RowReference(
+            dimension: vector.count,
+            codes: codes,
+            primaryCodes: try packThreeBitCodes(codes),
+            residualSigns: [UInt32](repeating: 0, count: TurboQuantLayout.residualWordsPerRow),
+            outlierMask: [UInt32](repeating: 0, count: TurboQuantLayout.outlierMaskWordsPerRow),
+            rowNorm: correctedNorm,
+            residualNorm: 0
+        )
+    }
+
+    private func decodeForkStyleTurbo3Row(_ row: ForkTurbo3RowReference) throws -> [Float] {
+        let centroids: [Float] = [
+            -0.190685, -0.117832, -0.065717, -0.021460,
+             0.021460,  0.065717,  0.117832,  0.190685,
+        ]
+        let rotated = row.codes.map { centroids[Int($0)] * row.rowNorm }
+        return Array(try TurboQuantTransform.inverseRandomizedHadamard(rotated, seed: TurboQuantSeeds.keyRotation).prefix(row.dimension))
+    }
+
+    private func packThreeBitCodes(_ codes: [UInt8]) throws -> [UInt32] {
+        let layout = try TurboQuantLayout(preset: .turbo3, dimension: codes.count)
+        var words = [UInt32](repeating: 0, count: layout.runtimeCodeWordsPerRow)
+        for (index, code) in codes.enumerated() {
+            let bitOffset = index * 3
+            let wordIndex = bitOffset / 32
+            let shift = bitOffset % 32
+            let value = UInt32(code & 0x7)
+            words[wordIndex] |= value << UInt32(shift)
+            let spill = shift + 3 - 32
+            if spill > 0 {
+                words[wordIndex + 1] |= value >> UInt32(3 - spill)
+            }
+        }
+        return words
+    }
+
     private func softmax(_ values: [Float], chunkSize: Int) -> [Float] {
         var result = values
         for offset in stride(from: 0, to: values.count, by: chunkSize) {
@@ -1319,6 +1527,16 @@ struct TurboQuantLayerwiseAttributionTest {
 private struct LayerDelta: Sendable {
     let layerIndex: Int
     let maxAbsoluteDelta: Float
+}
+
+private struct ForkTurbo3RowReference {
+    let dimension: Int
+    let codes: [UInt8]
+    let primaryCodes: [UInt32]
+    let residualSigns: [UInt32]
+    let outlierMask: [UInt32]
+    let rowNorm: Float
+    let residualNorm: Float
 }
 
 private struct TurboQuantAttentionParams {

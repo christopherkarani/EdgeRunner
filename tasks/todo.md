@@ -1,77 +1,92 @@
-# TurboQuant Rollout Execution
+# TurboQuant Pinned Rollout Execution
 
-- [x] Update the default TurboQuant v2 contract to fork-aligned `turbo3` K/V defaults and fork-compatible adaptive policy semantics
-- [x] Add focused failing tests for the new defaults, adaptive mode mapping, and `turbo_innerq_scale_inv` lifecycle
-- [x] Implement persistent InnerQ calibration state and `scale_inv` buffer upload in the Swift/Metal runtime
-- [x] Apply fork-style InnerQ scaling in the TurboQuant attention path and keep graph/order semantics aligned with the fork-backed attribution harness
-- [x] Add a failing fixed-`turbo3` row-metadata parity check and patch the Metal quantizer to emit fork-correct corrected norms for no-residual layouts
-- [x] Re-run targeted Metal/reference/layerwise tests after each semantic port and fix stale turbo2 test assumptions before moving on
-- [ ] Re-run pinned smoke, 128-token quality, and 4096-token benchmark gates on the active default path
-- [ ] Run 8192-token and 16384-token benchmarks if the 4096-token gate is stable, then record review results and remaining gaps
+- [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
+- [ ] Add or tighten failing targeted tests for that gap before changing runtime behavior
+- [ ] Port the missing or regressed fork-aligned behavior into the default TurboQuant path without restoring `q8_0` shortcut rails
+- [ ] Re-run targeted low-level TurboQuant Metal/reference/layerwise tests after each semantic change and keep only correctness-improving edits
+- [ ] Re-run the pinned rollout gates on the active default path:
+  - [ ] smoke
+  - [ ] 128-token quality
+  - [ ] 4096-token benchmark
+- [ ] If the 4096-token gate is green, run repeated validation:
+  - [ ] smoke x3
+  - [ ] 128-token quality x3
+  - [ ] 4096-token benchmark x3
+  - [ ] 8192-token benchmark
+  - [ ] 16384-token benchmark if supported
+  - [ ] low-level TurboQuant Metal/reference suite
+  - [ ] layerwise attribution rerun
+- [ ] If Phase 1 and Phase 2 pass, assess repo production readiness and fork/paper comparability with measured evidence only
+- [ ] If Phase 1 still fails after literal fork-port attempts, document the exact blocker with source-backed evidence and stop tuning
+
+## TurboQuant Fork Semantics Audit
+
+- [x] Pull the exact `TheTom/llama-cpp-turboquant` `feature/turboquant-kv-cache` source for the referenced KV/cache, graph, TurboQuant, CUDA, and quality-gate files
+- [x] Extract exact pure-`turbo3/turbo3` semantics for KV encode/decode, `innerq scale_inv`, row metadata, graph/cache behavior, and quality gates
+- [x] Compare those fork semantics against the active EdgeRunner TurboQuant KV/runtime/test path
+- [x] Return the concrete parity requirements and any conditions that block exact parity in this repo
+
+### TurboQuant Fork Audit Review
+
+- Fork audit covered `src/llama-kv-cache.cpp`, `src/llama-graph.cpp`, `ggml/src/ggml-turbo-quant.c`, `ggml/src/ggml-cuda/turbo-quant.cuh`, `ggml/src/ggml-cuda/set-rows.cu`, `ggml/src/ggml-cuda/fattn-common.cuh`, and `scripts/turbo-quality-gate.sh` from `TheTom/llama-cpp-turboquant` branch `feature/turboquant-kv-cache`.
+- Confirmed fork pure-`turbo3/turbo3` semantics are: uniform `turbo3` K/V by default, per-head zero-padding to 128 when needed, corrected-norm-only `turbo3` row metadata, graph-side Q pre-rotation plus FA-output inverse WHT, and `InnerQ` as a K-side calibration lifecycle that publishes `scale_inv` into graph-visible tensors after calibration finalizes.
+- Confirmed EdgeRunner already matches some of the intended behavior at a high level: default `turbo3/turbo3`, `InnerQ` auto-calibration logic with skip-on-balanced channels, and corrected fixed-type metadata for `turbo3`.
+- Confirmed exact fork parity is still blocked for some cases by design differences: EdgeRunner stores TurboQuant rows in split Metal buffers with extra metadata lanes instead of native `GGML_TYPE_TURBO3_0` blocks, uses a different runtime/graph backend than ggml CUDA, and hard-limits TurboQuant layout dimension to `<= 128` instead of the fork’s zero-padded larger-head support.
 
 ## Current Baseline
 
-- Smoke fails on the active default path:
+- Latest verified failing default-path rollout before this execution:
   - `q8=[358, 2776, 264, 5458]`
   - `turboquant_v2=[16, 220, 220, 220]`
-- 128-token quality fails on the active default path:
+- 128-token quality:
   - `divergence_steps=7`
   - `first_divergence_step=1`
   - `max_abs_logit_delta=23.3483`
   - `q8_generated=[1479, 198, 3838, 374, 279, 374, 279, 897]`
   - `turboquant_v2_generated=[1479, 1479, 1479, 1479, 1479, 1479, 1479, 1479]`
-- 4096-token benchmark currently shows:
+- 4096-token benchmark:
   - `q8_decode_tok_s=1.74`
   - `turboquant_v2_decode_tok_s=1.87`
   - `q8_ttft_ms=34471.85`
   - `turboquant_v2_ttft_ms=123002.00`
-- Fork-backed gaps confirmed from source review:
-  - local default contract still uses `turbo2`-centric defaults instead of the fork’s `turbo3` quality gate
-  - local runtime does not implement the fork’s live `turbo_innerq_scale_inv` calibration/update lifecycle
-  - local adaptive policy surface does not match the fork’s `TURBO_LAYER_ADAPTIVE` semantics
+- Attribution and prior source review indicate:
+  - layer-0 attention inputs still match Q8 on real activations
+  - first real divergence remains at the layer-0 attention output
+  - dominant remaining error is key fidelity on real activations under the pure Turbo path
+  - the branch contains user edits in active TurboQuant files, so regression isolation must work with the dirty tree rather than resetting files
 
 ## Current Review
 
-- Completed in this pass:
-  - fixed the active Metal `turboquant_quantize_rows` path so fixed `turbo2`/`turbo3`/`turbo4` rows now store fork-style corrected norm and zero residual norm
-  - added `gpuFixedTurbo3RowsMatchReferenceRuntimeMetadata` as a failing-first regression test and verified it passes after the shader fix
-  - fixed stale `turbo2` parameter wiring in the Metal attention tests so explicit `turbo3` prefill/single-query checks now exercise the real contract rather than mismatched `turbo2` metadata
-- Verified targeted tests now passing:
-  - `swift test --filter TurboQuantAttentionTests/gpuFixedTurbo3RowsMatchReferenceRuntimeMetadata`
-  - `swift test --filter TurboQuantAttentionTests/gpuQuantizedRowsDecodeLikeReferenceRuntimeRows`
-  - `swift test --filter TurboQuantAttentionTests/turbo3AttentionMatchesDecodedCPUReference`
-  - `swift test --filter TurboQuantAttentionTests/turbo3PrefillAttentionMatchesDecodedCPUReference`
-- Verified attribution after the shader fix:
-  - `compareAttentionInputsAgainstQ8Baseline` still reports exact layer-0 attention inputs
-  - `compareLayerwiseTraceAgainstQ8Baseline` still diverges first at layer-0 attention output with `q8_argmax=3838`, `turboquant_v2_argmax=1479`, and `max_abs_logit_delta=15.777901`
-  - `replayLayer0AttentionOnRealActivations` still shows key fidelity as the dominant error (`exact_k_decoded_v_mse=0.000383` vs `decoded_k_exact_v_mse=0.014278`)
-- Current blocker under investigation:
-  - default pure `turbo3/turbo3` still fails pinned smoke after the corrected-norm fix (`turboquant_v2=[16, 15, 15, 15]`)
-  - a controlled early-activation InnerQ check (`EDGERUNNER_TURBOQUANT_INNERQ_SAMPLES=4`) did not change smoke, so the remaining blocker is not just delayed InnerQ activation
+- Relevant completed state carried into this execution:
+  - default TurboQuant contract is already set to fork-aligned `turbo3/turbo3`
+  - `turbo_innerq_scale_inv` lifecycle plumbing exists in Swift and Metal
+  - fixed-type row metadata for `turbo2`/`turbo3`/`turbo4` was corrected to the fork/reference layout
+  - explicit low-level `turbo3` attention and prefill Metal tests were repaired and passing
+- Current execution focus:
+  - confirm whether the remaining failure is a missing fork semantic, a regression relative to checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, or a fundamental blocker in this repo’s pure-Turbo design
+  - do not accept `q8_0` shortcut rails as the final state
 
 ## Review
 
-- Baseline before this execution:
-  - `EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --filter turboQuantV2GreedyTraceMatchesQ8Baseline` passes with `q8=[358, 2776, 264, 5458]` and `turboquant_v2=[358, 2776, 264, 5458]`
-  - `EDGERUNNER_RUN_TURBOQUANT_V2_QUALITY=1 EDGERUNNER_TURBOQUANT_V2_QUALITY_PROMPT_LENS=128 swift test --skip-build --filter compareTurboQuantV2AgainstQ8BaselineAcrossContexts` passes with `divergence_steps=0` and `max_abs_logit_delta=0.0000`
-  - Those short-context gates are not yet proving real TurboQuant because `LlamaLanguageModel.forwardLogitsBuffer` still routes `turboquantV2` through `turboQuantShortContextFallbackModel` when total tokens are `<= 512`
-  - `EDGERUNNER_RUN_TURBOQUANT_V2_BENCHMARK=1 EDGERUNNER_TURBOQUANT_V2_BENCHMARK_PROMPT_LENS=4096 EDGERUNNER_TURBOQUANT_V2_BENCHMARK_DECODE_TOKENS=32 swift test --skip-build --filter compareTurboQuantV2AgainstQ8AcrossContexts` currently reports:
-    - `q8_decode_tok_s=1.73`
-    - `turboquant_v2_decode_tok_s=1.86`
-    - `q8_ttft_ms=26157.60`
-    - `turboquant_v2_ttft_ms=26353.73`
-  - The active implementation still contains context-based Q8 fallback machinery:
-    - `turboQuantShortContextFallbackModel`
-    - `shouldUseTurboQuantExactReprefill`
-    - `shouldUseTurboQuantQ8PrefillAttention`
-    - `shouldUseTurboQuantQ8DecodeFallback`
-    - `turboQuantQ8FallbackKCaches` / `turboQuantQ8FallbackVCaches`
-  - The fork-backed target semantics to port are in `TheTom/llama-cpp-turboquant` branch `feature/turboquant-kv-cache`, especially:
-    - `src/llama-kv-cache.cpp`
-    - `src/llama-graph.cpp`
-    - `ggml/src/ggml-turbo-quant.c`
-    - `ggml/src/ggml-cuda/turbo-quant.cuh`
-    - `scripts/turbo-quality-gate.sh`
+- Current verification on the active default path after this execution:
+  - `EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --filter turboQuantV2GreedyTraceMatchesQ8Baseline` fails with `q8=[358, 2776, 264, 5458]` and `turboquant_v2=[16, 15, 15, 15]`
+  - `EDGERUNNER_RUN_TURBOQUANT_V2_QUALITY=1 EDGERUNNER_TURBOQUANT_V2_QUALITY_PROMPT_LENS=128 swift test --skip-build --filter compareTurboQuantV2AgainstQ8BaselineAcrossContexts` fails with `divergence_steps=7`, `first_divergence_step=1`, and `max_abs_logit_delta=19.7134`
+  - `EDGERUNNER_RUN_TURBOQUANT_V2_BENCHMARK=1 EDGERUNNER_TURBOQUANT_V2_BENCHMARK_PROMPT_LENS=4096 EDGERUNNER_TURBOQUANT_V2_BENCHMARK_DECODE_TOKENS=32 swift test --skip-build --filter compareTurboQuantV2AgainstQ8AcrossContexts` passes as a benchmark run but reports `q8_decode_tok_s=1.73`, `turboquant_v2_decode_tok_s=1.76`, `q8_ttft_ms=29274.93`, and `turboquant_v2_ttft_ms=102311.30`
+- Additional low-level verification completed in this execution:
+  - `groupedTurbo3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext` now covers `numHeads=16`, `numKVHeads=8`, `kvSeqLen=130`, and passes
+  - default contract tests now assert `TurboQuantV2Contract.innerQ == .disabled` with no env override, matching the fork’s `TURBO_INNERQ` opt-in semantics
+  - `compareStoredLayer0Turbo3RowsAgainstForkReferenceOnRealActivations` now rebuilds the stored layer-0 key rows from captured pinned-model activations and compares them against a literal fork-style `turbo3` row reference; it passes with:
+    - `runtime_row_count=1040`
+    - `worst_code_word_mismatch_count=0`
+    - `worst_row_norm_max_abs_delta=0.00000000`
+    - `worst_decoded_max_abs_delta=0.00009155`
+  - layerwise attribution still shows exact attention inputs and first divergence at the layer-0 attention output
+  - replay on real activations still shows the dominant error is decoded keys, not decoded values: `decoded_k_exact_v_mse=0.014278` vs `exact_k_decoded_v_mse=0.000383`
+  - CPU and GPU replay of the same pure-Turbo attention contract still agree numerically (`cpu_vs_gpu_max_abs=0.000002`), so the live pinned failure is not explained by a decode-kernel mismatch
+- Conclusion from the current pass:
+  - the default state does not depend on the current `q8_0` shortcut rails for the measured failing path
+  - Phase 1 remains red because smoke and 128-token quality both fail
+  - the remaining blocker is now evidenced as pure-`turbo3` key fidelity on this pinned model under this repo’s implementation constraints, not a missing `InnerQ` default, not stale grouped-head Metal coverage, not a simple CPU/GPU kernel disagreement, and not a layer-0 stored-row encoding mismatch versus the fork-style `turbo3` contract
 
 # Bonsai Path Rewrite
 

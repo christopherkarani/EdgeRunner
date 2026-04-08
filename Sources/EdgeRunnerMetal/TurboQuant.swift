@@ -364,14 +364,7 @@ public enum TurboQuantV2Contract {
         let forkSamples = environment[TurboQuantEnvOverrides.forkInnerQSamples].flatMap(Int.init) ?? 0
         let localEnabled = environment[TurboQuantEnvOverrides.innerQEnabled] == "1"
         let localSamples = environment[TurboQuantEnvOverrides.innerQSamples].flatMap(Int.init) ?? (localEnabled ? 128 : 0)
-        let autoSamples =
-            (environment[TurboQuantEnvOverrides.innerQEnabled] == nil
-                && environment[TurboQuantEnvOverrides.innerQSamples] == nil
-                && environment[TurboQuantEnvOverrides.forkInnerQSamples] == nil
-                && (keyType == .turbo3 || valueType == .turbo3))
-            ? 128
-            : 0
-        let sampleCount = max(forkSamples, max(localSamples, autoSamples))
+        let sampleCount = max(forkSamples, localSamples)
         guard sampleCount > 0 else { return .disabled }
         let rawStrength = environment[TurboQuantEnvOverrides.forkInnerQStrength]
             ?? environment[TurboQuantEnvOverrides.innerQStrength]
