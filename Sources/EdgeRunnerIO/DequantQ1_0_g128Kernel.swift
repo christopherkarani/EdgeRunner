@@ -15,11 +15,13 @@ public final class DequantQ1_0_g128Kernel: Sendable {
     private let device: MTLDevice
     private let dequantPipeline: MTLComputePipelineState
     private let gemvPipeline: MTLComputePipelineState
+    private let gemvV2Pipeline: MTLComputePipelineState
     private let fusedQKVPipeline: MTLComputePipelineState
     private let fusedGateUpPipeline: MTLComputePipelineState
     private let fusedFinalNormLMHeadPipeline: MTLComputePipelineState
 
     public var gemvPSO: MTLComputePipelineState { gemvPipeline }
+    public var gemvV2PSO: MTLComputePipelineState { gemvV2Pipeline }
     public var fusedQKVPSO: MTLComputePipelineState { fusedQKVPipeline }
     public var fusedGateUpPSO: MTLComputePipelineState { fusedGateUpPipeline }
     public var fusedFinalNormLMHeadPSO: MTLComputePipelineState { fusedFinalNormLMHeadPipeline }
@@ -32,6 +34,7 @@ public final class DequantQ1_0_g128Kernel: Sendable {
         let registry = try KernelRegistry(device: device)
         self.dequantPipeline = try registry.pipeline(for: "dequant_q1_0_g128")
         self.gemvPipeline = try registry.pipeline(for: "dequant_q1_0_g128_gemv")
+        self.gemvV2Pipeline = try registry.pipeline(for: "dequant_q1_0_g128_gemv_v2")
         self.fusedQKVPipeline = try registry.pipeline(for: "dequant_q1_0_g128_fused_qkv")
         self.fusedGateUpPipeline = try registry.pipeline(for: "dequant_q1_0_g128_fused_gate_up")
         self.fusedFinalNormLMHeadPipeline = try registry.pipeline(for: "dequant_q1_0_g128_fused_final_norm_gemv")

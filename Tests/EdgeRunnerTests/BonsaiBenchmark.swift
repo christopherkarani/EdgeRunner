@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Metal
 @testable import EdgeRunner
 @testable import EdgeRunnerIO
 @testable import EdgeRunnerCore
@@ -189,5 +190,151 @@ struct BonsaiBenchmark {
             print("BONSAI_PROFILE: q1_\(name)_ms \(String(format: "%.3f", milliseconds))")
         }
         #expect(!results.isEmpty, "Bonsai Q1 projection profile completed")
+    }
+
+    @Test("Q1 GEMV v1 vs v2 kernel comparison")
+    func q1GemvKernelComparison() async throws {
+        guard FileManager.default.fileExists(atPath: Self.modelPath) else {
+            #expect(Bool(false), "Bonsai model not found at \(Self.modelPath)")
+            return
+        }
+
+        let loader = try GGUFLoader(url: URL(fileURLWithPath: Self.modelPath))
+        let weightMap = try await loader.load(from: URL(fileURLWithPath: Self.modelPath))
+
+        let device = MTLCreateSystemDefaultDevice()!
+        let queue = device.makeCommandQueue()!
+        let q1Kernel = try DequantQ1_0_g128Kernel(device: device)
+
+        // Pick a representative Q1 weight tensor (wq: 2048×2048)
+        let wqName = "blk.0.attn_q.weight"
+        let altName = "layers.0.attention.wq.weight"
+        let tensorName = weightMap.tensorNames.first { $0.contains("attn_q") || $0.contains("wq") } ?? wqName
+        guard let storage = weightMap[tensorName] else {
+            print("SKIP: Could not find Q1 weight tensor (tried \(wqName), \(altName))")
+            return
+        }
+
+        let elementCount = storage.elementCount
+        let rows = 2048
+        let cols = elementCount / rows
+        let nb = cols / 128
+        let q1ByteCount = nb * rows * 18
+
+        guard let q1Buf = device.makeBuffer(
+            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+            length: q1ByteCount,
+            options: .storageModeShared,
+            deallocator: nil
+        ) else {
+            print("SKIP: Failed to create Q1 buffer")
+            return
+        }
+
+        // Create input x and output buffers
+        let inputBuf = device.makeBuffer(length: cols * 4, options: .storageModeShared)!
+        let outputV1 = device.makeBuffer(length: rows * 4, options: .storageModeShared)!
+        let outputV2 = device.makeBuffer(length: rows * 4, options: .storageModeShared)!
+
+        // Fill x with random values
+        let xPtr = inputBuf.contents().bindMemory(to: Float.self, capacity: cols)
+        for i in 0..<cols { xPtr[i] = Float.random(in: -1...1) }
+
+        struct GEMVParams {
+            var rows: UInt32
+            var cols: UInt32
+            var blocksPerRow: UInt32
+        }
+
+        let warmup = 3
+        let runs = 10
+        var params = GEMVParams(rows: UInt32(rows), cols: UInt32(cols), blocksPerRow: UInt32(nb))
+
+        // Warmup v1
+        for _ in 0..<warmup {
+            let cmd = queue.makeCommandBuffer()!
+            let enc = cmd.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(q1Kernel.gemvPSO)
+            enc.setBuffer(q1Buf, offset: 0, index: 0)
+            enc.setBuffer(inputBuf, offset: 0, index: 1)
+            enc.setBuffer(outputV1, offset: 0, index: 2)
+            enc.setBytes(&params, length: 12, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: (rows + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            enc.endEncoding()
+            cmd.commit()
+            await cmd.completed()
+        }
+
+        // Benchmark v1
+        var v1Times: [Double] = []
+        for _ in 0..<runs {
+            let cmd = queue.makeCommandBuffer()!
+            let enc = cmd.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(q1Kernel.gemvPSO)
+            enc.setBuffer(q1Buf, offset: 0, index: 0)
+            enc.setBuffer(inputBuf, offset: 0, index: 1)
+            enc.setBuffer(outputV1, offset: 0, index: 2)
+            enc.setBytes(&params, length: 12, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: (rows + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            enc.endEncoding()
+            cmd.commit()
+            await cmd.completed()
+            let gpuTime = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000.0
+            v1Times.append(gpuTime)
+        }
+
+        // Warmup v2
+        for _ in 0..<warmup {
+            let cmd = queue.makeCommandBuffer()!
+            let enc = cmd.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(q1Kernel.gemvV2PSO)
+            enc.setBuffer(q1Buf, offset: 0, index: 0)
+            enc.setBuffer(inputBuf, offset: 0, index: 1)
+            enc.setBuffer(outputV2, offset: 0, index: 2)
+            enc.setBytes(&params, length: 12, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: (rows + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            enc.endEncoding()
+            cmd.commit()
+            await cmd.completed()
+        }
+
+        // Benchmark v2
+        var v2Times: [Double] = []
+        for _ in 0..<runs {
+            let cmd = queue.makeCommandBuffer()!
+            let enc = cmd.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(q1Kernel.gemvV2PSO)
+            enc.setBuffer(q1Buf, offset: 0, index: 0)
+            enc.setBuffer(inputBuf, offset: 0, index: 1)
+            enc.setBuffer(outputV2, offset: 0, index: 2)
+            enc.setBytes(&params, length: 12, index: 3)
+            enc.dispatchThreadgroups(MTLSize(width: (rows + 1) / 2, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            enc.endEncoding()
+            cmd.commit()
+            await cmd.completed()
+            let gpuTime = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000.0
+            v2Times.append(gpuTime)
+        }
+
+        // Compare outputs
+        let v1Ptr = outputV1.contents().bindMemory(to: Float.self, capacity: rows)
+        let v2Ptr = outputV2.contents().bindMemory(to: Float.self, capacity: rows)
+        var maxDiff: Float = 0
+        for i in 0..<rows {
+            maxDiff = max(maxDiff, abs(v1Ptr[i] - v2Ptr[i]))
+        }
+
+        let v1Median = v1Times.sorted()[runs / 2]
+        let v2Median = v2Times.sorted()[runs / 2]
+        let dataBytes = Double(nb * rows * 18)
+        let v1BW = dataBytes / (v1Median / 1000.0) / 1e9
+        let v2BW = dataBytes / (v2Median / 1000.0) / 1e9
+
+        print("Q1 GEMV [\(rows)×\(cols)]  v1: \(String(format: "%.3f", v1Median))ms (\(String(format: "%.1f", v1BW)) GB/s)  v2: \(String(format: "%.3f", v2Median))ms (\(String(format: "%.1f", v2BW)) GB/s)  speedup: \(String(format: "%.2f", v1Median/v2Median))x  maxDiff: \(maxDiff)")
+        #expect(maxDiff < 1.0, "v1 vs v2 output divergence too large: \(maxDiff)")
     }
 }

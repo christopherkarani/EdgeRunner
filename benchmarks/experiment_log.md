@@ -910,3 +910,12 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 | **Bonsai 1.7B Q1_0_g128** | **Median decode** | **114.2 tok/s** |
 | **Bonsai 1.7B Q1_0_g128** | **Previous baseline** | **39.4 tok/s** |
 | **Bonsai 1.7B Q1_0_g128** | **Improvement** | **+189.8% (2.90x)** |
+
+### Bonsai Experiment 51: Optimized Native Q1 GEMV v2 Kernel — KEPT (kernel only)
+- **Hypothesis:** Per-bit extraction ALU is the Q1 GEMV bottleneck. Sign-flip approach (`select(-x, x, bit)`) with precomputed block sums and sub-block granularity (32-weight units for full thread utilization) should improve compute efficiency.
+- **Change:** Created `dequant_q1_0_g128_gemv_v2` Metal kernel with: (1) sub-block work distribution (nbSub = nb×4, all 32 threads active even for dim=2048 with nb=16), (2) precomputed S = Σx for each sub-block, (3) dot = scale × (2×B - S) where B is bit-selected sum, (4) x cached in registers.
+- **Microbenchmark [2048×2048]:** v1: 0.030ms (19.5 GB/s), **v2: 0.011ms (51.9 GB/s)**, speedup **2.66x**. maxDiff: 7.2e-07 (numerically equivalent).
+- **Full decode benchmark (async, separate dispatches):** v2: 46.1 tok/s (vs v1: 39.4, Q8: 114.2)
+- **Why Q8 still wins:** Q1 native path uses 13 dispatches/layer (separate RMSNorm + 7 individual GEMVs) vs Q8 fused path at 5 dispatches/layer (fused RMSNorm+QKV, mega-kernel GQA). Even though Q1 reads 7.5x less data, the dispatch overhead and pipeline stalls prevent achieving the microbenchmark's 52 GB/s effective bandwidth.
+- **Status:** KEPT (v2 kernel available via `EDGERUNNER_Q1_USE_V2_KERNEL=1`, not default)
+- **Future opportunity:** Fusing Q1 v2 into fused QKV/GateUp kernels could close the dispatch gap. At 52 GB/s with 5 dispatches/layer, projected: ~157 tok/s.

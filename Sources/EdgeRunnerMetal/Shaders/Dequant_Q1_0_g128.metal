@@ -102,6 +102,94 @@ kernel void dequant_q1_0_g128_gemv(
     }
 }
 
+/// Optimized Q1_0_g128 GEMV using sign-flip approach and sub-block granularity.
+///
+/// Key optimizations vs original dequant_q1_0_g128_gemv:
+/// 1. Sub-block granularity: 32-weight sub-blocks (4 bytes bits + shared scale)
+///    instead of full 128-weight blocks. With dim=2048 → 64 sub-blocks/row,
+///    all 32 threads stay active (vs 50% idle with 16 blocks/row).
+/// 2. Sign-flip math: dot = scale × Σ select(-x[i], x[i], bit[i])
+///    Avoids per-element scale multiply (1 mul at end vs 128 muls).
+/// 3. x cached in registers: 32 floats cached per sub-block, reused across NR rows.
+/// 4. Precomputed sub-block x sum: S = Σx[i], then dot = scale × (2×B - S)
+///    where B = Σ{bit=1} x[i]. Reduces to 32 conditional adds per sub-block.
+kernel void dequant_q1_0_g128_gemv_v2(
+    device const uchar* quantisedW [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERDequantQ1_0_g128GEMVParams& params [[buffer(3)]],
+    uint tgIndex [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]]
+) {
+    constexpr short LOCAL_NR = 2;
+    const uint row0 = tgIndex * LOCAL_NR;
+    if (row0 >= params.rows) return;
+
+    const uint nb = params.blocksPerRow;          // Q1 blocks per row (128 weights each)
+    const uint nbSub = nb * 4;                     // sub-blocks per row (32 weights each)
+
+    float sumf[LOCAL_NR] = { 0.f };
+
+    // Row pointers
+    device const uchar* ax[LOCAL_NR];
+    for (short row = 0; row < LOCAL_NR; row++) {
+        uint r = row0 + row;
+        ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q1_0_g128BlockBytes;
+    }
+
+    // Main loop: each thread processes 1 sub-block (32 weights = 4 bytes) per iteration
+    for (uint isb = tiisg; isb < nbSub; isb += 32) {
+        const uint parentBlock = isb / 4;
+        const uint subIdx = isb % 4;
+        const uint xBase = parentBlock * q1_0_g128WeightsPerBlock + subIdx * 32;
+
+        // Cache 32 x values in registers (reused across NR rows)
+        float xl[32];
+        device const float* xp = x + xBase;
+        for (short i = 0; i < 32; i++) xl[i] = xp[i];
+
+        // Precompute sum of x for this sub-block (constant across rows)
+        float xSum = 0.f;
+        for (short i = 0; i < 32; i++) xSum += xl[i];
+
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+
+            device const uchar* block = ax[row] + parentBlock * q1_0_g128BlockBytes;
+            float scale = float(as_type<half>(*(device const ushort*)(block)));
+            device const uchar* qs = block + 2 + subIdx * 4;
+
+            // Compute B = sum of x[i] where bit[i] == 1 for this sub-block
+            float B = 0.f;
+            for (short bi = 0; bi < 4; bi++) {
+                uchar bits = qs[bi];
+                const short base = bi * 8;
+                B += select(0.f, xl[base + 0], bool(bits & 0x01));
+                B += select(0.f, xl[base + 1], bool(bits & 0x02));
+                B += select(0.f, xl[base + 2], bool(bits & 0x04));
+                B += select(0.f, xl[base + 3], bool(bits & 0x08));
+                B += select(0.f, xl[base + 4], bool(bits & 0x10));
+                B += select(0.f, xl[base + 5], bool(bits & 0x20));
+                B += select(0.f, xl[base + 6], bool(bits & 0x40));
+                B += select(0.f, xl[base + 7], bool(bits & 0x80));
+            }
+            // dot = scale × (2B - S)
+            sumf[row] += scale * (2.f * B - xSum);
+        }
+    }
+
+    // Simdgroup reduction
+    for (short row = 0; row < LOCAL_NR; row++) {
+        sumf[row] = simd_sum(sumf[row]);
+    }
+    if (tiisg == 0) {
+        for (short row = 0; row < LOCAL_NR; row++) {
+            if (row0 + row >= params.rows) break;
+            y[row0 + row] = sumf[row];
+        }
+    }
+}
+
 /// Fused Q1 QKV GEMV: processes Q, K, V matrices in one dispatch.
 /// Reads x once, computes all three projections, writes three separate outputs.
 /// Eliminates 2 redundant x reads and 2 dispatch overheads per layer.

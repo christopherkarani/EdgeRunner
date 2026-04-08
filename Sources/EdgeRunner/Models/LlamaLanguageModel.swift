@@ -100,9 +100,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     public static let modelIdentifier = "llama"
     private static let turboQuantFastHybridDecodeSeqThreshold = 16384
     private static let turboQuantDensePrefillAttentionSeqThreshold = 4096
-    // Bonsai currently benchmarks faster with the raw Q1 layer path on this branch.
-    // Keep it enabled while parity harnesses cover mode-to-mode consistency.
+    // When true AND Q1 raw buffers are available AND wqRaw is nil, use Q1 GEMV kernel
+    // for layer weights instead of Q8 fused path. The v2 Q1 kernel achieves 52 GB/s
+    // on native Q1 data (7.5x less data than Q8), which can be faster than Q8 at 197 GB/s.
     private static let prefersRawQ1LayerDecodePath = true
+    // Use optimized v2 Q1 GEMV kernel (sign-flip + sub-block granularity)
+    private static let useQ1V2Kernel: Bool = {
+        ProcessInfo.processInfo.environment["EDGERUNNER_Q1_USE_V2_KERNEL"] == "1"
+    }()
 
     private let config: LlamaConfig
     private let weights: [String: TensorStorage]
@@ -1452,6 +1457,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let upOutBuf = scratch.upOut
         let activBuf = scratch.activ
         let downOutBuf = scratch.downOut
+        let skipQ1ToQ8 = Self.useQ1V2Kernel
 
         // Pre-load ALL weight buffers on first call — eliminates 254 actor hops per subsequent call
         if !preloadedWeights.isLoaded {
@@ -1460,20 +1466,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             for i in 0..<config.layerCount {
                 let p = "layers.\(i)"
                 // Prefer native Q8 raw buffers; fall back to Q1→Q8 conversion
+                // unless native Q1 v2 kernel is enabled (reads 7.5x less data)
+                let skipQ1ToQ8 = Self.useQ1V2Kernel
                 let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).attention.wq.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).attention.wq.weight"))
                 let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).attention.wk.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).attention.wk.weight"))
                 let wvRaw = makeRawQ8BufferIfAvailable("\(p).attention.wv.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).attention.wv.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).attention.wv.weight"))
                 let woRaw = makeRawQ8BufferIfAvailable("\(p).attention.wo.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).attention.wo.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).attention.wo.weight"))
                 let gateRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.gate.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).feedForward.gate.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).feedForward.gate.weight"))
                 let upRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.up.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).feedForward.up.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).feedForward.up.weight"))
                 let downRaw = makeRawQ8BufferIfAvailable("\(p).feedForward.down.weight")
-                    ?? convertQ1ToQ8Buffer("\(p).feedForward.down.weight")
+                    ?? (skipQ1ToQ8 ? nil : convertQ1ToQ8Buffer("\(p).feedForward.down.weight"))
 
                 let wqRawQ1 = makeRawQ1BufferIfAvailable("\(p).attention.wq.weight")
                 let wkRawQ1 = makeRawQ1BufferIfAvailable("\(p).attention.wk.weight")
@@ -1523,7 +1531,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 ))
             }
             let lmHeadName = tiedEmbeddingWeightName
-            // Prefer native Q8 raw, then Q1→Q8 conversion, then float dequant fallback
+            // Always convert LM head to Q8 (fused final norm + Q8 GEMV is proven stable)
             let lmHeadRawBuf = makeRawQ8BufferIfAvailable(lmHeadName)
                 ?? convertQ1ToQ8Buffer(lmHeadName)
             let lmHeadRawQ1Buf = makeRawQ1BufferIfAvailable(lmHeadName)
@@ -1569,7 +1577,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let gqaF32PSO = gqaKernel.pipelineF32
         let fusedQ8PSO = fusedQ8GemvPipeline
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
-        let fusedQ1PSO = dequantQ1_0_g128?.gemvPSO
+        let fusedQ1PSO = Self.useQ1V2Kernel ? dequantQ1_0_g128?.gemvV2PSO : dequantQ1_0_g128?.gemvPSO
         let ropePSO = ropeKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
@@ -2285,7 +2293,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         _ = fusedQ8GemvPipeline  // Unused: we use tiled variant for decode
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let fusedQ1FinalNormLMHeadPSO = dequantQ1_0_g128?.fusedFinalNormLMHeadPSO
-        let fusedQ1PSO = dequantQ1_0_g128?.gemvPSO
+        let fusedQ1PSO = Self.useQ1V2Kernel ? dequantQ1_0_g128?.gemvV2PSO : dequantQ1_0_g128?.gemvPSO
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
         let swigluPSO = activationKernels.swigluPipeline
