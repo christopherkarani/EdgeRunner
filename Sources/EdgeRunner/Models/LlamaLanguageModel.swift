@@ -98,8 +98,6 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     // @unchecked Sendable: Metal device/queue are thread-safe; KVCache uses Mutex internally.
 
     public static let modelIdentifier = "llama"
-    private static let turboQuantFastHybridDecodeSeqThreshold = 16384
-    private static let turboQuantDensePrefillAttentionSeqThreshold = 4096
     // Q1 v2 fused decode: sign-flip math, sub-block granularity, fused dispatches.
     // Default ON for Q1 models — same throughput as Q8 conversion but 7.5x less
     // memory bandwidth and 1.40 GB less GPU memory (no Q8 layer buffers needed).
@@ -138,7 +136,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let fusedQKVTurboPipeline: MTLComputePipelineState
     private let fusedQKVTurboHybridVPipeline: MTLComputePipelineState
     private let fusedGateUpSiluPipeline: MTLComputePipelineState
+    private let captureF32SlicePipeline: MTLComputePipelineState
+    private let quantizeQ8RowsPipeline: MTLComputePipelineState
     private let convertF32ToF16Pipeline: MTLComputePipelineState
+    private let convertF16ToF32Pipeline: MTLComputePipelineState
     private let ropeNeoXF16OutPipeline: MTLComputePipelineState
     private let fusedQKNormRoPEPipeline: MTLComputePipelineState
     private let fusedNormRoPEGQAPipeline: MTLComputePipelineState
@@ -157,7 +158,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let dequantQ5_1: DequantQ5_1Kernel
     private let dequantQ1_0_g128: DequantQ1_0_g128Kernel?
     private let turboQuantKernel: TurboQuantKernel?
-    private let turboQuantLayout: TurboQuantLayout?
+    private let turboQuantKeyLayouts: [TurboQuantLayout]
+    private let turboQuantValueLayouts: [TurboQuantLayout]
+    private let turboQuantInnerQState: TurboQuantInnerQState?
 
     // KV cache for autoregressive generation
     private let kvCache: KVCache
@@ -166,12 +169,25 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private let decoderState: DecoderStateStore
 
     // Per-layer KV cache MTLBuffers — written directly by GPU kernels
-    private let layerKCaches: [MTLBuffer]
-    private let layerVCaches: [MTLBuffer]
-    private let turboQuantKCaches: [TurboQuantMetalBuffers]
-    private let turboQuantVCaches: [TurboQuantMetalBuffers]
-    private let turboQuantDenseKCaches: [MTLBuffer]
-    private let turboQuantDenseVCaches: [MTLBuffer]
+    private let layerKCaches: [MTLBuffer?]
+    private let layerVCaches: [MTLBuffer?]
+    private let turboQuantKCaches: [TurboQuantMetalBuffers?]
+    private let turboQuantVCaches: [TurboQuantMetalBuffers?]
+    private let turboQuantQ8FallbackKCaches: [MTLBuffer]
+    private let turboQuantQ8FallbackVCaches: [MTLBuffer]
+    private let turboQuantShortContextFallbackModel: LlamaLanguageModelBox?
+
+    private var usesQ8_0KVCache: Bool {
+        resolvedKVCacheCompression == .q8_0
+    }
+
+    private var usesTurboQuantV2: Bool {
+        resolvedKVCacheCompression == .turboquantV2
+    }
+
+    private var usesCompressedKVCache: Bool {
+        usesQ8_0KVCache || usesTurboQuantV2
+    }
 
     // Pre-loaded weight buffers — eliminates async actor hops during forward pass
     // Uses raw Q8_0 buffers directly; no float32 caching to save memory
@@ -247,7 +263,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.fusedQKVTurboPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo")
         self.fusedQKVTurboHybridVPipeline = try registry.pipeline(for: "dequant_q8_0_fused_qkv_turbo_hybrid_v")
         self.fusedGateUpSiluPipeline = try registry.pipeline(for: "dequant_q8_0_fused_gate_up_silu")
+        self.captureF32SlicePipeline = try registry.pipeline(for: "capture_f32_slice")
+        self.quantizeQ8RowsPipeline = try registry.pipeline(for: "quantize_q8_0_rows")
         self.convertF32ToF16Pipeline = try registry.pipeline(for: "convert_f32_to_f16")
+        self.convertF16ToF32Pipeline = try registry.pipeline(for: "convert_f16_to_f32")
         self.ropeNeoXF16OutPipeline = try registry.pipeline(for: "rope_neox_f32_to_f16")
         self.fusedQKNormRoPEPipeline = try registry.pipeline(for: "fused_qk_norm_rope_neox")
         self.fusedNormRoPEGQAPipeline = try registry.pipeline(for: "fused_qk_norm_rope_gqa")
@@ -265,18 +284,38 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         self.dequantQ5_0 = try DequantQ5_0Kernel(device: device)
         self.dequantQ5_1 = try DequantQ5_1Kernel(device: device)
         self.dequantQ1_0_g128 = try? DequantQ1_0_g128Kernel(device: device)
-        self.turboQuantKernel = resolvedKVCacheCompression == .disabled ? nil : try TurboQuantKernel(device: device)
-        let turboPreset: TurboQuantPreset?
+        self.turboQuantKernel = resolvedKVCacheCompression == .turboquantV2 ? try TurboQuantKernel(device: device) : nil
+        if resolvedKVCacheCompression == .turboquantV2, TurboQuantV2Contract.innerQ.enabled {
+            self.turboQuantInnerQState = try TurboQuantInnerQState(
+                device: device,
+                configuration: TurboQuantV2Contract.innerQ,
+                channelCount: model.config.headDim
+            )
+        } else {
+            self.turboQuantInnerQState = nil
+        }
         switch resolvedKVCacheCompression {
         case .disabled:
-            turboPreset = nil
-        case .turboQuantBalanced:
-            turboPreset = .balanced
-        case .turboQuantAggressive:
-            turboPreset = .aggressive
-        }
-        self.turboQuantLayout = try turboPreset.map {
-            try TurboQuantLayout(preset: $0, dimension: model.config.headDim)
+            self.turboQuantKeyLayouts = []
+            self.turboQuantValueLayouts = []
+        case .q8_0:
+            self.turboQuantKeyLayouts = []
+            self.turboQuantValueLayouts = []
+        case .turboquantV2:
+            self.turboQuantKeyLayouts = try (0..<model.config.layerCount).map {
+                try TurboQuantV2Contract.makeKeyLayout(
+                    dimension: model.config.headDim,
+                    layerIndex: $0,
+                    layerCount: model.config.layerCount
+                )
+            }
+            self.turboQuantValueLayouts = try (0..<model.config.layerCount).map {
+                try TurboQuantV2Contract.makeValueLayout(
+                    dimension: model.config.headDim,
+                    layerIndex: $0,
+                    layerCount: model.config.layerCount
+                )
+            }
         }
 
         // Initialize KV cache
@@ -285,10 +324,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         switch resolvedKVCacheCompression {
         case .disabled:
             kvPrecision = .float16
-        case .turboQuantBalanced:
-            kvPrecision = .turboQuantBalanced
-        case .turboQuantAggressive:
-            kvPrecision = .turboQuantAggressive
+        case .q8_0:
+            kvPrecision = .q8_0
+        case .turboquantV2:
+            kvPrecision = .turboquantV2
         }
         self.kvCache = try KVCache(
             device: device,
@@ -299,53 +338,31 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             precision: kvPrecision
         )
 
-        var kCaches = [MTLBuffer]()
-        var vCaches = [MTLBuffer]()
-        var turboKCaches = [TurboQuantMetalBuffers]()
-        var turboVCaches = [TurboQuantMetalBuffers]()
-        var turboDenseKCaches = [MTLBuffer]()
-        var turboDenseVCaches = [MTLBuffer]()
+        var kCaches = [MTLBuffer?]()
+        var vCaches = [MTLBuffer?]()
+        var turboKCaches = [TurboQuantMetalBuffers?]()
+        var turboVCaches = [TurboQuantMetalBuffers?]()
+        var turboQ8FallbackKCaches = [MTLBuffer]()
+        var turboQ8FallbackVCaches = [MTLBuffer]()
         kCaches.reserveCapacity(config.layerCount)
         vCaches.reserveCapacity(config.layerCount)
         turboKCaches.reserveCapacity(config.layerCount)
         turboVCaches.reserveCapacity(config.layerCount)
-        turboDenseKCaches.reserveCapacity(config.layerCount)
-        turboDenseVCaches.reserveCapacity(config.layerCount)
+        turboQ8FallbackKCaches.reserveCapacity(config.layerCount)
+        turboQ8FallbackVCaches.reserveCapacity(config.layerCount)
         for i in 0..<config.layerCount {
-            if resolvedKVCacheCompression == .disabled {
-                let (kBuf, vBuf) = try kvCache.metalBuffers(layer: i)
-                kCaches.append(kBuf)
-                vCaches.append(vBuf)
-            } else {
-                let turboBuffers = try kvCache.turboQuantMetalBuffers(layer: i)
-                turboKCaches.append(turboBuffers.key)
-                turboVCaches.append(turboBuffers.value)
-                if resolvedKVCacheCompression != .disabled {
-                    let kvDim = config.kvHeadCount * config.headDim
-                    let denseCacheLength = effectiveMaxSeq * kvDim * MemoryLayout<Float16>.stride
-                    guard let denseKBuffer = device.makeBuffer(
-                        length: denseCacheLength,
-                        options: [.storageModeShared, .hazardTrackingModeUntracked]
-                    ) else {
-                        throw GenerationError.modelLoadFailed(reason: "TurboQuant dense K cache allocation failed")
-                    }
-                    guard let denseVBuffer = device.makeBuffer(
-                        length: denseCacheLength,
-                        options: [.storageModeShared, .hazardTrackingModeUntracked]
-                    ) else {
-                        throw GenerationError.modelLoadFailed(reason: "TurboQuant dense V cache allocation failed")
-                    }
-                    turboDenseKCaches.append(denseKBuffer)
-                    turboDenseVCaches.append(denseVBuffer)
-                }
-            }
+            kCaches.append(try kvCache.keyMetalBuffer(layer: i))
+            vCaches.append(try kvCache.valueMetalBuffer(layer: i))
+            turboKCaches.append(try kvCache.turboQuantKeyMetalBuffers(layer: i))
+            turboVCaches.append(try kvCache.turboQuantValueMetalBuffers(layer: i))
         }
         self.layerKCaches = kCaches
         self.layerVCaches = vCaches
         self.turboQuantKCaches = turboKCaches
         self.turboQuantVCaches = turboVCaches
-        self.turboQuantDenseKCaches = turboDenseKCaches
-        self.turboQuantDenseVCaches = turboDenseVCaches
+        self.turboQuantQ8FallbackKCaches = turboQ8FallbackKCaches
+        self.turboQuantQ8FallbackVCaches = turboQ8FallbackVCaches
+        self.turboQuantShortContextFallbackModel = nil
 
         // Initialize decoder state for incremental decode
         self.decoderState = DecoderStateStore()
@@ -566,26 +583,123 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     ) throws {
         guard resolvedCompression != .disabled else { return }
 
-        guard headDim == 128 else {
-            throw GenerationError.modelLoadFailed(
-                reason: "TurboQuant currently requires headDim == 128, got \(headDim)."
-            )
-        }
-    }
-
-    private var isTurboQuantEnabled: Bool {
-        resolvedKVCacheCompression != .disabled
-    }
-
-    private var turboQuantPreset: TurboQuantPreset? {
-        switch resolvedKVCacheCompression {
+        switch resolvedCompression {
+        case .q8_0:
+            guard headDim % 32 == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "Q8 KV cache currently requires headDim divisible by 32, got \(headDim)."
+                )
+            }
+        case .turboquantV2:
+            guard headDim == TurboQuantV2Contract.supportedDimension else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "TurboQuant v2 currently requires headDim \(TurboQuantV2Contract.supportedDimension), got \(headDim)."
+                )
+            }
         case .disabled:
-            return nil
-        case .turboQuantBalanced:
-            return .balanced
-        case .turboQuantAggressive:
-            return .aggressive
+            break
         }
+    }
+
+    private var isQuantizedKVEnabled: Bool {
+        resolvedKVCacheCompression == .q8_0
+    }
+
+    private func turboQuantQ8PrefillAttentionThreshold() -> Int {
+        Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_Q8_PREFILL_THRESHOLD"] ?? "1") ?? 1
+    }
+
+    private func shouldUseTurboQuantQ8PrefillAttention(seqLen: Int, startPosition: Int) -> Bool {
+        false
+    }
+
+    private func shouldSkipTurboQuantStoreDuringQ8PrefillAttention() -> Bool {
+        ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_SKIP_STORE_ON_Q8_PREFILL"] == "1"
+    }
+
+    private func turboQuantQ8DecodeWarmupSteps() -> Int {
+        Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_Q8_DECODE_WARMUP_STEPS"] ?? "8") ?? 8
+    }
+
+    private func shouldUseTurboQuantQ8DecodeFallback(decodeStepIndex: Int) -> Bool {
+        false
+    }
+
+    private func turboQuantExactReprefillThreshold() -> Int {
+        Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_EXACT_REPREFILL_THRESHOLD"] ?? "512") ?? 512
+    }
+
+    private func shouldUseTurboQuantExactReprefill(totalTokenCount: Int) -> Bool {
+        false
+    }
+
+    private func makeEmbeddingBuffer(tokenIDs: [Int]) throws -> MTLBuffer {
+        let dim = config.embeddingDim
+        let floatStride = MemoryLayout<Float>.stride
+        let seqLen = tokenIDs.count
+        guard let hiddenBuf = device.makeBuffer(length: seqLen * dim * floatStride, options: .storageModeShared) else {
+            throw GenerationError.modelLoadFailed(reason: "GPU buffer allocation failed for embedding lookup")
+        }
+
+        if let embBuf = preloadedWeights.lmHead {
+            let embPtr = embBuf.contents().bindMemory(to: Float.self, capacity: config.vocabSize * dim)
+            let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
+            for (i, tokenID) in tokenIDs.enumerated() {
+                let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
+                memcpy(dstPtr + i * dim, embPtr + clampedID * dim, dim * floatStride)
+            }
+        } else {
+            let dstPtr = hiddenBuf.contents().bindMemory(to: Float.self, capacity: seqLen * dim)
+            try fillEmbeddings(tokenIDs: tokenIDs, into: dstPtr)
+        }
+
+        return hiddenBuf
+    }
+
+    private func turboQuantKeyPreset(for layerIndex: Int) -> TurboQuantPreset? {
+        guard usesTurboQuantV2 else { return nil }
+        return TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: config.layerCount)
+    }
+
+    private func turboQuantValuePreset(for layerIndex: Int) -> TurboQuantPreset? {
+        guard usesTurboQuantV2 else { return nil }
+        return TurboQuantV2Contract.valuePreset(forLayer: layerIndex, layerCount: config.layerCount)
+    }
+
+    private func turboQuantKeyLayout(for layerIndex: Int) -> TurboQuantLayout? {
+        guard turboQuantKeyLayouts.indices.contains(layerIndex) else { return nil }
+        return turboQuantKeyLayouts[layerIndex]
+    }
+
+    private func turboQuantValueLayout(for layerIndex: Int) -> TurboQuantLayout? {
+        guard turboQuantValueLayouts.indices.contains(layerIndex) else { return nil }
+        return turboQuantValueLayouts[layerIndex]
+    }
+
+    private func turboQuantUsesAggressiveFastPath(for layerIndex: Int) -> Bool {
+        turboQuantKeyPreset(for: layerIndex) == .aggressive && turboQuantValuePreset(for: layerIndex) == .aggressive
+    }
+
+    private func observeTurboQuantInnerQRows(
+        from sourceBuffer: MTLBuffer,
+        sourceBufferOffset: Int,
+        rowCount: Int,
+        sourceRowStride: Int
+    ) {
+        guard let turboQuantInnerQState,
+              turboQuantInnerQState.isEnabled else {
+            return
+        }
+
+        let base = sourceBuffer.contents().advanced(by: sourceBufferOffset).bindMemory(
+            to: Float.self,
+            capacity: rowCount * sourceRowStride
+        )
+        let rows = (0..<rowCount).map { rowIndex in
+            let rowStart = rowIndex * sourceRowStride
+            return Array(UnsafeBufferPointer(start: base.advanced(by: rowStart), count: config.headDim))
+        }
+        turboQuantInnerQState.observe(rows: rows)
     }
 
     // MARK: - LogitsModel: forward pass
@@ -657,6 +771,363 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return result
     }
 
+    func cachedDecodeStepTrace(
+        promptTokens: [Int],
+        tokenIDs: [Int]
+    ) async throws -> LlamaDecodeStepTrace {
+        precondition(tokenIDs.count == promptTokens.count + 1, "cachedDecodeStepTrace expects exactly one appended token")
+        _ = try await logits(for: promptTokens)
+        let collector = try DecodeStepCollector(
+            device: device,
+            layerCount: config.layerCount,
+            queryDimension: config.headCount * config.headDim,
+            kvDimension: config.kvHeadCount * config.headDim
+        )
+        let logitsBuf = try await forwardLogitsBuffer(
+            for: tokenIDs,
+            decodeStepCollector: collector
+        )
+        return LlamaDecodeStepTrace(
+            promptTokens: promptTokens,
+            tokenIDs: tokenIDs,
+            queries: collector.materializeQueries(),
+            keys: collector.materializeKeys(),
+            values: collector.materializeValues(),
+            attentionOutputs: collector.materializeAttentionOutputs(),
+            logits: materializeLogits(from: logitsBuf, count: config.vocabSize)
+        )
+    }
+
+    func layerwiseTrace(
+        for tokenIDs: [Int],
+        captureDenseValueReference: Bool = false
+    ) async throws -> LlamaLayerwiseTrace {
+        let attentionOutputDimension = config.headCount * config.headDim
+        let collector = try LayerTraceCollector(
+            device: device,
+            layerCount: config.layerCount,
+            hiddenDimension: config.embeddingDim,
+            attentionOutputDimension: attentionOutputDimension,
+            captureDenseValueReference: captureDenseValueReference
+        )
+        let logitsBuf = try await forwardLogitsBuffer(for: tokenIDs, traceCollector: collector)
+        return LlamaLayerwiseTrace(
+            tokenIDs: tokenIDs,
+            attentionOutputStates: collector.materializeAttentionOutputs(),
+            denseValueReferenceAttentionOutputStates: collector.materializeDenseValueReferenceAttentionOutputs(),
+            denseAttentionReferenceAttentionOutputStates: collector.materializeDenseAttentionReferenceAttentionOutputs(),
+            attentionResidualStates: collector.materializeAttentionResidualStates(),
+            layerHiddenStates: collector.materializeLayerHiddenStates(),
+            logits: materializeLogits(from: logitsBuf, count: config.vocabSize)
+        )
+    }
+
+    func attentionScoreTrace(for tokenIDs: [Int]) async throws -> LlamaAttentionScoreTrace {
+        let queryDimension = config.headCount * config.headDim
+        let kvDimension = config.kvHeadCount * config.headDim
+        let collector = try AttentionScoreCollector(
+            device: device,
+            layerCount: config.layerCount,
+            queryDimension: queryDimension,
+            kvDimension: kvDimension,
+            tokenCount: tokenIDs.count
+        )
+        _ = try await forwardLogitsBuffer(for: tokenIDs, attentionScoreCollector: collector)
+        let queries = collector.materializeQueries()
+        let exactKeys = collector.materializeKeys()
+        let summaries = try makeAttentionScoreSummaries(
+            tokenIDs: tokenIDs,
+            queries: queries,
+            exactKeys: exactKeys
+        )
+        return LlamaAttentionScoreTrace(tokenIDs: tokenIDs, summaries: summaries)
+    }
+
+    func attentionInputsTrace(for tokenIDs: [Int]) async throws -> LlamaAttentionInputsTrace {
+        let queryDimension = config.headCount * config.headDim
+        let kvDimension = config.kvHeadCount * config.headDim
+        let collector = try AttentionScoreCollector(
+            device: device,
+            layerCount: config.layerCount,
+            queryDimension: queryDimension,
+            kvDimension: kvDimension,
+            tokenCount: tokenIDs.count
+        )
+        _ = try await forwardLogitsBuffer(for: tokenIDs, attentionScoreCollector: collector)
+        return LlamaAttentionInputsTrace(
+            tokenIDs: tokenIDs,
+            queries: collector.materializeQueries(),
+            queryRows: collector.materializeQueryRows(),
+            exactKeys: collector.materializeKeys(),
+            exactValues: collector.materializeValues()
+        )
+    }
+
+    func attentionApproximationTrace(for tokenIDs: [Int]) async throws -> LlamaAttentionApproximationTrace {
+        let queryDimension = config.headCount * config.headDim
+        let kvDimension = config.kvHeadCount * config.headDim
+        let collector = try AttentionScoreCollector(
+            device: device,
+            layerCount: config.layerCount,
+            queryDimension: queryDimension,
+            kvDimension: kvDimension,
+            tokenCount: tokenIDs.count
+        )
+        _ = try await forwardLogitsBuffer(for: tokenIDs, attentionScoreCollector: collector)
+        let exactKeys = collector.materializeKeys()
+        let exactValues = collector.materializeValues()
+        let summaries = try makeAttentionApproximationSummaries(
+            tokenIDs: tokenIDs,
+            exactKeys: exactKeys,
+            exactValues: exactValues
+        )
+        return LlamaAttentionApproximationTrace(tokenIDs: tokenIDs, summaries: summaries)
+    }
+
+    private func makeAttentionScoreSummaries(
+        tokenIDs: [Int],
+        queries: [[Float]],
+        exactKeys: [[[Float]]]
+    ) throws -> [LlamaAttentionScoreSummary] {
+        let tokenCount = tokenIDs.count
+        let headDim = config.headDim
+        let numHeads = config.headCount
+        let numKVHeads = config.kvHeadCount
+        let kvDim = numKVHeads * headDim
+        let groupSize = numHeads / numKVHeads
+        let scale = 1.0 / sqrt(Float(headDim))
+
+        return try (0..<config.layerCount).map { layerIndex in
+            let query = queries[layerIndex]
+            let layerExactKeys = exactKeys[layerIndex]
+
+            var exactScores: [Float] = []
+            var storedScores: [Float] = []
+            var decodedScores: [Float] = []
+            exactScores.reserveCapacity(numHeads * tokenCount)
+            storedScores.reserveCapacity(numHeads * tokenCount)
+            decodedScores.reserveCapacity(numHeads * tokenCount)
+
+            let decodedQ8Keys: [Float]?
+            let decodedTurboKeys: [Float]?
+            let turboRuntimeRows: [TurboQuantRuntimeRow]?
+            if usesQ8_0KVCache {
+                decodedQ8Keys = try kvCache.retrieveDecodedQ8_0(layer: layerIndex).0
+                decodedTurboKeys = nil
+                turboRuntimeRows = nil
+            } else if usesTurboQuantV2 {
+                decodedQ8Keys = nil
+                decodedTurboKeys = try kvCache.retrieveDecodedTurboQuant(layer: layerIndex).0
+                turboRuntimeRows = try kvCache.retrieveTurboQuantRuntimeRows(layer: layerIndex).keys
+            } else {
+                decodedQ8Keys = nil
+                decodedTurboKeys = nil
+                turboRuntimeRows = nil
+            }
+
+            for headIndex in 0..<numHeads {
+                let kvHeadIndex = headIndex / groupSize
+                let qBase = headIndex * headDim
+                let qSlice = Array(query[qBase..<(qBase + headDim)])
+
+                var exactHeadScores: [Float] = []
+                var storedHeadScores: [Float] = []
+                var decodedHeadScores: [Float] = []
+                exactHeadScores.reserveCapacity(tokenCount)
+                storedHeadScores.reserveCapacity(tokenCount)
+                decodedHeadScores.reserveCapacity(tokenCount)
+
+                for tokenIndex in 0..<tokenCount {
+                    let exactRow = layerExactKeys[tokenIndex]
+                    let kBase = kvHeadIndex * headDim
+                    let exactKeySlice = Array(exactRow[kBase..<(kBase + headDim)])
+                    exactHeadScores.append(dot(qSlice, exactKeySlice) * scale)
+
+                    if let decodedQ8Keys {
+                        let rowBase = tokenIndex * kvDim + kvHeadIndex * headDim
+                        let storedKeySlice = Array(decodedQ8Keys[rowBase..<(rowBase + headDim)])
+                        let score = dot(qSlice, storedKeySlice) * scale
+                        storedHeadScores.append(score)
+                        decodedHeadScores.append(score)
+                    } else if let decodedTurboKeys, let turboRuntimeRows {
+                        let rowBase = tokenIndex * kvDim + kvHeadIndex * headDim
+                        let decodedKeySlice = Array(decodedTurboKeys[rowBase..<(rowBase + headDim)])
+                        decodedHeadScores.append(dot(qSlice, decodedKeySlice) * scale)
+                        let rowIndex = tokenIndex * numKVHeads + kvHeadIndex
+                        storedHeadScores.append(try turboQuantScore(q: qSlice, runtimeRow: turboRuntimeRows[rowIndex], scale: scale))
+                    } else if let turboRuntimeRows {
+                        let rowIndex = tokenIndex * numKVHeads + kvHeadIndex
+                        let score = try turboQuantScore(q: qSlice, runtimeRow: turboRuntimeRows[rowIndex], scale: scale)
+                        storedHeadScores.append(score)
+                        decodedHeadScores.append(score)
+                    } else {
+                        let score = exactHeadScores.last!
+                        storedHeadScores.append(score)
+                        decodedHeadScores.append(score)
+                    }
+                }
+
+                exactScores.append(contentsOf: exactHeadScores)
+                storedScores.append(contentsOf: storedHeadScores)
+                decodedScores.append(contentsOf: decodedHeadScores)
+            }
+
+            let exactSoftmax = softmax(exactScores, chunkSize: tokenCount)
+            let storedSoftmax = softmax(storedScores, chunkSize: tokenCount)
+            let decodedSoftmax = softmax(decodedScores, chunkSize: tokenCount)
+
+            return LlamaAttentionScoreSummary(
+                layerIndex: layerIndex,
+                exactVsStoredScoreMaxAbs: maxAbsoluteDelta(lhs: exactScores, rhs: storedScores),
+                exactVsStoredScoreMSE: meanSquaredError(lhs: exactScores, rhs: storedScores),
+                exactVsDecodedScoreMaxAbs: maxAbsoluteDelta(lhs: exactScores, rhs: decodedScores),
+                exactVsDecodedScoreMSE: meanSquaredError(lhs: exactScores, rhs: decodedScores),
+                exactVsStoredSoftmaxMaxAbs: maxAbsoluteDelta(lhs: exactSoftmax, rhs: storedSoftmax),
+                exactVsStoredSoftmaxMSE: meanSquaredError(lhs: exactSoftmax, rhs: storedSoftmax),
+                exactVsDecodedSoftmaxMaxAbs: maxAbsoluteDelta(lhs: exactSoftmax, rhs: decodedSoftmax),
+                exactVsDecodedSoftmaxMSE: meanSquaredError(lhs: exactSoftmax, rhs: decodedSoftmax)
+            )
+        }
+    }
+
+    private func makeAttentionApproximationSummaries(
+        tokenIDs: [Int],
+        exactKeys: [[[Float]]],
+        exactValues: [[[Float]]]
+    ) throws -> [LlamaAttentionApproximationSummary] {
+        let tokenCount = tokenIDs.count
+        let kvDim = config.kvHeadCount * config.headDim
+
+        return try (0..<config.layerCount).map { layerIndex in
+            let layerExactKeys = exactKeys[layerIndex]
+            let layerExactValues = exactValues[layerIndex]
+
+            let decodedKeys: [Float]
+            let decodedValues: [Float]
+            if usesQ8_0KVCache {
+                let retrieved = try kvCache.retrieveDecodedQ8_0(layer: layerIndex)
+                decodedKeys = retrieved.0
+                decodedValues = retrieved.1
+            } else if usesTurboQuantV2 {
+                let retrieved = try kvCache.retrieveDecodedTurboQuant(layer: layerIndex)
+                decodedKeys = retrieved.0
+                decodedValues = retrieved.1
+            } else {
+                decodedKeys = layerExactKeys.flatMap { $0 }
+                decodedValues = layerExactValues.flatMap { $0 }
+            }
+
+            let flatExactKeys = layerExactKeys.flatMap { $0 }
+            let flatExactValues = layerExactValues.flatMap { $0 }
+            let keyMaxAbs = maxAbsoluteDelta(lhs: flatExactKeys, rhs: decodedKeys)
+            let keyMSE = meanSquaredError(lhs: flatExactKeys, rhs: decodedKeys)
+            let valueMaxAbs = maxAbsoluteDelta(lhs: flatExactValues, rhs: decodedValues)
+            let valueMSE = meanSquaredError(lhs: flatExactValues, rhs: decodedValues)
+
+            let lastTokenBase = max(tokenCount - 1, 0) * kvDim
+            let exactLastKey = Array(flatExactKeys[lastTokenBase..<(lastTokenBase + kvDim)])
+            let decodedLastKey = Array(decodedKeys[lastTokenBase..<(lastTokenBase + kvDim)])
+            let exactLastValue = Array(flatExactValues[lastTokenBase..<(lastTokenBase + kvDim)])
+            let decodedLastValue = Array(decodedValues[lastTokenBase..<(lastTokenBase + kvDim)])
+
+            var worstKeyTokenIndex = 0
+            var worstKeyTokenMaxAbs: Float = 0
+            var worstValueTokenIndex = 0
+            var worstValueTokenMaxAbs: Float = 0
+
+            for tokenIndex in 0..<tokenCount {
+                let tokenBase = tokenIndex * kvDim
+                let exactKeyToken = Array(flatExactKeys[tokenBase..<(tokenBase + kvDim)])
+                let decodedKeyToken = Array(decodedKeys[tokenBase..<(tokenBase + kvDim)])
+                let exactValueToken = Array(flatExactValues[tokenBase..<(tokenBase + kvDim)])
+                let decodedValueToken = Array(decodedValues[tokenBase..<(tokenBase + kvDim)])
+                let keyTokenMaxAbs = maxAbsoluteDelta(lhs: exactKeyToken, rhs: decodedKeyToken)
+                let valueTokenMaxAbs = maxAbsoluteDelta(lhs: exactValueToken, rhs: decodedValueToken)
+                if keyTokenMaxAbs > worstKeyTokenMaxAbs {
+                    worstKeyTokenMaxAbs = keyTokenMaxAbs
+                    worstKeyTokenIndex = tokenIndex
+                }
+                if valueTokenMaxAbs > worstValueTokenMaxAbs {
+                    worstValueTokenMaxAbs = valueTokenMaxAbs
+                    worstValueTokenIndex = tokenIndex
+                }
+            }
+
+            return LlamaAttentionApproximationSummary(
+                layerIndex: layerIndex,
+                keyMaxAbs: keyMaxAbs,
+                keyMSE: keyMSE,
+                valueMaxAbs: valueMaxAbs,
+                valueMSE: valueMSE,
+                lastTokenKeyMaxAbs: maxAbsoluteDelta(lhs: exactLastKey, rhs: decodedLastKey),
+                lastTokenKeyMSE: meanSquaredError(lhs: exactLastKey, rhs: decodedLastKey),
+                lastTokenValueMaxAbs: maxAbsoluteDelta(lhs: exactLastValue, rhs: decodedLastValue),
+                lastTokenValueMSE: meanSquaredError(lhs: exactLastValue, rhs: decodedLastValue),
+                worstKeyTokenIndex: worstKeyTokenIndex,
+                worstKeyTokenMaxAbs: worstKeyTokenMaxAbs,
+                worstValueTokenIndex: worstValueTokenIndex,
+                worstValueTokenMaxAbs: worstValueTokenMaxAbs
+            )
+        }
+    }
+
+    private func turboQuantScore(q: [Float], runtimeRow: TurboQuantRuntimeRow, scale: Float) throws -> Float {
+        try TurboQuantReferenceEncoder.approximateScore(
+            query: q,
+            runtimeRow: runtimeRow,
+            residualWeight: turboQuantKeyResidualScale(for: 0),
+            rotationSeed: TurboQuantSeeds.keyRotation,
+            residualSeed: TurboQuantSeeds.keyResidual,
+            scale: scale
+        )
+    }
+
+    private func turboQuantKeyResidualScale(for layerIndex: Int) -> Float {
+        if let override = ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_KEY_RESIDUAL_SCALE"],
+           let value = Float(override),
+           value.isFinite {
+            return value
+        }
+        return TurboQuantV2Contract.keyResidualScale(forLayer: layerIndex, layerCount: config.layerCount)
+    }
+
+    private func turboQuantValueResidualScale(for layerIndex: Int) -> Float {
+        return TurboQuantV2Contract.valueResidualScale(forLayer: layerIndex, layerCount: config.layerCount)
+    }
+
+    private func softmax(_ values: [Float], chunkSize: Int) -> [Float] {
+        guard chunkSize > 0 else { return values }
+        var result = values
+        for offset in stride(from: 0, to: values.count, by: chunkSize) {
+            let end = min(offset + chunkSize, values.count)
+            let chunk = Array(values[offset..<end])
+            let maxValue = chunk.max() ?? 0
+            let exps = chunk.map { exp($0 - maxValue) }
+            let sum = exps.reduce(Float.zero, +)
+            for index in 0..<chunk.count {
+                result[offset + index] = sum > 0 ? exps[index] / sum : 0
+            }
+        }
+        return result
+    }
+
+    private func dot(_ lhs: [Float], _ rhs: [Float]) -> Float {
+        zip(lhs, rhs).reduce(Float.zero) { partial, pair in partial + pair.0 * pair.1 }
+    }
+
+    private func meanSquaredError(lhs: [Float], rhs: [Float]) -> Float {
+        zip(lhs, rhs).reduce(Float.zero) { partial, pair in
+            let delta = pair.0 - pair.1
+            return partial + delta * delta
+        } / Float(max(lhs.count, 1))
+    }
+
+    private func maxAbsoluteDelta(lhs: [Float], rhs: [Float]) -> Float {
+        zip(lhs, rhs).reduce(Float.zero) { partial, pair in
+            max(partial, abs(pair.0 - pair.1))
+        }
+    }
+
     /// Greedy argmax without materializing logits to a Swift array.
     /// Returns the selected token and whether any non-finite values were present.
     func greedyToken(for tokenIDs: [Int]) async throws -> (token: Int, hasNonFinite: Bool) {
@@ -706,28 +1177,28 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     }
 
     private func zeroKVCacheBuffers() {
-        for cache in layerKCaches {
+        for cache in layerKCaches.compactMap({ $0 }) {
             memset(cache.contents(), 0, cache.length)
         }
-        for cache in layerVCaches {
+        for cache in layerVCaches.compactMap({ $0 }) {
             memset(cache.contents(), 0, cache.length)
         }
-        for cache in turboQuantKCaches {
+        for cache in turboQuantKCaches.compactMap({ $0 }) {
             memset(cache.codes.contents(), 0, cache.codes.length)
             memset(cache.residualSigns.contents(), 0, cache.residualSigns.length)
             memset(cache.outlierMask.contents(), 0, cache.outlierMask.length)
             memset(cache.metadata.contents(), 0, cache.metadata.length)
         }
-        for cache in turboQuantVCaches {
+        for cache in turboQuantVCaches.compactMap({ $0 }) {
             memset(cache.codes.contents(), 0, cache.codes.length)
             memset(cache.residualSigns.contents(), 0, cache.residualSigns.length)
             memset(cache.outlierMask.contents(), 0, cache.outlierMask.length)
             memset(cache.metadata.contents(), 0, cache.metadata.length)
         }
-        for cache in turboQuantDenseKCaches {
+        for cache in turboQuantQ8FallbackKCaches {
             memset(cache.contents(), 0, cache.length)
         }
-        for cache in turboQuantDenseVCaches {
+        for cache in turboQuantQ8FallbackVCaches {
             memset(cache.contents(), 0, cache.length)
         }
     }
@@ -879,7 +1350,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         return results
     }
 
-    private func forwardLogitsBuffer(for tokenIDs: [Int]) async throws -> MTLBuffer {
+    private func forwardLogitsBuffer(
+        for tokenIDs: [Int],
+        traceCollector: LayerTraceCollector? = nil,
+        attentionScoreCollector: AttentionScoreCollector? = nil,
+        decodeStepCollector: DecodeStepCollector? = nil
+    ) async throws -> MTLBuffer {
         let dim = config.embeddingDim
         let floatStride = MemoryLayout<Float>.stride
 
@@ -901,6 +1377,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         if isDecodeMode, let newTokenID = tokenIDs.last {
             // DECODE MODE: process only the single new token using KV cache
             let currentPos = previousTokenIDs.count  // 0-indexed position of new token
+            let decodeStepIndex = decoderState.beginDecodeStep()
+            let useTurboQuantQ8DecodeFallback = shouldUseTurboQuantQ8DecodeFallback(
+                decodeStepIndex: decodeStepIndex
+            )
 
             // Embedding lookup for single token — use pre-allocated buffer (zero allocation)
             let hiddenBuf = scratch.decodeHidden
@@ -914,7 +1394,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 try fillEmbeddings(tokenIDs: [newTokenID], into: dstPtr)
             }
 
-            let logitsBuf = try await runDecodePass(hiddenBuf: hiddenBuf, currentPos: currentPos)
+            let logitsBuf = try await runDecodePass(
+                hiddenBuf: hiddenBuf,
+                currentPos: currentPos,
+                traceCollector: traceCollector,
+                useTurboQuantQ8DecodeFallback: useTurboQuantQ8DecodeFallback,
+                decodeStepCollector: decodeStepCollector
+            )
 
             // Update decoder state
             decoderState.previousTokenIDs = tokenIDs
@@ -955,11 +1441,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let logitsBuf = try await runPrefillPass(
                 hiddenBuf: hiddenBuf,
                 seqLen: suffixLen,
-                startPosition: commonPrefixLen
+                startPosition: commonPrefixLen,
+                traceCollector: traceCollector,
+                attentionScoreCollector: attentionScoreCollector
             )
 
             // Update decoder state and KV cache position
             decoderState.previousTokenIDs = tokenIDs
+            decoderState.markPrefillComplete()
             kvCache.setPosition(tokenIDs.count)
             return logitsBuf
         } else {
@@ -993,7 +1482,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             var logitsBuf = try await runPrefillPass(
                 hiddenBuf: hiddenBuf,
-                seqLen: seqLen
+                seqLen: seqLen,
+                traceCollector: traceCollector,
+                attentionScoreCollector: attentionScoreCollector
             )
 
             // Decode warmup: run 3 dummy decode passes to warm GPU pipeline for decode-specific
@@ -1009,27 +1500,42 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 for warmupIdx in 0..<5 {
                     let warmupPos = seqLen + warmupIdx
                     kvCache.setPosition(warmupPos)  // Set position so mega-kernel uses correct kvSeqLen
-                    _ = try await runDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos)
+                    _ = try await runDecodePass(hiddenBuf: warmupHidden, currentPos: warmupPos, traceCollector: nil)
                 }
                 // Zero ALL KV cache buffers to remove stale warmup data
                 zeroKVCacheBuffers()
                 kvCache.reset()
                 // Re-run prefill to populate KV cache with correct data
-                logitsBuf = try await runPrefillPass(hiddenBuf: hiddenBuf, seqLen: seqLen)
+                logitsBuf = try await runPrefillPass(
+                    hiddenBuf: hiddenBuf,
+                    seqLen: seqLen,
+                    traceCollector: traceCollector,
+                    attentionScoreCollector: attentionScoreCollector
+                )
             }
 
             // Update decoder state and KV cache position
             decoderState.previousTokenIDs = tokenIDs
+            decoderState.markPrefillComplete()
             kvCache.setPosition(seqLen)
             return logitsBuf
         }
     }
 
-    private func runDecodePass(hiddenBuf: MTLBuffer, currentPos: Int) async throws -> MTLBuffer {
-        if isTurboQuantEnabled {
+    private func runDecodePass(
+        hiddenBuf: MTLBuffer,
+        currentPos: Int,
+        traceCollector: LayerTraceCollector? = nil,
+        useTurboQuantQ8DecodeFallback: Bool = false,
+        decodeStepCollector: DecodeStepCollector? = nil
+    ) async throws -> MTLBuffer {
+        if usesCompressedKVCache {
             return try await fusedDecodePass(
                 hiddenBuf: hiddenBuf,
-                currentPos: currentPos
+                currentPos: currentPos,
+                traceCollector: traceCollector,
+                useTurboQuantQ8DecodeFallback: useTurboQuantQ8DecodeFallback,
+                decodeStepCollector: decodeStepCollector
             )
         }
 
@@ -1068,14 +1574,19 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         return try await fusedDecodePass(
             hiddenBuf: hiddenBuf,
-            currentPos: currentPos
+            currentPos: currentPos,
+            traceCollector: traceCollector,
+            useTurboQuantQ8DecodeFallback: useTurboQuantQ8DecodeFallback,
+            decodeStepCollector: decodeStepCollector
         )
     }
 
     private func runPrefillPass(
         hiddenBuf: MTLBuffer,
         seqLen: Int,
-        startPosition: Int = 0
+        startPosition: Int = 0,
+        traceCollector: LayerTraceCollector? = nil,
+        attentionScoreCollector: AttentionScoreCollector? = nil
     ) async throws -> MTLBuffer {
         if #available(macOS 26.0, iOS 26.0, *),
            prefillDebugOptions.preferMetal4PrefillPath,
@@ -1083,7 +1594,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             return try await fusedPrefillPass(
                 hiddenBuf: hiddenBuf,
                 seqLen: seqLen,
-                startPosition: startPosition
+                startPosition: startPosition,
+                traceCollector: traceCollector,
+                attentionScoreCollector: attentionScoreCollector
             )
         }
 
@@ -1092,14 +1605,18 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             return try await fusedPrefillPass(
                 hiddenBuf: hiddenBuf,
                 seqLen: seqLen,
-                startPosition: startPosition
+                startPosition: startPosition,
+                traceCollector: traceCollector,
+                attentionScoreCollector: attentionScoreCollector
             )
         }
 
         return try await fusedPrefillPass(
             hiddenBuf: hiddenBuf,
             seqLen: seqLen,
-            startPosition: startPosition
+            startPosition: startPosition,
+            traceCollector: traceCollector,
+            attentionScoreCollector: attentionScoreCollector
         )
     }
 
@@ -1111,14 +1628,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         sourceRowStride: Int,
         destinationRowBase: Int,
         destination: TurboQuantMetalBuffers,
-        signs: TurboQuantSignBuffers
+        signs: TurboQuantSignBuffers,
+        preset: TurboQuantPreset,
+        layout: TurboQuantLayout,
+        innerQScaleInvBuffer: MTLBuffer? = nil,
+        enableInnerQScaling: Bool = false,
+        preferQuantizationBenefitSelection: Bool = false
     ) throws {
-        guard let turboQuantKernel,
-              let preset = turboQuantPreset,
-              let layout = turboQuantLayout else {
+        guard let turboQuantKernel else {
             throw GenerationError.modelLoadFailed(reason: "TurboQuant kernel state is unavailable")
         }
-
         let descriptor = preset.descriptor
         let isAggressiveSmallRowPath = preset == .aggressive && rowCount <= config.kvHeadCount
         var params = TurboQuantQuantizeParams(
@@ -1129,7 +1648,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             regularBits: UInt32(descriptor.regularBits),
             highPrecisionBits: UInt32(descriptor.highPrecisionBits),
             highPrecisionChannelCount: UInt32(descriptor.highPrecisionChannelCount),
-            reserved: 0
+            reserved: (preferQuantizationBenefitSelection ? 1 : 0) | (enableInnerQScaling ? 2 : 0)
         )
 
         let quantizePipeline = isAggressiveSmallRowPath
@@ -1144,6 +1663,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantQuantizeParams>.stride, index: 5)
         encoder.setBuffer(signs.rotation, offset: 0, index: 6)
         encoder.setBuffer(signs.residual, offset: 0, index: 7)
+        encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 8)
         if isAggressiveSmallRowPath {
             encoder.dispatchThreadgroups(
                 MTLSize(width: rowCount, height: 1, depth: 1),
@@ -1161,7 +1681,101 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         }
     }
 
+    private func encodeQ8Rows(
+        encoder: MTLComputeCommandEncoder,
+        sourceBuffer: MTLBuffer,
+        sourceBufferOffset: Int,
+        rowCount: Int,
+        sourceRowStride: Int,
+        destinationRowBase: Int,
+        destinationBuffer: MTLBuffer
+    ) {
+        let blocksPerRow = config.headDim / 32
+        var params = QuantizeQ8RowsParams(
+            rowCount: UInt32(rowCount),
+            sourceRowStride: UInt32(sourceRowStride),
+            destinationRowBase: UInt32(destinationRowBase),
+            blocksPerRow: UInt32(blocksPerRow)
+        )
+
+        encoder.setComputePipelineState(quantizeQ8RowsPipeline)
+        encoder.setBuffer(sourceBuffer, offset: sourceBufferOffset, index: 0)
+        encoder.setBuffer(destinationBuffer, offset: 0, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<QuantizeQ8RowsParams>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: rowCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(rowCount, quantizeQ8RowsPipeline.maxTotalThreadsPerThreadgroup),
+                height: 1,
+                depth: 1
+            )
+        )
+    }
+
+    private func encodeLayerTraceCapture(
+        encoder: MTLComputeCommandEncoder,
+        sourceBuffer: MTLBuffer,
+        sourceElementOffset: Int,
+        destinationBuffer: MTLBuffer,
+        destinationElementOffset: Int,
+        elementCount: Int
+    ) {
+        if ProcessInfo.processInfo.environment["EDGERUNNER_TRACE_BUFFER_DIAGNOSTICS"] == "1" {
+            print("""
+            [trace-capture]
+              source_label=\(sourceBuffer.label ?? "unlabeled")
+              source_length=\(sourceBuffer.length)
+              source_offset_elements=\(sourceElementOffset)
+              destination_label=\(destinationBuffer.label ?? "unlabeled")
+              destination_length=\(destinationBuffer.length)
+              destination_offset_elements=\(destinationElementOffset)
+              element_count=\(elementCount)
+            """)
+        }
+        var params = CaptureF32SliceParams(
+            sourceOffsetElements: UInt32(sourceElementOffset),
+            destinationOffsetElements: UInt32(destinationElementOffset),
+            elementCount: UInt32(elementCount)
+        )
+        encoder.setComputePipelineState(captureF32SlicePipeline)
+        encoder.setBuffer(sourceBuffer, offset: 0, index: 0)
+        encoder.setBuffer(destinationBuffer, offset: 0, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<CaptureF32SliceParams>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: elementCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(elementCount, captureF32SlicePipeline.maxTotalThreadsPerThreadgroup),
+                height: 1,
+                depth: 1
+            )
+        )
+    }
+
+    private func encodeLayerTraceCaptureF16ToF32(
+        encoder: MTLComputeCommandEncoder,
+        sourceBuffer: MTLBuffer,
+        sourceByteOffset: Int,
+        destinationBuffer: MTLBuffer,
+        destinationByteOffset: Int,
+        elementCount: Int
+    ) {
+        var params = ERElementwiseParams(elementCount: UInt32(elementCount))
+        encoder.setComputePipelineState(convertF16ToF32Pipeline)
+        encoder.setBuffer(sourceBuffer, offset: sourceByteOffset, index: 0)
+        encoder.setBuffer(destinationBuffer, offset: destinationByteOffset, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: elementCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(elementCount, convertF16ToF32Pipeline.maxTotalThreadsPerThreadgroup),
+                height: 1,
+                depth: 1
+            )
+        )
+    }
+
     private func encodeTurboQuantAttention(
+        layerIndex: Int,
         encoder: MTLComputeCommandEncoder,
         qBuffer: MTLBuffer,
         keyBuffers: TurboQuantMetalBuffers,
@@ -1170,18 +1784,26 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         outputBuffer: MTLBuffer,
         seqLen: Int,
         kvSeqLen: Int,
-        qOffset: Int
+        qOffset: Int,
+        qBufferOffsetBytes: Int = 0,
+        outputBufferOffsetBytes: Int = 0,
+        innerQScaleInvBuffer: MTLBuffer? = nil,
+        enableInnerQScaling: Bool = false
     ) throws {
         guard let turboQuantKernel,
-              let preset = turboQuantPreset,
-              let layout = turboQuantLayout else {
+              let keyPreset = turboQuantKeyPreset(for: layerIndex),
+              let valuePreset = turboQuantValuePreset(for: layerIndex),
+              let keyLayout = turboQuantKeyLayout(for: layerIndex),
+              let valueLayout = turboQuantValueLayout(for: layerIndex) else {
             throw GenerationError.modelLoadFailed(reason: "TurboQuant attention state is unavailable")
         }
 
-        let descriptor = preset.descriptor
+        let keyDescriptor = keyPreset.descriptor
+        let valueDescriptor = valuePreset.descriptor
         let numHeads = config.headCount
         let numKVHeads = config.kvHeadCount
         let groupSize = numHeads / numKVHeads
+        let forcePrefillAttention = ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_FORCE_PREFILL_ATTENTION"] == "1"
         var params = TurboQuantAttentionParams(
             seqLen: UInt32(seqLen),
             headDim: UInt32(config.headDim),
@@ -1189,47 +1811,47 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             numKVHeads: UInt32(numKVHeads),
             groupSize: UInt32(groupSize),
             scale: 1.0 / sqrt(Float(config.headDim)),
+            keyResidualScale: turboQuantKeyResidualScale(for: layerIndex),
+            valueResidualScale: turboQuantValueResidualScale(for: layerIndex),
             causal: 1,
             kvBlockSize: UInt32(GQAKernel.blockSize),
             qBlockSize: UInt32(GQAKernel.blockSize),
             kvSeqLen: UInt32(kvSeqLen),
             qOffset: UInt32(qOffset),
-            codeWordsPerRow: UInt32(layout.codeWordsPerRow),
-            regularBits: UInt32(descriptor.regularBits),
-            highPrecisionBits: UInt32(descriptor.highPrecisionBits),
-            reserved: 0
+            codeWordsPerRow: UInt32(keyLayout.codeWordsPerRow),
+            regularBits: UInt32(keyDescriptor.regularBits),
+            highPrecisionBits: UInt32(keyDescriptor.highPrecisionBits),
+            valueCodeWordsPerRow: UInt32(valueLayout.codeWordsPerRow),
+            valueRegularBits: UInt32(valueDescriptor.regularBits),
+            valueHighPrecisionBits: UInt32(valueDescriptor.highPrecisionBits),
+            reserved: enableInnerQScaling ? 1 : 0
         )
 
         let isSingleTokenDecode = seqLen == 1
-        let useDenseVDecode = isSingleTokenDecode
-            && denseValueBuffer != nil
-            && kvSeqLen >= Self.turboQuantDensePrefillAttentionSeqThreshold
-        let useFastHybridDecode = useDenseVDecode
-            && preset == .aggressive
-            && kvSeqLen >= Self.turboQuantFastHybridDecodeSeqThreshold
+        let useSingleTokenDecodePipeline = isSingleTokenDecode && !forcePrefillAttention
+        let useDenseVDecode = isSingleTokenDecode && denseValueBuffer != nil
         let attentionPipeline: MTLComputePipelineState
         if useDenseVDecode, let denseValueBuffer {
-            if useFastHybridDecode {
-                attentionPipeline = turboQuantKernel.decodeAttentionAggressiveHybridVPipeline
-            } else if preset == .aggressive {
+            if keyPreset == .aggressive {
                 attentionPipeline = turboQuantKernel.decodeAttentionAggressiveDenseVPipeline
             } else {
                 attentionPipeline = turboQuantKernel.decodeAttentionDenseVPipeline
             }
             encoder.setComputePipelineState(attentionPipeline)
-            encoder.setBuffer(qBuffer, offset: 0, index: 0)
+            encoder.setBuffer(qBuffer, offset: qBufferOffsetBytes, index: 0)
             encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
             encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
             encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
             encoder.setBuffer(keyBuffers.metadata, offset: 0, index: 4)
             encoder.setBuffer(denseValueBuffer, offset: 0, index: 5)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 6)
+            encoder.setBuffer(outputBuffer, offset: outputBufferOffsetBytes, index: 6)
             encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 7)
             encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 8)
             encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 9)
+            encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 10)
         } else {
-            if isSingleTokenDecode {
-                attentionPipeline = preset == .aggressive
+            if useSingleTokenDecodePipeline {
+                attentionPipeline = turboQuantUsesAggressiveFastPath(for: layerIndex)
                     ? turboQuantKernel.decodeAttentionAggressivePipeline
                     : turboQuantKernel.decodeAttentionPipeline
             } else {
@@ -1237,7 +1859,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             encoder.setComputePipelineState(attentionPipeline)
-            encoder.setBuffer(qBuffer, offset: 0, index: 0)
+            encoder.setBuffer(qBuffer, offset: qBufferOffsetBytes, index: 0)
             encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
             encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
             encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
@@ -1246,15 +1868,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             encoder.setBuffer(valueBuffers.residualSigns, offset: 0, index: 6)
             encoder.setBuffer(valueBuffers.outlierMask, offset: 0, index: 7)
             encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
-            encoder.setBuffer(outputBuffer, offset: 0, index: 9)
+            encoder.setBuffer(outputBuffer, offset: outputBufferOffsetBytes, index: 9)
             encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
             encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 11)
             encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 12)
             encoder.setBuffer(turboQuantKernel.valueSigns.rotation, offset: 0, index: 13)
             encoder.setBuffer(turboQuantKernel.valueSigns.residual, offset: 0, index: 14)
+            encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 15)
         }
 
-        if isSingleTokenDecode {
+        if useSingleTokenDecodePipeline {
             let decodeThreads = min(
                 GQAKernel.blockSize,
                 turboQuantKernel.decodeAttentionPipeline.maxTotalThreadsPerThreadgroup
@@ -1273,6 +1896,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     }
 
     private func encodeTurboQuantKVRowsSmallAggressive(
+        layerIndex: Int,
         encoder: MTLComputeCommandEncoder,
         keySourceBuffer: MTLBuffer,
         valueSourceBuffer: MTLBuffer,
@@ -1283,18 +1907,22 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         valueDestination: TurboQuantMetalBuffers
     ) throws {
         guard let turboQuantKernel,
-              let preset = turboQuantPreset,
-              preset == .aggressive,
-              let layout = turboQuantLayout else {
+              let keyPreset = turboQuantKeyPreset(for: layerIndex),
+              let valuePreset = turboQuantValuePreset(for: layerIndex),
+              keyPreset == .aggressive,
+              valuePreset == .aggressive,
+              let keyLayout = turboQuantKeyLayout(for: layerIndex),
+              let valueLayout = turboQuantValueLayout(for: layerIndex),
+              keyLayout == valueLayout else {
             throw GenerationError.modelLoadFailed(reason: "TurboQuant aggressive KV quantize state is unavailable")
         }
 
-        let descriptor = preset.descriptor
+        let descriptor = keyPreset.descriptor
         var params = TurboQuantQuantizeParams(
             rowCount: UInt32(rowCount),
             sourceRowStride: UInt32(sourceRowStride),
             destinationRowBase: UInt32(destinationRowBase),
-            codeWordsPerRow: UInt32(layout.codeWordsPerRow),
+            codeWordsPerRow: UInt32(keyLayout.codeWordsPerRow),
             regularBits: UInt32(descriptor.regularBits),
             highPrecisionBits: UInt32(descriptor.highPrecisionBits),
             highPrecisionChannelCount: UInt32(descriptor.highPrecisionChannelCount),
@@ -1324,6 +1952,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     }
 
     private func encodeTurboQuantKRowsSmallAggressive(
+        layerIndex: Int,
         encoder: MTLComputeCommandEncoder,
         keySourceBuffer: MTLBuffer,
         rowCount: Int,
@@ -1332,9 +1961,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         keyDestination: TurboQuantMetalBuffers
     ) throws {
         guard let turboQuantKernel,
-              let preset = turboQuantPreset,
+              let preset = turboQuantKeyPreset(for: layerIndex),
               preset == .aggressive,
-              let layout = turboQuantLayout else {
+              let layout = turboQuantKeyLayout(for: layerIndex) else {
             throw GenerationError.modelLoadFailed(reason: "TurboQuant aggressive K quantize state is unavailable")
         }
 
@@ -1425,7 +2054,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     private func fusedPrefillPass(
         hiddenBuf: MTLBuffer,
         seqLen: Int,
-        startPosition: Int = 0
+        startPosition: Int = 0,
+        traceCollector: LayerTraceCollector? = nil,
+        attentionScoreCollector: AttentionScoreCollector? = nil
     ) async throws -> MTLBuffer {
         let dim = config.embeddingDim
         let headDim = config.headDim
@@ -1553,8 +2184,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             if #available(macOS 26.0, iOS 26.0, *), let m4 = metal4State {
                 m4.populateResidencySet(
                     scratch: scratch,
-                    layerKCaches: layerKCaches,
-                    layerVCaches: layerVCaches,
+                    layerKCaches: layerKCaches.compactMap { $0 },
+                    layerVCaches: layerVCaches.compactMap { $0 },
                     preloadedWeights: preloadedWeights
                 )
             }
@@ -1571,12 +2202,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let rmsNormPSO = rmsNormKernel.pipeline
         let fusedFinalNormGemvPSO = fusedFinalNormGemvPipeline
         let gemvPSO = gemvKernel.f32Pipeline
-        let gqaF32PSO = gqaKernel.pipelineF32
         let fusedQ8PSO = fusedQ8GemvPipeline
         let fusedQ8TiledPSO = fusedQ8GemvTiledPipeline
         let fusedQ1PSO = Self.useQ1V2Kernel ? dequantQ1_0_g128?.gemvV2PSO : dequantQ1_0_g128?.gemvPSO
         let ropePSO = ropeKernel.pipelineF32
+        let gqaFloatPSO = gqaKernel.pipelineF32
         let gqaPSO = gqaKernel.pipelineF16KV
+        let gqaQ8PSO = gqaKernel.pipelineQ8KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
         let convertF32ToF16PSO = convertF32ToF16Pipeline
@@ -1587,25 +2219,35 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let numKVHeads = config.kvHeadCount
         let gqaBlockSize = GQAKernel.blockSize
         let allVBuf = scratch.allV
-        let turboQuantEnabled = isTurboQuantEnabled
+        let q8KVEnabled = usesQ8_0KVCache
+        let turboQuantEnabled = usesTurboQuantV2
+        let compressedKVEnabled = q8KVEnabled || turboQuantEnabled
+        let denseValueReferenceBuffer: MTLBuffer? = if turboQuantEnabled,
+            startPosition == 0,
+            traceCollector?.denseValueReferenceAttentionOutputBuffer != nil {
+            device.makeBuffer(length: seqLen * kvDim * halfStride, options: .storageModeShared)
+        } else {
+            nil
+        }
 
         for layerIndex in 0..<config.layerCount {
             let lw = preloadedWeights.layers[layerIndex]
             let layerOutputBuf = (layerIndex % 2 == 0) ? outputBufA : outputBufB
 
             // 1+2. FUSED RMSNorm + Q/K/V projections (saves 1 dispatch per layer)
-            let useQ1V2FusedPrefill = Self.useQ1V2Kernel && fusedQ1PSO != nil && lw.wqRawQ1 != nil && seqLen == 1
+            let useQ1V2FusedPrefill = Self.useQ1V2Kernel
+                && fusedQ1PSO != nil
+                && lw.wqRawQ1 != nil
+                && seqLen == 1
+                && !compressedKVEnabled
             let useQ8Fused = lw.wqRaw != nil && !useQ1V2FusedPrefill
-            let useFusedQKV = useQ8Fused && !turboQuantEnabled
+            let useFusedQKV = useQ8Fused && !compressedKVEnabled
+            let fusedPrefillWritesVToLayerCache = useQ1V2FusedPrefill || useFusedQKV
             let blocksPerRowDim = dim / 32  // Q8_0: 32 elements per block
             let layerVCache = turboQuantEnabled ? nil : layerVCaches[layerIndex]
             let layerKCache = turboQuantEnabled ? nil : layerKCaches[layerIndex]
             let turboVCache = turboQuantEnabled ? turboQuantVCaches[layerIndex] : nil
             let turboKCache = turboQuantEnabled ? turboQuantKCaches[layerIndex] : nil
-            let turboDenseKCache = turboQuantEnabled ? turboQuantDenseKCaches[layerIndex] : nil
-            let turboDenseVCache = turboQuantEnabled ? turboQuantDenseVCaches[layerIndex] : nil
-            let useDenseTurboPrefillAttention = turboQuantEnabled
-                && (seqLen + startPosition) >= Self.turboQuantDensePrefillAttentionSeqThreshold
             if useQ1V2FusedPrefill, let fusedQKVPSO = dequantQ1_0_g128?.fusedQKVV2PSO {
                 // Q1 v2 fused QKV for single-token prefill (matches sync decode path)
                 let blocksPerRowQ1 = dim / 128
@@ -1734,7 +2376,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                     }
 
-                    if !turboQuantEnabled {
+                    if !compressedKVEnabled {
                         // Convert V from f32 (allVBuf) → f16 (layerVCache)
                         enc.setComputePipelineState(convertF32ToF16PSO)
                         enc.setBuffer(allVBuf, offset: kvOff, index: 0)
@@ -1746,7 +2388,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     }
                 }
 
-                if turboQuantEnabled && !useDenseTurboPrefillAttention {
+                if q8KVEnabled {
+                    encodeQ8Rows(
+                        encoder: enc,
+                        sourceBuffer: allVBuf,
+                        sourceBufferOffset: 0,
+                        rowCount: seqLen * numKVHeads,
+                        sourceRowStride: headDim,
+                        destinationRowBase: startPosition * numKVHeads,
+                        destinationBuffer: layerVCache!
+                    )
+                } else if turboQuantEnabled {
                     try encodeTurboQuantRows(
                         encoder: enc,
                         sourceBuffer: allVBuf,
@@ -1755,27 +2407,44 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         sourceRowStride: headDim,
                         destinationRowBase: startPosition * numKVHeads,
                         destination: turboVCache!,
-                        signs: turboQuantKernel!.valueSigns
+                        signs: turboQuantKernel!.valueSigns,
+                        preset: turboQuantValuePreset(for: layerIndex)!,
+                        layout: turboQuantValueLayout(for: layerIndex)!,
+                        preferQuantizationBenefitSelection: true
                     )
-                }
-
-                if turboQuantEnabled, let turboDenseVCache {
-                    enc.setComputePipelineState(convertF32ToF16PSO)
-                    enc.setBuffer(allVBuf, offset: 0, index: 0)
-                    enc.setBuffer(turboDenseVCache, offset: startPosition * kvDim * halfStride, index: 1)
-                    var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                    enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
 
                 // Convert V from f32 → f16 not needed for fused path (writes f16 directly)
             }
 
+            if let attentionScoreCollector,
+               startPosition == 0 {
+                if fusedPrefillWritesVToLayerCache {
+                    encodeLayerTraceCaptureF16ToF32(
+                        encoder: enc,
+                        sourceBuffer: layerVCache!,
+                        sourceByteOffset: startPosition * kvDim * halfStride,
+                        destinationBuffer: attentionScoreCollector.valueBuffer,
+                        destinationByteOffset: layerIndex * seqLen * kvDim * MemoryLayout<Float>.stride,
+                        elementCount: seqLen * kvDim
+                    )
+                } else {
+                    encodeLayerTraceCapture(
+                        encoder: enc,
+                        sourceBuffer: allVBuf,
+                        sourceElementOffset: 0,
+                        destinationBuffer: attentionScoreCollector.valueBuffer,
+                        destinationElementOffset: layerIndex * seqLen * kvDim,
+                        elementCount: seqLen * kvDim
+                    )
+                }
+            }
+
             // 3. FUSED Q/K per-head norm + RoPE Q + RoPE K→f16 (replaces 4-6 dispatches with 1)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
             let ropeQOut: MTLBuffer  // used by GQA step below
-            if hasQKNorm && seqLen == 1 && !turboQuantEnabled {
+            let ropeKOut: MTLBuffer?  // used by dense trace references below
+            if hasQKNorm && seqLen == 1 && !compressedKVEnabled {
                 // MEGA-FUSED: Q/K norm + RoPE + GQA all in one dispatch
                 let megaPSO = fusedNormRoPEGQAPipeline
                 enc.setComputePipelineState(megaPSO)
@@ -1795,6 +2464,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.dispatchThreads(MTLSize(width: 64, height: totalHeads, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(64, megaPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 ropeQOut = attnOutBuf  // mega-kernel writes attention output directly
+                ropeKOut = nil
             } else {
                 // Fallback: separate Q/K norm + RoPE (for seqLen > 1 or no Q/K norm)
                 if hasQKNorm {
@@ -1842,35 +2512,55 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
                 // RoPE K → f32 temp, then convert to f16 cache
-                let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
+                let ropeKOutLocal = hasQKNorm ? allKBuf : ropeKBuf
                 do {
                     var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
                         headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1)
                     enc.setBuffer(ropeKIn, offset: 0, index: 0)
-                    enc.setBuffer(ropeKOut, offset: 0, index: 1)
+                    enc.setBuffer(ropeKOutLocal, offset: 0, index: 1)
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
                     let halfDim = headDim / 2
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: seqLen),
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                if turboQuantEnabled && !useDenseTurboPrefillAttention {
+                if q8KVEnabled {
+                    encodeQ8Rows(
+                        encoder: enc,
+                        sourceBuffer: ropeKOutLocal,
+                        sourceBufferOffset: 0,
+                        rowCount: seqLen * numKVHeads,
+                        sourceRowStride: headDim,
+                        destinationRowBase: startPosition * numKVHeads,
+                        destinationBuffer: layerKCache!
+                    )
+                } else if turboQuantEnabled {
+                    observeTurboQuantInnerQRows(
+                        from: ropeKOutLocal,
+                        sourceBufferOffset: 0,
+                        rowCount: seqLen * numKVHeads,
+                        sourceRowStride: headDim
+                    )
                     try encodeTurboQuantRows(
                         encoder: enc,
-                        sourceBuffer: ropeKOut,
+                        sourceBuffer: ropeKOutLocal,
                         sourceBufferOffset: 0,
                         rowCount: seqLen * numKVHeads,
                         sourceRowStride: headDim,
                         destinationRowBase: startPosition * numKVHeads,
                         destination: turboKCache!,
-                        signs: turboQuantKernel!.keySigns
+                        signs: turboQuantKernel!.keySigns,
+                        preset: turboQuantKeyPreset(for: layerIndex)!,
+                        layout: turboQuantKeyLayout(for: layerIndex)!,
+                        innerQScaleInvBuffer: turboQuantInnerQState?.buffer,
+                        enableInnerQScaling: turboQuantInnerQState?.isActive ?? false
                     )
-                } else if !turboQuantEnabled {
+                } else {
                     // Convert RoPE'd K from f32 → f16 (layerKCache) for each position
                     for t in 0..<seqLen {
                         let srcOff = t * kvDim * floatStride
                         let dstOff = (t + startPosition) * kvDim * halfStride
                         enc.setComputePipelineState(convertF32ToF16PSO)
-                        enc.setBuffer(ropeKOut, offset: srcOff, index: 0)
+                        enc.setBuffer(ropeKOutLocal, offset: srcOff, index: 0)
                         enc.setBuffer(layerKCache!, offset: dstOff, index: 1)
                         var convCount = ERElementwiseParams(elementCount: UInt32(kvDim))
                         enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
@@ -1879,85 +2569,49 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     }
                 }
                 ropeQOut = hasQKNorm ? allQBuf : ropeQBuf
+                ropeKOut = ropeKOutLocal
             }
 
             // 4. GQA (data is in [S,H,D] layout)
             //    Skip GQA if mega-kernel already computed attention (seqLen==1 && hasQKNorm)
-            let megaKernelUsed = hasQKNorm && seqLen == 1 && !turboQuantEnabled
+            let megaKernelUsed = hasQKNorm && seqLen == 1 && !compressedKVEnabled
             if !megaKernelUsed {
                 let totalKVSeqLen = seqLen + startPosition
                 if turboQuantEnabled {
-                    if useDenseTurboPrefillAttention {
-                        var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
-                            numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
-                            groupSize: UInt32(numHeads / numKVHeads), scale: 1.0 / sqrt(Float(headDim)),
-                            causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
-                            kvSeqLen: UInt32(totalKVSeqLen), qOffset: UInt32(startPosition))
-                        let ropeKAttention = hasQKNorm ? allKBuf : ropeKBuf
-                        enc.setComputePipelineState(gqaF32PSO)
-                        enc.setBuffer(ropeQOut, offset: 0, index: 0)
-                        enc.setBuffer(ropeKAttention, offset: 0, index: 1)
-                        enc.setBuffer(allVBuf, offset: 0, index: 2)
-                        enc.setBuffer(attnOutBuf, offset: 0, index: 3)
-                        enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
-                        let qBlockCount = (seqLen + gqaBlockSize - 1) / gqaBlockSize
-                        enc.dispatchThreadgroups(MTLSize(width: qBlockCount, height: numHeads, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
-
-                        try encodeTurboQuantRows(
-                            encoder: enc,
-                            sourceBuffer: ropeKAttention,
-                            sourceBufferOffset: 0,
-                            rowCount: seqLen * numKVHeads,
-                            sourceRowStride: headDim,
-                            destinationRowBase: startPosition * numKVHeads,
-                            destination: turboKCache!,
-                            signs: turboQuantKernel!.keySigns
-                        )
-
-                        if let turboDenseKCache {
-                            enc.setComputePipelineState(convertF32ToF16PSO)
-                            enc.setBuffer(ropeKAttention, offset: 0, index: 0)
-                            enc.setBuffer(turboDenseKCache, offset: startPosition * kvDim * halfStride, index: 1)
-                            var kConvCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                            enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                            enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                        }
-
-                        try encodeTurboQuantRows(
-                            encoder: enc,
-                            sourceBuffer: allVBuf,
-                            sourceBufferOffset: 0,
-                            rowCount: seqLen * numKVHeads,
-                            sourceRowStride: headDim,
-                            destinationRowBase: startPosition * numKVHeads,
-                            destination: turboVCache!,
-                            signs: turboQuantKernel!.valueSigns
-                        )
-
-                        if let turboDenseVCache {
-                            enc.setComputePipelineState(convertF32ToF16PSO)
-                            enc.setBuffer(allVBuf, offset: 0, index: 0)
-                            enc.setBuffer(turboDenseVCache, offset: startPosition * kvDim * halfStride, index: 1)
-                            var convCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
-                            enc.setBytes(&convCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                            enc.dispatchThreads(MTLSize(width: seqLen * kvDim, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(seqLen * kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                        }
-                    } else {
-                        try encodeTurboQuantAttention(
-                            encoder: enc,
-                            qBuffer: ropeQOut,
-                            keyBuffers: turboKCache!,
-                            valueBuffers: turboVCache!,
-                            denseValueBuffer: nil,
-                            outputBuffer: attnOutBuf,
-                            seqLen: seqLen,
-                            kvSeqLen: totalKVSeqLen,
-                            qOffset: startPosition
-                        )
-                    }
+                    // TurboQuant KV buffers use hazardTrackingModeUntracked, so prefill must
+                    // explicitly order the quantize writes before the later attention read.
+                    enc.memoryBarrier(scope: .buffers)
+                }
+                if turboQuantEnabled {
+                    try encodeTurboQuantAttention(
+                        layerIndex: layerIndex,
+                        encoder: enc,
+                        qBuffer: ropeQOut,
+                        keyBuffers: turboKCache!,
+                        valueBuffers: turboVCache!,
+                        denseValueBuffer: nil,
+                        outputBuffer: attnOutBuf,
+                        seqLen: seqLen,
+                        kvSeqLen: totalKVSeqLen,
+                        qOffset: startPosition,
+                        innerQScaleInvBuffer: turboQuantInnerQState?.buffer,
+                        enableInnerQScaling: turboQuantInnerQState?.isActive ?? false
+                    )
+                } else if q8KVEnabled {
+                    var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
+                        numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
+                        groupSize: UInt32(numHeads / numKVHeads), scale: 1.0 / sqrt(Float(headDim)),
+                        causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
+                        kvSeqLen: UInt32(totalKVSeqLen), qOffset: UInt32(startPosition))
+                    enc.setComputePipelineState(gqaQ8PSO)
+                    enc.setBuffer(ropeQOut, offset: 0, index: 0)
+                    enc.setBuffer(layerKCache!, offset: 0, index: 1)
+                    enc.setBuffer(layerVCache!, offset: 0, index: 2)
+                    enc.setBuffer(attnOutBuf, offset: 0, index: 3)
+                    enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                    let qBlockCount = (seqLen + gqaBlockSize - 1) / gqaBlockSize
+                    enc.dispatchThreadgroups(MTLSize(width: qBlockCount, height: numHeads, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
                 } else {
                     let groupSize = numHeads / numKVHeads
                     var p = ERGQAParams(seqLen: UInt32(seqLen), headDim: UInt32(headDim),
@@ -1974,6 +2628,113 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     let qBlockCount = (seqLen + gqaBlockSize - 1) / gqaBlockSize
                     enc.dispatchThreadgroups(MTLSize(width: qBlockCount, height: numHeads, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
+                }
+            }
+
+            if let attentionScoreCollector,
+               startPosition == 0,
+               let ropeKOut {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: ropeQOut,
+                    sourceElementOffset: (seqLen - 1) * qDim,
+                    destinationBuffer: attentionScoreCollector.queryBuffer,
+                    destinationElementOffset: layerIndex * qDim,
+                    elementCount: qDim
+                )
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: ropeQOut,
+                    sourceElementOffset: 0,
+                    destinationBuffer: attentionScoreCollector.queryRowsBuffer,
+                    destinationElementOffset: layerIndex * seqLen * qDim,
+                    elementCount: seqLen * qDim
+                )
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: ropeKOut,
+                    sourceElementOffset: 0,
+                    destinationBuffer: attentionScoreCollector.keyBuffer,
+                    destinationElementOffset: layerIndex * seqLen * kvDim,
+                    elementCount: seqLen * kvDim
+                )
+            }
+
+            if let traceCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: attnOutBuf,
+                    sourceElementOffset: (seqLen - 1) * qDim,
+                    destinationBuffer: traceCollector.attentionOutputBuffer,
+                    destinationElementOffset: layerIndex * qDim,
+                    elementCount: qDim
+                )
+
+                if turboQuantEnabled,
+                   startPosition == 0,
+                   let denseValueReferenceBuffer,
+                   let denseValueReferenceAttentionOutputBuffer = traceCollector.denseValueReferenceAttentionOutputBuffer {
+                    let denseValueReferenceKVSeqLen = seqLen + startPosition
+                    enc.setComputePipelineState(convertF32ToF16PSO)
+                    enc.setBuffer(allVBuf, offset: 0, index: 0)
+                    enc.setBuffer(denseValueReferenceBuffer, offset: 0, index: 1)
+                    var denseValueCount = ERElementwiseParams(elementCount: UInt32(seqLen * kvDim))
+                    enc.setBytes(&denseValueCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
+                    let denseValueElementCount = seqLen * kvDim
+                    enc.dispatchThreads(
+                        MTLSize(width: denseValueElementCount, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(
+                            width: min(denseValueElementCount, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup),
+                            height: 1,
+                            depth: 1
+                        )
+                    )
+                    enc.memoryBarrier(scope: .buffers)
+                    try encodeTurboQuantAttention(
+                        layerIndex: layerIndex,
+                        encoder: enc,
+                        qBuffer: ropeQOut,
+                        keyBuffers: turboKCache!,
+                        valueBuffers: turboVCache!,
+                        denseValueBuffer: denseValueReferenceBuffer,
+                        outputBuffer: denseValueReferenceAttentionOutputBuffer,
+                        seqLen: 1,
+                        kvSeqLen: denseValueReferenceKVSeqLen,
+                        qOffset: startPosition + seqLen - 1,
+                        qBufferOffsetBytes: (seqLen - 1) * qDim * floatStride,
+                        outputBufferOffsetBytes: layerIndex * qDim * floatStride,
+                        innerQScaleInvBuffer: turboQuantInnerQState?.buffer,
+                        enableInnerQScaling: turboQuantInnerQState?.isActive ?? false
+                    )
+                }
+
+                if turboQuantEnabled,
+                   startPosition == 0,
+                   let ropeKOut,
+                   let denseAttentionReferenceAttentionOutputBuffer = traceCollector.denseAttentionReferenceAttentionOutputBuffer {
+                    var denseAttentionParams = ERGQAParams(
+                        seqLen: 1,
+                        headDim: UInt32(headDim),
+                        numHeads: UInt32(numHeads),
+                        numKVHeads: UInt32(numKVHeads),
+                        groupSize: UInt32(numHeads / numKVHeads),
+                        scale: 1.0 / sqrt(Float(headDim)),
+                        causal: 1,
+                        kvBlockSize: UInt32(gqaBlockSize),
+                        qBlockSize: UInt32(gqaBlockSize),
+                        kvSeqLen: UInt32(seqLen + startPosition),
+                        qOffset: UInt32(startPosition + seqLen - 1)
+                    )
+                    enc.setComputePipelineState(gqaFloatPSO)
+                    enc.setBuffer(ropeQOut, offset: (seqLen - 1) * qDim * floatStride, index: 0)
+                    enc.setBuffer(ropeKOut, offset: 0, index: 1)
+                    enc.setBuffer(allVBuf, offset: 0, index: 2)
+                    enc.setBuffer(denseAttentionReferenceAttentionOutputBuffer, offset: layerIndex * qDim * floatStride, index: 3)
+                    enc.setBytes(&denseAttentionParams, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                    enc.dispatchThreadgroups(
+                        MTLSize(width: 1, height: numHeads, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1)
+                    )
                 }
             }
 
@@ -2047,6 +2808,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.dispatchThreads(MTLSize(width: seqLen * dim, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(seqLen * dim, addPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
+            }
+
+            if let traceCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: afterAttnBuf,
+                    sourceElementOffset: (seqLen - 1) * dim,
+                    destinationBuffer: traceCollector.attentionResidualBuffer,
+                    destinationElementOffset: layerIndex * config.embeddingDim,
+                    elementCount: config.embeddingDim
+                )
             }
 
             // 7+8+9. FUSED RMSNorm + Gate + Up + SwiGLU (saves 3 dispatches for seqLen=1)
@@ -2237,6 +3009,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             currentHidden = layerOutputBuf
+            if let traceCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: layerOutputBuf,
+                    sourceElementOffset: (seqLen - 1) * dim,
+                    destinationBuffer: traceCollector.layerHiddenStateBuffer,
+                    destinationElementOffset: layerIndex * config.embeddingDim,
+                    elementCount: config.embeddingDim
+                )
+            }
         }
 
         let logitsBuf = scratch.logits
@@ -2318,7 +3100,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// Returns MTLBuffer containing vocab-sized logits.
     private func fusedDecodePass(
         hiddenBuf: MTLBuffer,
-        currentPos: Int
+        currentPos: Int,
+        traceCollector: LayerTraceCollector? = nil,
+        useTurboQuantQ8DecodeFallback: Bool = false,
+        decodeStepCollector: DecodeStepCollector? = nil
     ) async throws -> MTLBuffer {
         let dim = config.embeddingDim
         let headDim = config.headDim
@@ -2365,6 +3150,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let fusedQ1GateUpSiluV2PSO = dequantQ1_0_g128?.fusedGateUpV2PSO
         let gemvPSO = gemvKernel.f32Pipeline
         let gqaPSO = gqaKernel.pipelineF16KV
+        let gqaQ8PSO = gqaKernel.pipelineQ8KV
         let swigluPSO = activationKernels.swigluPipeline
         let addPSO = addPipeline
         let convertF32ToF16PSO = convertF32ToF16Pipeline
@@ -2375,7 +3161,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let numKVHeads = config.kvHeadCount
         let gqaBlockSize = GQAKernel.blockSize
         let allVBuf = scratch.allV
-        let turboQuantEnabled = isTurboQuantEnabled
+        let q8KVEnabled = usesQ8_0KVCache
+        let turboQuantEnabled = usesTurboQuantV2
+        let compressedKVEnabled = q8KVEnabled || turboQuantEnabled
         let asyncBlocksPerRowQ1 = dim / 128  // Q1_0_g128: 128 weights per block
 
         for layerIndex in 0..<config.layerCount {
@@ -2385,26 +3173,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let layerVCache = turboQuantEnabled ? nil : layerVCaches[layerIndex]
             let turboKCache = turboQuantEnabled ? turboQuantKCaches[layerIndex] : nil
             let turboVCache = turboQuantEnabled ? turboQuantVCaches[layerIndex] : nil
-            let turboDenseKCache = turboQuantEnabled ? turboQuantDenseKCaches[layerIndex] : nil
-            let turboDenseVCache = turboQuantEnabled ? turboQuantDenseVCaches[layerIndex] : nil
             let cacheWriteOffF16 = currentPos * kvDim * halfStride
-            let useDenseTurboDecode = turboQuantEnabled
-                && turboDenseKCache != nil
-                && turboDenseVCache != nil
-                && totalKVLen >= Self.turboQuantDensePrefillAttentionSeqThreshold
-            let useFastHybridDecode = turboQuantEnabled
-                && turboQuantPreset == .aggressive
-                && turboDenseKCache != nil
-                && turboDenseVCache != nil
-                && totalKVLen >= Self.turboQuantFastHybridDecodeSeqThreshold
 
             // 1+2. FUSED RMSNorm + Q/K/V projections (saves 1 dispatch per layer)
             // Q1 v2 fused path takes priority over Q8 fused when enabled (reads 7.5x less data)
-            let useQ1V2Fused = Self.useQ1V2Kernel && fusedQ1QKVV2PSO != nil && lw.wqRawQ1 != nil
+            let useQ1V2Fused = Self.useQ1V2Kernel
+                && fusedQ1QKVV2PSO != nil
+                && lw.wqRawQ1 != nil
+                && !compressedKVEnabled
             let useQ8Fused = lw.wqRaw != nil && !useQ1V2Fused
-            let useFusedQKV = useQ8Fused && !turboQuantEnabled
-            let useTurboFusedQKV = useQ8Fused && turboQuantEnabled
-            let useTurboHybridDenseVQKV = useTurboFusedQKV && useFastHybridDecode
+            let useFusedQKV = useQ8Fused && !compressedKVEnabled
             let blocksPerRowDim = dim / 32
             let blocksPerRowQ1 = dim / 128
 
@@ -2430,30 +3208,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&kvR, length: 4, index: 11)
                 enc.dispatchThreadgroups(MTLSize(width: (totalQKVRows + 1) / 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            } else if useFusedQKV || useTurboFusedQKV {
+            } else if useFusedQKV {
                 // Fused RMSNorm + Q+K+V: RMSNorm is computed inline, no separate dispatch.
-                let fusedQKVPSO: MTLComputePipelineState
-                if useTurboHybridDenseVQKV {
-                    fusedQKVPSO = fusedQKVTurboHybridVPipeline
-                } else if useTurboFusedQKV {
-                    fusedQKVPSO = fusedQKVTurboPipeline
-                } else {
-                    fusedQKVPSO = fusedQKVPipeline
-                }
-                enc.setComputePipelineState(fusedQKVPSO)
+                enc.setComputePipelineState(fusedQKVPipeline)
                 enc.setBuffer(lw.wqRaw!, offset: 0, index: 0)
                 enc.setBuffer(lw.wkRaw!, offset: 0, index: 1)
                 enc.setBuffer(lw.wvRaw!, offset: 0, index: 2)
                 enc.setBuffer(currentHidden, offset: 0, index: 3)  // raw hidden (RMSNorm applied inline)
                 enc.setBuffer(allQBuf, offset: 0, index: 4)
                 enc.setBuffer(allKBuf, offset: 0, index: 5)
-                if useTurboHybridDenseVQKV {
-                    enc.setBuffer(turboDenseVCache!, offset: cacheWriteOffF16, index: 6)
-                } else if useTurboFusedQKV {
-                    enc.setBuffer(allVBuf, offset: 0, index: 6)
-                } else {
-                    enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
-                }
+                enc.setBuffer(layerVCache!, offset: cacheWriteOffF16, index: 6)
                 var qkvP = FusedQKVParams(qRows: UInt32(qDim), kvRows: UInt32(kvDim),
                     cols: UInt32(dim), blocksPerRow: UInt32(blocksPerRowDim),
                     tokenCount: 1, rmsEps: rmsEps)
@@ -2546,11 +3310,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
             }
 
-            let useAggressiveSmallRowKVQuantize = turboQuantEnabled
-                && turboQuantPreset == .aggressive
-                && numKVHeads <= config.kvHeadCount
-
-            if turboQuantEnabled && !useAggressiveSmallRowKVQuantize {
+            if q8KVEnabled {
+                encodeQ8Rows(
+                    encoder: enc,
+                    sourceBuffer: allVBuf,
+                    sourceBufferOffset: 0,
+                    rowCount: numKVHeads,
+                    sourceRowStride: headDim,
+                    destinationRowBase: currentPos * numKVHeads,
+                    destinationBuffer: layerVCache!
+                )
+            } else if turboQuantEnabled {
                 try encodeTurboQuantRows(
                     encoder: enc,
                     sourceBuffer: allVBuf,
@@ -2559,18 +3329,12 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     sourceRowStride: headDim,
                     destinationRowBase: currentPos * numKVHeads,
                     destination: turboVCache!,
-                    signs: turboQuantKernel!.valueSigns
+                    signs: turboQuantKernel!.valueSigns,
+                    preset: turboQuantValuePreset(for: layerIndex)!,
+                    layout: turboQuantValueLayout(for: layerIndex)!,
+                    preferQuantizationBenefitSelection: true
                 )
-                if let turboDenseVCache, !useTurboHybridDenseVQKV {
-                    enc.setComputePipelineState(convertF32ToF16PSO)
-                    enc.setBuffer(allVBuf, offset: 0, index: 0)
-                    enc.setBuffer(turboDenseVCache, offset: cacheWriteOffF16, index: 1)
-                    var vConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                    enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                }
-            } else if !turboQuantEnabled && !useFusedQKV
+            } else if !useFusedQKV
                       && !(Self.useQ1V2Kernel && fusedQ1QKVV2PSO != nil && lw.wqRawQ1 != nil) {
                 // Convert V from f32 → f16 only when not using a fused path that writes f16 directly
                 enc.setComputePipelineState(convertF32ToF16PSO)
@@ -2584,13 +3348,13 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
             // KV cache buffers disable hazard tracking, so decode must insert an explicit
             // barrier before GQA consumes the freshly-written K/V slices.
-            if (!turboQuantEnabled || turboDenseVCache != nil) && !decodeDebugOptions.disableKVCacheBarrier {
+            if !decodeDebugOptions.disableKVCacheBarrier {
                 enc.memoryBarrier(scope: .buffers)
             }
 
             // 3+4. MEGA-FUSED: Q/K norm + RoPE + GQA in SINGLE dispatch (saves 1 dispatch/layer)
             let hasQKNorm = lw.qNorm != nil && lw.kNorm != nil
-            let useMegaKernel = hasQKNorm && !decodeDebugOptions.disableMegaKernel && !turboQuantEnabled
+            let useMegaKernel = hasQKNorm && !decodeDebugOptions.disableMegaKernel && !compressedKVEnabled
             if useMegaKernel {
                 let megaPSO = fusedNormRoPEGQAPipeline
                 enc.setComputePipelineState(megaPSO)
@@ -2640,6 +3404,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let ropeQInput = hasQKNorm ? ropeQBuf : allQBuf
                 let ropeQOutput = hasQKNorm ? allQBuf : ropeQBuf
                 let ropeKInput = hasQKNorm ? ropeKBuf : allKBuf
+                let ropeKOutput = scratch.ropeK
                 do {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
                         headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
@@ -2651,8 +3416,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                 }
-                if turboQuantEnabled {
-                    let ropeKOutput = scratch.ropeK
+                if q8KVEnabled {
                     do {
                         var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
                             headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
@@ -2664,80 +3428,47 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                     }
-                    if useAggressiveSmallRowKVQuantize {
-                        if useFastHybridDecode, let turboDenseVCache {
-                            try encodeTurboQuantKRowsSmallAggressive(
-                                encoder: enc,
-                                keySourceBuffer: ropeKOutput,
-                                rowCount: numKVHeads,
-                                sourceRowStride: headDim,
-                                destinationRowBase: currentPos * numKVHeads,
-                                keyDestination: turboKCache!
-                            )
-                            if !useTurboHybridDenseVQKV {
-                                enc.setComputePipelineState(convertF32ToF16PSO)
-                                enc.setBuffer(allVBuf, offset: 0, index: 0)
-                                enc.setBuffer(turboDenseVCache, offset: cacheWriteOffF16, index: 1)
-                                var vConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                                enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                            }
-                            enc.setComputePipelineState(convertF32ToF16PSO)
-                            enc.setBuffer(ropeKOutput, offset: 0, index: 0)
-                            enc.setBuffer(turboDenseKCache!, offset: cacheWriteOffF16, index: 1)
-                            var kConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                            enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                            enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                        } else {
-                            try encodeTurboQuantKVRowsSmallAggressive(
-                                encoder: enc,
-                                keySourceBuffer: ropeKOutput,
-                                valueSourceBuffer: allVBuf,
-                                rowCount: numKVHeads,
-                                sourceRowStride: headDim,
-                                destinationRowBase: currentPos * numKVHeads,
-                                keyDestination: turboKCache!,
-                                valueDestination: turboVCache!
-                            )
-                            if useDenseTurboDecode {
-                                enc.setComputePipelineState(convertF32ToF16PSO)
-                                enc.setBuffer(ropeKOutput, offset: 0, index: 0)
-                                enc.setBuffer(turboDenseKCache!, offset: cacheWriteOffF16, index: 1)
-                                var kConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                                enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                                enc.setBuffer(allVBuf, offset: 0, index: 0)
-                                enc.setBuffer(turboDenseVCache!, offset: cacheWriteOffF16, index: 1)
-                                var vConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                                enc.setBytes(&vConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                                enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                            }
-                        }
-                    } else {
-                        try encodeTurboQuantRows(
-                            encoder: enc,
-                            sourceBuffer: ropeKOutput,
-                            sourceBufferOffset: 0,
-                            rowCount: numKVHeads,
-                            sourceRowStride: headDim,
-                            destinationRowBase: currentPos * numKVHeads,
-                            destination: turboKCache!,
-                            signs: turboQuantKernel!.keySigns
-                        )
-                        if useDenseTurboDecode {
-                            enc.setComputePipelineState(convertF32ToF16PSO)
-                            enc.setBuffer(ropeKOutput, offset: 0, index: 0)
-                            enc.setBuffer(turboDenseKCache!, offset: cacheWriteOffF16, index: 1)
-                            var kConvCount = ERElementwiseParams(elementCount: UInt32(kvDim))
-                            enc.setBytes(&kConvCount, length: MemoryLayout<ERElementwiseParams>.stride, index: 2)
-                            enc.dispatchThreads(MTLSize(width: kvDim, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(kvDim, convertF32ToF16PSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-                        }
+                    encodeQ8Rows(
+                        encoder: enc,
+                        sourceBuffer: ropeKOutput,
+                        sourceBufferOffset: 0,
+                        rowCount: numKVHeads,
+                        sourceRowStride: headDim,
+                        destinationRowBase: currentPos * numKVHeads,
+                        destinationBuffer: layerKCache!
+                    )
+                } else if turboQuantEnabled {
+                    do {
+                        var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
+                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                        enc.setComputePipelineState(activeRopePSO)
+                        enc.setBuffer(ropeKInput, offset: 0, index: 0)
+                        enc.setBuffer(ropeKOutput, offset: 0, index: 1)
+                        enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+                        let halfDim = headDim / 2
+                        enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(halfDim, activeRopePSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
                     }
+                    observeTurboQuantInnerQRows(
+                        from: ropeKOutput,
+                        sourceBufferOffset: 0,
+                        rowCount: numKVHeads,
+                        sourceRowStride: headDim
+                    )
+                    try encodeTurboQuantRows(
+                        encoder: enc,
+                        sourceBuffer: ropeKOutput,
+                        sourceBufferOffset: 0,
+                        rowCount: numKVHeads,
+                        sourceRowStride: headDim,
+                        destinationRowBase: currentPos * numKVHeads,
+                        destination: turboKCache!,
+                        signs: turboQuantKernel!.keySigns,
+                        preset: turboQuantKeyPreset(for: layerIndex)!,
+                        layout: turboQuantKeyLayout(for: layerIndex)!,
+                        innerQScaleInvBuffer: turboQuantInnerQState?.buffer,
+                        enableInnerQScaling: turboQuantInnerQState?.isActive ?? false
+                    )
                 } else {
                     do {
                         var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
@@ -2754,35 +3485,63 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 if !decodeDebugOptions.disableKVCacheBarrier {
                     enc.memoryBarrier(scope: .buffers)
                 }
+                if let decodeStepCollector {
+                    encodeLayerTraceCapture(
+                        encoder: enc,
+                        sourceBuffer: ropeQOutput,
+                        sourceElementOffset: 0,
+                        destinationBuffer: decodeStepCollector.queryBuffer,
+                        destinationElementOffset: layerIndex * qDim,
+                        elementCount: qDim
+                    )
+                    encodeLayerTraceCapture(
+                        encoder: enc,
+                        sourceBuffer: ropeKOutput,
+                        sourceElementOffset: 0,
+                        destinationBuffer: decodeStepCollector.keyBuffer,
+                        destinationElementOffset: layerIndex * kvDim,
+                        elementCount: kvDim
+                    )
+                    encodeLayerTraceCapture(
+                        encoder: enc,
+                        sourceBuffer: allVBuf,
+                        sourceElementOffset: 0,
+                        destinationBuffer: decodeStepCollector.valueBuffer,
+                        destinationElementOffset: layerIndex * kvDim,
+                        elementCount: kvDim
+                    )
+                }
                 do {
                     if turboQuantEnabled {
-                        if useDenseTurboDecode && !useFastHybridDecode {
-                            var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
-                                numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
-                                groupSize: UInt32(numHeads / numKVHeads), scale: 1.0 / sqrt(Float(headDim)),
-                                causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
-                                kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
-                            enc.setComputePipelineState(gqaPSO)
-                            enc.setBuffer(ropeQOutput, offset: 0, index: 0)
-                            enc.setBuffer(turboDenseKCache!, offset: 0, index: 1)
-                            enc.setBuffer(turboDenseVCache!, offset: 0, index: 2)
-                            enc.setBuffer(attnOutBuf, offset: 0, index: 3)
-                            enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
-                            enc.dispatchThreadgroups(MTLSize(width: 1, height: numHeads, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
-                        } else {
-                            try encodeTurboQuantAttention(
-                                encoder: enc,
-                                qBuffer: ropeQOutput,
-                                keyBuffers: turboKCache!,
-                                valueBuffers: turboVCache!,
-                                denseValueBuffer: useDenseTurboDecode ? turboDenseVCache : nil,
-                                outputBuffer: attnOutBuf,
-                                seqLen: 1,
-                                kvSeqLen: totalKVLen,
-                                qOffset: currentPos
-                            )
-                        }
+                        try encodeTurboQuantAttention(
+                            layerIndex: layerIndex,
+                            encoder: enc,
+                            qBuffer: ropeQOutput,
+                            keyBuffers: turboKCache!,
+                            valueBuffers: turboVCache!,
+                            denseValueBuffer: nil,
+                            outputBuffer: attnOutBuf,
+                            seqLen: 1,
+                            kvSeqLen: totalKVLen,
+                            qOffset: currentPos,
+                            innerQScaleInvBuffer: turboQuantInnerQState?.buffer,
+                            enableInnerQScaling: turboQuantInnerQState?.isActive ?? false
+                        )
+                    } else if q8KVEnabled {
+                        let groupSize = numHeads / numKVHeads
+                        var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
+                            numHeads: UInt32(numHeads), numKVHeads: UInt32(numKVHeads),
+                            groupSize: UInt32(groupSize), scale: 1.0 / sqrt(Float(headDim)),
+                            causal: 1, kvBlockSize: UInt32(gqaBlockSize), qBlockSize: UInt32(gqaBlockSize),
+                            kvSeqLen: UInt32(totalKVLen), qOffset: UInt32(currentPos))
+                        enc.setComputePipelineState(gqaQ8PSO)
+                        enc.setBuffer(ropeQOutput, offset: 0, index: 0)
+                        enc.setBuffer(layerKCache!, offset: 0, index: 1)
+                        enc.setBuffer(layerVCache!, offset: 0, index: 2)
+                        enc.setBuffer(attnOutBuf, offset: 0, index: 3)
+                        enc.setBytes(&p, length: MemoryLayout<ERGQAParams>.stride, index: 4)
+                        enc.dispatchThreadgroups(MTLSize(width: 1, height: numHeads, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
                     } else {
                         let groupSize = numHeads / numKVHeads
                         var p = ERGQAParams(seqLen: 1, headDim: UInt32(headDim),
@@ -2800,6 +3559,28 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                             threadsPerThreadgroup: MTLSize(width: gqaBlockSize, height: 1, depth: 1))
                     }
                 }
+            }
+
+            if let traceCollector {
+                let qDim = config.headCount * config.headDim
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: attnOutBuf,
+                    sourceElementOffset: 0,
+                    destinationBuffer: traceCollector.attentionOutputBuffer,
+                    destinationElementOffset: layerIndex * qDim,
+                    elementCount: qDim
+                )
+            }
+            if let decodeStepCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: attnOutBuf,
+                    sourceElementOffset: 0,
+                    destinationBuffer: decodeStepCollector.attentionOutputBuffer,
+                    destinationElementOffset: layerIndex * qDim,
+                    elementCount: qDim
+                )
             }
 
             // 5+6. Fused output projection + residual add (saves 1 dispatch)
@@ -2864,6 +3645,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 enc.setBytes(&addP, length: MemoryLayout<ERElementwiseParams>.stride, index: 3)
                 enc.dispatchThreads(MTLSize(width: dim, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(dim, addPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            }
+
+            if let traceCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: afterAttnBuf,
+                    sourceElementOffset: 0,
+                    destinationBuffer: traceCollector.attentionResidualBuffer,
+                    destinationElementOffset: layerIndex * config.embeddingDim,
+                    elementCount: config.embeddingDim
+                )
             }
 
             // 7+8+9. FUSED RMSNorm + Gate + Up + SwiGLU (saves 1 dispatch per layer)
@@ -3042,6 +3834,16 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
 
             currentHidden = layerOutputBuf
+            if let traceCollector {
+                encodeLayerTraceCapture(
+                    encoder: enc,
+                    sourceBuffer: layerOutputBuf,
+                    sourceElementOffset: 0,
+                    destinationBuffer: traceCollector.layerHiddenStateBuffer,
+                    destinationElementOffset: layerIndex * config.embeddingDim,
+                    elementCount: config.embeddingDim
+                )
+            }
         }
 
         let logitsBuf = scratch.logits
@@ -3504,7 +4306,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 argTable.setAddress(currentHidden.gpuAddress, index: 3)
                 argTable.setAddress(allQAddr, index: 4)
                 argTable.setAddress(allKAddr, index: 5)
-                argTable.setAddress(layerVCache.gpuAddress + UInt64(cacheWriteOffF16), index: 6)
+                argTable.setAddress(layerVCache!.gpuAddress + UInt64(cacheWriteOffF16), index: 6)
                 argTable.setAddress(qkvParamsAddr, index: 7)
                 argTable.setAddress(lw.attnNorm.gpuAddress, index: 8)
 
@@ -3525,8 +4327,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 argTable.setAddress(lw.qNorm!.gpuAddress, index: 2)
                 argTable.setAddress(lw.kNorm!.gpuAddress, index: 3)
                 argTable.setAddress(attnOutAddr, index: 4)
-                argTable.setAddress(layerKCache.gpuAddress, index: 5)
-                argTable.setAddress(layerVCache.gpuAddress, index: 6)
+                argTable.setAddress(layerKCache!.gpuAddress, index: 5)
+                argTable.setAddress(layerVCache!.gpuAddress, index: 6)
                 argTable.setAddress(megaParamsAddr, index: 7)
 
                 enc.dispatchThreads(
@@ -4654,6 +5456,8 @@ private struct TurboQuantAttentionParams {
     var numKVHeads: UInt32
     var groupSize: UInt32
     var scale: Float
+    var keyResidualScale: Float
+    var valueResidualScale: Float
     var causal: UInt32
     var kvBlockSize: UInt32
     var qBlockSize: UInt32
@@ -4662,7 +5466,23 @@ private struct TurboQuantAttentionParams {
     var codeWordsPerRow: UInt32
     var regularBits: UInt32
     var highPrecisionBits: UInt32
+    var valueCodeWordsPerRow: UInt32
+    var valueRegularBits: UInt32
+    var valueHighPrecisionBits: UInt32
     var reserved: UInt32
+}
+
+private struct QuantizeQ8RowsParams {
+    var rowCount: UInt32
+    var sourceRowStride: UInt32
+    var destinationRowBase: UInt32
+    var blocksPerRow: UInt32
+}
+
+private struct CaptureF32SliceParams {
+    var sourceOffsetElements: UInt32
+    var destinationOffsetElements: UInt32
+    var elementCount: UInt32
 }
 
 // MARK: - Pre-loaded Weight Buffers
@@ -4737,6 +5557,14 @@ private final class PreloadedWeightsStore: @unchecked Sendable {
     }
 }
 
+private final class LlamaLanguageModelBox: @unchecked Sendable {
+    let model: LlamaLanguageModel
+
+    init(model: LlamaLanguageModel) {
+        self.model = model
+    }
+}
+
 // MARK: - Decoder State Store
 
 /// Tracks the previously processed token sequence for KV cache decode detection.
@@ -4750,6 +5578,7 @@ private final class DecoderStateStore: @unchecked Sendable {
     private var _cachedLogits: [Float]?
     private var _cachedLogitsInput: [Int]?
     private var _decodeWarmedUp = false
+    private var _decodeStepsSincePrefill = 0
 
     var previousTokenIDs: [Int] {
         get { lock.withLock { _previousTokenIDs } }
@@ -4772,14 +5601,333 @@ private final class DecoderStateStore: @unchecked Sendable {
         }
     }
 
+    func beginDecodeStep() -> Int {
+        lock.withLock {
+            let step = _decodeStepsSincePrefill
+            _decodeStepsSincePrefill += 1
+            return step
+        }
+    }
+
+    func markPrefillComplete() {
+        lock.withLock {
+            _decodeStepsSincePrefill = 0
+        }
+    }
+
     func reset(keepDecodeWarmup: Bool) {
         lock.withLock {
             _previousTokenIDs = []
             _cachedLogits = nil
             _cachedLogitsInput = nil
+            _decodeStepsSincePrefill = 0
             if !keepDecodeWarmup {
                 _decodeWarmedUp = false
             }
+        }
+    }
+}
+
+struct LlamaLayerwiseTrace: Sendable {
+    let tokenIDs: [Int]
+    let attentionOutputStates: [[Float]]
+    let denseValueReferenceAttentionOutputStates: [[Float]]?
+    let denseAttentionReferenceAttentionOutputStates: [[Float]]?
+    let attentionResidualStates: [[Float]]
+    let layerHiddenStates: [[Float]]
+    let logits: [Float]
+}
+
+struct LlamaAttentionScoreSummary: Sendable {
+    let layerIndex: Int
+    let exactVsStoredScoreMaxAbs: Float
+    let exactVsStoredScoreMSE: Float
+    let exactVsDecodedScoreMaxAbs: Float
+    let exactVsDecodedScoreMSE: Float
+    let exactVsStoredSoftmaxMaxAbs: Float
+    let exactVsStoredSoftmaxMSE: Float
+    let exactVsDecodedSoftmaxMaxAbs: Float
+    let exactVsDecodedSoftmaxMSE: Float
+}
+
+struct LlamaAttentionScoreTrace: Sendable {
+    let tokenIDs: [Int]
+    let summaries: [LlamaAttentionScoreSummary]
+}
+
+struct LlamaAttentionInputsTrace: Sendable {
+    let tokenIDs: [Int]
+    let queries: [[Float]]
+    let queryRows: [[[Float]]]
+    let exactKeys: [[[Float]]]
+    let exactValues: [[[Float]]]
+}
+
+struct LlamaDecodeStepTrace: Sendable {
+    let promptTokens: [Int]
+    let tokenIDs: [Int]
+    let queries: [[Float]]
+    let keys: [[Float]]
+    let values: [[Float]]
+    let attentionOutputs: [[Float]]
+    let logits: [Float]
+}
+
+struct LlamaAttentionApproximationSummary: Sendable {
+    let layerIndex: Int
+    let keyMaxAbs: Float
+    let keyMSE: Float
+    let valueMaxAbs: Float
+    let valueMSE: Float
+    let lastTokenKeyMaxAbs: Float
+    let lastTokenKeyMSE: Float
+    let lastTokenValueMaxAbs: Float
+    let lastTokenValueMSE: Float
+    let worstKeyTokenIndex: Int
+    let worstKeyTokenMaxAbs: Float
+    let worstValueTokenIndex: Int
+    let worstValueTokenMaxAbs: Float
+}
+
+struct LlamaAttentionApproximationTrace: Sendable {
+    let tokenIDs: [Int]
+    let summaries: [LlamaAttentionApproximationSummary]
+}
+
+private final class LayerTraceCollector: @unchecked Sendable {
+    let attentionOutputBuffer: MTLBuffer
+    let denseValueReferenceAttentionOutputBuffer: MTLBuffer?
+    let denseAttentionReferenceAttentionOutputBuffer: MTLBuffer?
+    let attentionResidualBuffer: MTLBuffer
+    let layerHiddenStateBuffer: MTLBuffer
+    private let layerCount: Int
+    private let hiddenDimension: Int
+    private let attentionOutputDimension: Int
+
+    init(
+        device: MTLDevice,
+        layerCount: Int,
+        hiddenDimension: Int,
+        attentionOutputDimension: Int,
+        captureDenseValueReference: Bool
+    ) throws {
+        self.layerCount = layerCount
+        self.hiddenDimension = hiddenDimension
+        self.attentionOutputDimension = attentionOutputDimension
+        let hiddenLength = layerCount * hiddenDimension * MemoryLayout<Float>.stride
+        let attentionOutputLength = layerCount * attentionOutputDimension * MemoryLayout<Float>.stride
+        guard let attentionOutputBuffer = device.makeBuffer(length: attentionOutputLength, options: .storageModeShared),
+              let attentionResidualBuffer = device.makeBuffer(length: hiddenLength, options: .storageModeShared),
+              let layerHiddenStateBuffer = device.makeBuffer(length: hiddenLength, options: .storageModeShared) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to allocate layer trace buffers")
+        }
+        attentionOutputBuffer.label = "trace.attention_output"
+        attentionResidualBuffer.label = "trace.attention_residual"
+        layerHiddenStateBuffer.label = "trace.layer_hidden"
+        self.attentionOutputBuffer = attentionOutputBuffer
+        if captureDenseValueReference {
+            let denseValueReferenceAttentionOutputBuffer = device.makeBuffer(length: attentionOutputLength, options: .storageModeShared)
+            denseValueReferenceAttentionOutputBuffer?.label = "trace.dense_value_attention_output"
+            self.denseValueReferenceAttentionOutputBuffer = denseValueReferenceAttentionOutputBuffer
+            let denseAttentionReferenceAttentionOutputBuffer = device.makeBuffer(length: attentionOutputLength, options: .storageModeShared)
+            denseAttentionReferenceAttentionOutputBuffer?.label = "trace.dense_attention_output"
+            self.denseAttentionReferenceAttentionOutputBuffer = denseAttentionReferenceAttentionOutputBuffer
+        } else {
+            self.denseValueReferenceAttentionOutputBuffer = nil
+            self.denseAttentionReferenceAttentionOutputBuffer = nil
+        }
+        self.attentionResidualBuffer = attentionResidualBuffer
+        self.layerHiddenStateBuffer = layerHiddenStateBuffer
+        memset(attentionOutputBuffer.contents(), 0, attentionOutputLength)
+        if let denseValueReferenceAttentionOutputBuffer {
+            memset(denseValueReferenceAttentionOutputBuffer.contents(), 0, attentionOutputLength)
+        }
+        if let denseAttentionReferenceAttentionOutputBuffer {
+            memset(denseAttentionReferenceAttentionOutputBuffer.contents(), 0, attentionOutputLength)
+        }
+        memset(attentionResidualBuffer.contents(), 0, hiddenLength)
+        memset(layerHiddenStateBuffer.contents(), 0, hiddenLength)
+    }
+
+    func materializeAttentionOutputs() -> [[Float]] {
+        materialize(from: attentionOutputBuffer, elementCount: attentionOutputDimension)
+    }
+
+    func materializeDenseValueReferenceAttentionOutputs() -> [[Float]]? {
+        guard let denseValueReferenceAttentionOutputBuffer else { return nil }
+        return materialize(from: denseValueReferenceAttentionOutputBuffer, elementCount: attentionOutputDimension)
+    }
+
+    func materializeDenseAttentionReferenceAttentionOutputs() -> [[Float]]? {
+        guard let denseAttentionReferenceAttentionOutputBuffer else { return nil }
+        return materialize(from: denseAttentionReferenceAttentionOutputBuffer, elementCount: attentionOutputDimension)
+    }
+
+    func materializeAttentionResidualStates() -> [[Float]] {
+        materialize(from: attentionResidualBuffer, elementCount: hiddenDimension)
+    }
+
+    func materializeLayerHiddenStates() -> [[Float]] {
+        materialize(from: layerHiddenStateBuffer, elementCount: hiddenDimension)
+    }
+
+    private func materialize(from buffer: MTLBuffer, elementCount: Int) -> [[Float]] {
+        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: layerCount * elementCount)
+        return (0..<layerCount).map { layerIndex in
+            let start = pointer + layerIndex * elementCount
+            return Array(UnsafeBufferPointer(start: start, count: elementCount))
+        }
+    }
+}
+
+private final class AttentionScoreCollector: @unchecked Sendable {
+    let queryBuffer: MTLBuffer
+    let queryRowsBuffer: MTLBuffer
+    let keyBuffer: MTLBuffer
+    let valueBuffer: MTLBuffer
+    private let layerCount: Int
+    private let queryDimension: Int
+    private let kvDimension: Int
+    private let tokenCount: Int
+
+    init(
+        device: MTLDevice,
+        layerCount: Int,
+        queryDimension: Int,
+        kvDimension: Int,
+        tokenCount: Int
+    ) throws {
+        self.layerCount = layerCount
+        self.queryDimension = queryDimension
+        self.kvDimension = kvDimension
+        self.tokenCount = tokenCount
+        let queryLength = layerCount * queryDimension * MemoryLayout<Float>.stride
+        let queryRowsLength = layerCount * tokenCount * queryDimension * MemoryLayout<Float>.stride
+        let keyLength = layerCount * tokenCount * kvDimension * MemoryLayout<Float>.stride
+        let valueLength = layerCount * tokenCount * kvDimension * MemoryLayout<Float>.stride
+        guard let queryBuffer = device.makeBuffer(length: queryLength, options: .storageModeShared),
+              let queryRowsBuffer = device.makeBuffer(length: queryRowsLength, options: .storageModeShared),
+              let keyBuffer = device.makeBuffer(length: keyLength, options: .storageModeShared),
+              let valueBuffer = device.makeBuffer(length: valueLength, options: .storageModeShared) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to allocate attention score trace buffers")
+        }
+        queryBuffer.label = "trace.score_query"
+        queryRowsBuffer.label = "trace.score_query_rows"
+        keyBuffer.label = "trace.score_key"
+        valueBuffer.label = "trace.score_value"
+        self.queryBuffer = queryBuffer
+        self.queryRowsBuffer = queryRowsBuffer
+        self.keyBuffer = keyBuffer
+        self.valueBuffer = valueBuffer
+        memset(queryBuffer.contents(), 0, queryLength)
+        memset(queryRowsBuffer.contents(), 0, queryRowsLength)
+        memset(keyBuffer.contents(), 0, keyLength)
+        memset(valueBuffer.contents(), 0, valueLength)
+    }
+
+    func materializeQueries() -> [[Float]] {
+        let pointer = queryBuffer.contents().bindMemory(to: Float.self, capacity: layerCount * queryDimension)
+        return (0..<layerCount).map { layerIndex in
+            let start = pointer + layerIndex * queryDimension
+            return Array(UnsafeBufferPointer(start: start, count: queryDimension))
+        }
+    }
+
+    func materializeQueryRows() -> [[[Float]]] {
+        let pointer = queryRowsBuffer.contents().bindMemory(to: Float.self, capacity: layerCount * tokenCount * queryDimension)
+        return (0..<layerCount).map { layerIndex in
+            let layerBase = pointer + layerIndex * tokenCount * queryDimension
+            return (0..<tokenCount).map { tokenIndex in
+                let tokenBase = layerBase + tokenIndex * queryDimension
+                return Array(UnsafeBufferPointer(start: tokenBase, count: queryDimension))
+            }
+        }
+    }
+
+    func materializeKeys() -> [[[Float]]] {
+        let pointer = keyBuffer.contents().bindMemory(to: Float.self, capacity: layerCount * tokenCount * kvDimension)
+        return (0..<layerCount).map { layerIndex in
+            let layerBase = pointer + layerIndex * tokenCount * kvDimension
+            return (0..<tokenCount).map { tokenIndex in
+                let tokenBase = layerBase + tokenIndex * kvDimension
+                return Array(UnsafeBufferPointer(start: tokenBase, count: kvDimension))
+            }
+        }
+    }
+
+    func materializeValues() -> [[[Float]]] {
+        let pointer = valueBuffer.contents().bindMemory(to: Float.self, capacity: layerCount * tokenCount * kvDimension)
+        return (0..<layerCount).map { layerIndex in
+            let layerBase = pointer + layerIndex * tokenCount * kvDimension
+            return (0..<tokenCount).map { tokenIndex in
+                let tokenBase = layerBase + tokenIndex * kvDimension
+                return Array(UnsafeBufferPointer(start: tokenBase, count: kvDimension))
+            }
+        }
+    }
+}
+
+private final class DecodeStepCollector: @unchecked Sendable {
+    let queryBuffer: MTLBuffer
+    let keyBuffer: MTLBuffer
+    let valueBuffer: MTLBuffer
+    let attentionOutputBuffer: MTLBuffer
+    private let layerCount: Int
+    private let queryDimension: Int
+    private let kvDimension: Int
+
+    init(
+        device: MTLDevice,
+        layerCount: Int,
+        queryDimension: Int,
+        kvDimension: Int
+    ) throws {
+        self.layerCount = layerCount
+        self.queryDimension = queryDimension
+        self.kvDimension = kvDimension
+        let queryLength = layerCount * queryDimension * MemoryLayout<Float>.stride
+        let kvLength = layerCount * kvDimension * MemoryLayout<Float>.stride
+        guard let queryBuffer = device.makeBuffer(length: queryLength, options: .storageModeShared),
+              let keyBuffer = device.makeBuffer(length: kvLength, options: .storageModeShared),
+              let valueBuffer = device.makeBuffer(length: kvLength, options: .storageModeShared),
+              let attentionOutputBuffer = device.makeBuffer(length: queryLength, options: .storageModeShared) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to allocate decode step trace buffers")
+        }
+        queryBuffer.label = "trace.decode_query"
+        keyBuffer.label = "trace.decode_key"
+        valueBuffer.label = "trace.decode_value"
+        attentionOutputBuffer.label = "trace.decode_attention_output"
+        self.queryBuffer = queryBuffer
+        self.keyBuffer = keyBuffer
+        self.valueBuffer = valueBuffer
+        self.attentionOutputBuffer = attentionOutputBuffer
+        memset(queryBuffer.contents(), 0, queryLength)
+        memset(keyBuffer.contents(), 0, kvLength)
+        memset(valueBuffer.contents(), 0, kvLength)
+        memset(attentionOutputBuffer.contents(), 0, queryLength)
+    }
+
+    func materializeQueries() -> [[Float]] {
+        materialize(from: queryBuffer, elementCount: queryDimension)
+    }
+
+    func materializeKeys() -> [[Float]] {
+        materialize(from: keyBuffer, elementCount: kvDimension)
+    }
+
+    func materializeValues() -> [[Float]] {
+        materialize(from: valueBuffer, elementCount: kvDimension)
+    }
+
+    func materializeAttentionOutputs() -> [[Float]] {
+        materialize(from: attentionOutputBuffer, elementCount: queryDimension)
+    }
+
+    private func materialize(from buffer: MTLBuffer, elementCount: Int) -> [[Float]] {
+        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: layerCount * elementCount)
+        return (0..<layerCount).map { layerIndex in
+            let start = pointer + layerIndex * elementCount
+            return Array(UnsafeBufferPointer(start: start, count: elementCount))
         }
     }
 }

@@ -2,19 +2,32 @@
 using namespace metal;
 
 constant float TURBOQUANT_CODEBOOK_2BIT[4] = {
-    -1.5104176, -0.45278004, 0.45278004, 1.5104176
+    -0.133462, -0.039994, 0.039994, 0.133462
 };
 constant float TURBOQUANT_THRESHOLDS_2BIT[3] = {
-    -0.9815988, 0.0, 0.9815988
+    -0.086728, 0.0, 0.086728
 };
 
 constant float TURBOQUANT_CODEBOOK_3BIT[8] = {
-    -2.1519456, -1.3439093, -0.7560053, -0.24509418,
-    0.24509418, 0.7560053, 1.3439093, 2.1519456
+    -0.190685, -0.117832, -0.065717, -0.021460,
+    0.021460, 0.065717, 0.117832, 0.190685
 };
 constant float TURBOQUANT_THRESHOLDS_3BIT[7] = {
-    -1.7479275, -1.0499573, -0.50054973, 0.0,
-    0.50054973, 1.0499573, 1.7479275
+    -0.1542585, -0.0917745, -0.0435885, 0.0,
+    0.0435885, 0.0917745, 0.1542585
+};
+
+constant float TURBOQUANT_CODEBOOK_4BIT[16] = {
+    -0.173926, -0.117195, -0.089527, -0.068756,
+    -0.051262, -0.035597, -0.020989, -0.006938,
+    0.006938, 0.020989, 0.035597, 0.051262,
+    0.068756, 0.089527, 0.117195, 0.173926
+};
+constant float TURBOQUANT_THRESHOLDS_4BIT[15] = {
+    -0.145560, -0.103361, -0.079142, -0.060009,
+    -0.043430, -0.028293, -0.013963, 0.0,
+    0.013963, 0.028293, 0.043430, 0.060009,
+    0.079142, 0.103361, 0.145560
 };
 
 constant float TURBOQUANT_CODEBOOK_5BIT[32] = {
@@ -30,8 +43,79 @@ constant float TURBOQUANT_THRESHOLDS_5BIT[31] = {
     1.2030092, 1.3819802, 1.5811492, 1.8081625, 2.076337, 2.4128852, 2.8930547
 };
 
+constant float TURBOQUANT_CODEBOOK_6BIT[64] = {
+    -3.017255738, -2.423820320, -2.058930059, -1.797707297, -1.601922457, -1.448291610, -1.326356628, -1.225995089,
+    -1.139137223, -1.062727519, -0.993135300, -0.928426027, -0.868524053, -0.811485776, -0.757007509, -0.704944748,
+    -0.654529973, -0.606343034, -0.559378028, -0.513393457, -0.468229381, -0.424872197, -0.382620330, -0.340845414,
+    -0.299256835, -0.258542997, -0.217923724, -0.178098846, -0.138179662, -0.098636745, -0.058835570, -0.018710570,
+    0.021130944, 0.060815313, 0.100191218, 0.139750780, 0.179826144, 0.219826894, 0.260545027, 0.301575157,
+    0.342993060, 0.384991868, 0.427889936, 0.471579352, 0.516263475, 0.561314135, 0.607624272, 0.655973460,
+    0.705897157, 0.758131069, 0.812601781, 0.869977353, 0.930940401, 0.995699969, 1.065519595, 1.141443664,
+    1.227592854, 1.328595886, 1.450287956, 1.602228166, 1.797860727, 2.058171284, 2.423209814, 3.012639275
+};
+constant float TURBOQUANT_THRESHOLDS_6BIT[63] = {
+    -2.720538029, -2.241375189, -1.928318678, -1.699814877, -1.525107034, -1.387324119, -1.276175858, -1.182566156,
+    -1.100932371, -1.027931409, -0.960780663, -0.898475040, -0.840004914, -0.784246643, -0.730976129, -0.679737361,
+    -0.630436503, -0.582860531, -0.536385743, -0.490811419, -0.446550789, -0.403746264, -0.361732872, -0.320051124,
+    -0.278899916, -0.238233360, -0.198011285, -0.158139254, -0.118408203, -0.078736157, -0.038773070, 0.001210187,
+    0.040973129, 0.080503265, 0.119970999, 0.159788462, 0.199826519, 0.240185961, 0.281060092, 0.322284109,
+    0.363992464, 0.406440902, 0.449734644, 0.493921414, 0.538788805, 0.584469203, 0.631798866, 0.680935309,
+    0.732014113, 0.785366425, 0.841289567, 0.900458877, 0.963320185, 1.030609782, 1.103481629, 1.184518259,
+    1.278094370, 1.389441921, 1.526258061, 1.700044446, 1.928016005, 2.240690549, 2.717924544
+};
+
+constant float TURBOQUANT_CODEBOOK_7BIT[128] = {
+    -3.161821656, -2.593655236, -2.260366751, -2.036143901, -1.877254125, -1.756981236, -1.662470419, -1.584808772,
+    -1.517156127, -1.456758653, -1.402001919, -1.350976044, -1.303012122, -1.257290771, -1.214683970, -1.174284348,
+    -1.135820017, -1.099401736, -1.064814314, -1.031291885, -0.998516547, -0.966935452, -0.935911034, -0.905753606,
+    -0.876445620, -0.847857376, -0.820004703, -0.792610167, -0.765753537, -0.739575621, -0.713990833, -0.688968586,
+    -0.663956599, -0.639361813, -0.615405244, -0.591867693, -0.568442898, -0.545359109, -0.522723513, -0.500390633,
+    -0.478618508, -0.457086748, -0.435321291, -0.413745130, -0.392190012, -0.371026980, -0.350001767, -0.328982207,
+    -0.308341784, -0.287940557, -0.267649618, -0.247588727, -0.227361475, -0.207182363, -0.187185623, -0.167462390,
+    -0.147365963, -0.127493547, -0.107718842, -0.088070616, -0.068404744, -0.048587333, -0.028918753, -0.009434275,
+    0.010149665, 0.029802156, 0.049171144, 0.068828458, 0.088722840, 0.108229260, 0.128145472, 0.148108296,
+    0.167952409, 0.187973966, 0.208235593, 0.228389448, 0.248464332, 0.268681237, 0.288765152, 0.309276338,
+    0.329687599, 0.350446090, 0.371599662, 0.392955936, 0.414318992, 0.435806255, 0.457389054, 0.478953617,
+    0.500847597, 0.523094315, 0.545609565, 0.568220557, 0.591509701, 0.615326460, 0.639434160, 0.663947113,
+    0.688244905, 0.712990034, 0.738163980, 0.763943700, 0.790592008, 0.818028338, 0.846147718, 0.874858881,
+    0.904436875, 0.934984934, 0.965949978, 0.997473628, 1.029677998, 1.063044768, 1.097693392, 1.134172843,
+    1.172229797, 1.212077571, 1.254602382, 1.299288409, 1.346488593, 1.397246923, 1.452061588, 1.512432831,
+    1.580646704, 1.659743219, 1.754504101, 1.873331421, 2.031510542, 2.255090788, 2.588195086, 3.143419937
+};
+constant float TURBOQUANT_THRESHOLDS_7BIT[127] = {
+    -2.877738446, -2.427010993, -2.148255326, -1.956699013, -1.817117680, -1.709725828, -1.623639596, -1.550982450,
+    -1.486957390, -1.429380286, -1.376488981, -1.326994083, -1.280151447, -1.235987371, -1.194484159, -1.155052183,
+    -1.117610877, -1.082108025, -1.048053099, -1.014904216, -0.982725999, -0.951423243, -0.920832320, -0.891099613,
+    -0.862151498, -0.833931039, -0.806307435, -0.779181852, -0.752664579, -0.726783227, -0.701479710, -0.676462593,
+    -0.651659206, -0.627383529, -0.603636469, -0.580155296, -0.556901003, -0.534041311, -0.511557073, -0.489504570,
+    -0.467852628, -0.446204019, -0.424533210, -0.402967571, -0.381608496, -0.360514373, -0.339491987, -0.318661995,
+    -0.298141171, -0.277795088, -0.257619173, -0.237475101, -0.217271919, -0.197183993, -0.177324006, -0.157414176,
+    -0.137429755, -0.117606194, -0.097894729, -0.078237680, -0.058496038, -0.038753043, -0.019176514, 0.000357695,
+    0.019975910, 0.039486650, 0.058999801, 0.078775649, 0.098476050, 0.118187366, 0.138126884, 0.158030352,
+    0.177963187, 0.198104780, 0.218312521, 0.238426890, 0.258572784, 0.278723194, 0.299020745, 0.319481968,
+    0.340066844, 0.361022876, 0.382277799, 0.403637464, 0.425062623, 0.446597654, 0.468171335, 0.489900607,
+    0.511970956, 0.534351940, 0.556915061, 0.579865129, 0.603418081, 0.627380310, 0.651690636, 0.676096009,
+    0.700617469, 0.725577007, 0.751053840, 0.777267854, 0.804310173, 0.832088028, 0.860503300, 0.889647878,
+    0.919710905, 0.950467456, 0.981711803, 1.013575813, 1.046361383, 1.080369080, 1.115933117, 1.153201320,
+    1.192153684, 1.233339976, 1.276945396, 1.322888501, 1.371867758, 1.424654256, 1.482247210, 1.546539768,
+    1.620194962, 1.707123660, 1.813917761, 1.952420982, 2.143300665, 2.421642937, 2.865807512
+};
+
 constant float TURBOQUANT_QJL_SCALE = 1.2533141373155001;
-constant float TURBOQUANT_INV_DIM = 1.0 / 128.0;
+constant float TURBOQUANT_KEY_RESIDUAL_SCALE = 1.0;
+constant uint TURBOQUANT_MAX_CODE_WORDS = 28u;
+constant float TURBO_WHT_SIGNS1[128] = {
+    -1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,
+    -1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,
+    -1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,
+    -1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1
+};
+constant float TURBO_WHT_SIGNS2[128] = {
+    1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,
+    1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,
+    1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,
+    1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1
+};
 
 struct ERTurboQuantQuantizeParams {
     uint rowCount;
@@ -51,6 +135,8 @@ struct ERTurboQuantAttentionParams {
     uint numKVHeads;
     uint groupSize;
     float scale;
+    float keyResidualScale;
+    float valueResidualScale;
     uint causal;
     uint kvBlockSize;
     uint qBlockSize;
@@ -59,7 +145,18 @@ struct ERTurboQuantAttentionParams {
     uint codeWordsPerRow;
     uint regularBits;
     uint highPrecisionBits;
+    uint valueCodeWordsPerRow;
+    uint valueRegularBits;
+    uint valueHighPrecisionBits;
     uint reserved;
+};
+
+struct ERTurboQuantDebugScoreTerms {
+    float mseDot;
+    float residualDot;
+    float rowNorm;
+    float residualNorm;
+    float score;
 };
 
 inline uint tq_get_bit(device const uint *words, uint bitIndex) {
@@ -125,7 +222,10 @@ inline float tq_centroid(uint bits, uint code) {
     switch (bits) {
         case 2: return TURBOQUANT_CODEBOOK_2BIT[code];
         case 3: return TURBOQUANT_CODEBOOK_3BIT[code];
+        case 4: return TURBOQUANT_CODEBOOK_4BIT[code];
         case 5: return TURBOQUANT_CODEBOOK_5BIT[code];
+        case 6: return TURBOQUANT_CODEBOOK_6BIT[code];
+        case 7: return TURBOQUANT_CODEBOOK_7BIT[code];
         default: return 0.0;
     }
 }
@@ -150,14 +250,37 @@ inline uint tq_code_for_value(float value, uint bits) {
                 if (value < TURBOQUANT_THRESHOLDS_3BIT[i]) { return i; }
             }
             return 7;
+        case 4:
+            for (uint i = 0; i < 15; ++i) {
+                if (value < TURBOQUANT_THRESHOLDS_4BIT[i]) { return i; }
+            }
+            return 15;
         case 5:
             for (uint i = 0; i < 31; ++i) {
                 if (value < TURBOQUANT_THRESHOLDS_5BIT[i]) { return i; }
             }
             return 31;
+        case 6:
+            for (uint i = 0; i < 63; ++i) {
+                if (value < TURBOQUANT_THRESHOLDS_6BIT[i]) { return i; }
+            }
+            return 63;
+        case 7:
+            for (uint i = 0; i < 127; ++i) {
+                if (value < TURBOQUANT_THRESHOLDS_7BIT[i]) { return i; }
+            }
+            return 127;
         default:
             return 0;
     }
+}
+
+inline float tq_quantization_benefit(float value, uint regularBits, uint highPrecisionBits) {
+    uint regularCode = tq_code_for_value(value, regularBits);
+    uint highCode = tq_code_for_value(value, highPrecisionBits);
+    float regularDelta = value - tq_centroid(regularBits, regularCode);
+    float highDelta = value - tq_centroid(highPrecisionBits, highCode);
+    return (regularDelta * regularDelta) - (highDelta * highDelta);
 }
 
 inline void tq_hadamard(thread float *values) {
@@ -208,16 +331,22 @@ inline void tq_hadamard_parallel(
 
 inline void tq_forward_randomized_hadamard(thread float *values, device const float *signs) {
     for (uint i = 0; i < 128; ++i) {
-        values[i] *= signs[i];
+        values[i] *= TURBO_WHT_SIGNS1[i];
     }
     tq_hadamard(values);
+    for (uint i = 0; i < 128; ++i) {
+        values[i] *= TURBO_WHT_SIGNS2[i] * 0.08838834764831845f;
+    }
 }
 
 inline void tq_forward_randomized_hadamard(threadgroup float *values, device const float *signs) {
     for (uint i = 0; i < 128; ++i) {
-        values[i] *= signs[i];
+        values[i] *= TURBO_WHT_SIGNS1[i];
     }
     tq_hadamard(values);
+    for (uint i = 0; i < 128; ++i) {
+        values[i] *= TURBO_WHT_SIGNS2[i] * 0.08838834764831845f;
+    }
 }
 
 inline void tq_forward_randomized_hadamard_parallel(
@@ -227,23 +356,33 @@ inline void tq_forward_randomized_hadamard_parallel(
     uint laneCount
 ) {
     for (uint i = lane; i < 128; i += laneCount) {
-        values[i] *= signs[i];
+        values[i] *= TURBO_WHT_SIGNS1[i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_hadamard_parallel(values, lane, laneCount);
+    for (uint i = lane; i < 128; i += laneCount) {
+        values[i] *= TURBO_WHT_SIGNS2[i] * 0.08838834764831845f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
 inline void tq_inverse_randomized_hadamard(thread float *values, device const float *signs) {
+    for (uint i = 0; i < 128; ++i) {
+        values[i] *= TURBO_WHT_SIGNS2[i];
+    }
     tq_hadamard(values);
     for (uint i = 0; i < 128; ++i) {
-        values[i] = values[i] * signs[i] * TURBOQUANT_INV_DIM;
+        values[i] = values[i] * TURBO_WHT_SIGNS1[i] * 0.08838834764831845f;
     }
 }
 
 inline void tq_inverse_randomized_hadamard(threadgroup float *values, device const float *signs) {
+    for (uint i = 0; i < 128; ++i) {
+        values[i] *= TURBO_WHT_SIGNS2[i];
+    }
     tq_hadamard(values);
     for (uint i = 0; i < 128; ++i) {
-        values[i] = values[i] * signs[i] * TURBOQUANT_INV_DIM;
+        values[i] = values[i] * TURBO_WHT_SIGNS1[i] * 0.08838834764831845f;
     }
 }
 
@@ -253,9 +392,13 @@ inline void tq_inverse_randomized_hadamard_parallel(
     uint lane,
     uint laneCount
 ) {
+    for (uint i = lane; i < 128; i += laneCount) {
+        values[i] *= TURBO_WHT_SIGNS2[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_hadamard_parallel(values, lane, laneCount);
     for (uint i = lane; i < 128; i += laneCount) {
-        values[i] = values[i] * signs[i] * TURBOQUANT_INV_DIM;
+        values[i] = values[i] * TURBO_WHT_SIGNS1[i] * 0.08838834764831845f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
@@ -263,13 +406,18 @@ inline void tq_inverse_randomized_hadamard_parallel(
 inline void tq_select_top32_bitonic_mask(
     threadgroup const float *rotated,
     threadgroup uint *maskWords,
-    threadgroup float *magnitudes,
+    threadgroup float *benefits,
     threadgroup uint *indices,
+    uint regularBits,
+    uint highPrecisionBits,
+    bool useQuantizationBenefit,
     uint lane,
     uint laneCount
 ) {
     for (uint dim = lane; dim < 128; dim += laneCount) {
-        magnitudes[dim] = fabs(rotated[dim]);
+        benefits[dim] = useQuantizationBenefit
+            ? tq_quantization_benefit(rotated[dim], regularBits, highPrecisionBits)
+            : fabs(rotated[dim]);
         indices[dim] = dim;
     }
     if (lane < 4) {
@@ -284,12 +432,12 @@ inline void tq_select_top32_bitonic_mask(
                 if (ixj > i) {
                     bool ascending = (i & k) == 0;
                     bool shouldSwap = ascending
-                        ? magnitudes[i] > magnitudes[ixj]
-                        : magnitudes[i] < magnitudes[ixj];
+                        ? benefits[i] > benefits[ixj]
+                        : benefits[i] < benefits[ixj];
                     if (shouldSwap) {
-                        float tmpMagnitude = magnitudes[i];
-                        magnitudes[i] = magnitudes[ixj];
-                        magnitudes[ixj] = tmpMagnitude;
+                        float tmpBenefit = benefits[i];
+                        benefits[i] = benefits[ixj];
+                        benefits[ixj] = tmpBenefit;
                         uint tmpIndex = indices[i];
                         indices[i] = indices[ixj];
                         indices[ixj] = tmpIndex;
@@ -320,9 +468,11 @@ kernel void turboquant_quantize_rows(
     constant ERTurboQuantQuantizeParams &params [[buffer(5)]],
     device const float *rotationSigns [[buffer(6)]],
     device const float *residualSigns [[buffer(7)]],
+    device const float *innerQScaleInv [[buffer(8)]],
     uint rowIndex [[thread_position_in_grid]]
 ) {
     if (rowIndex >= params.rowCount) { return; }
+    const bool useInnerQScaling = ((params.reserved >> 1) & 1u) != 0u;
 
     thread float normalized[128];
     thread float rotated[128];
@@ -330,11 +480,11 @@ kernel void turboquant_quantize_rows(
     thread float residual[128];
     thread float projectedResidual[128];
     thread bool highPrecisionMask[128];
-    thread uint codeWords[16];
+    thread uint codeWords[TURBOQUANT_MAX_CODE_WORDS];
     thread uint signWords[4];
     thread uint maskWords[4];
 
-    for (uint i = 0; i < 16; ++i) { codeWords[i] = 0; }
+    for (uint i = 0; i < TURBOQUANT_MAX_CODE_WORDS; ++i) { codeWords[i] = 0; }
     for (uint i = 0; i < 4; ++i) {
         signWords[i] = 0;
         maskWords[i] = 0;
@@ -344,6 +494,9 @@ kernel void turboquant_quantize_rows(
     float rowNormSq = 0.0;
     for (uint dim = 0; dim < 128; ++dim) {
         float value = source[sourceBase + dim];
+        if (useInnerQScaling && innerQScaleInv != nullptr) {
+            value /= innerQScaleInv[dim];
+        }
         normalized[dim] = value;
         rowNormSq += value * value;
         highPrecisionMask[dim] = false;
@@ -356,6 +509,8 @@ kernel void turboquant_quantize_rows(
     device uint *signDst = outResidualSigns + destinationRow * 4;
     device uint *maskDst = outOutlierMask + destinationRow * 4;
     device float *metaDst = outMetadata + destinationRow * 2;
+    const bool usesResidualPath =
+        params.highPrecisionChannelCount > 0u || params.highPrecisionBits != params.regularBits;
 
     if (rowNorm == 0.0) {
         for (uint i = 0; i < params.codeWordsPerRow; ++i) { codeDst[i] = 0; }
@@ -374,14 +529,17 @@ kernel void turboquant_quantize_rows(
     }
     tq_forward_randomized_hadamard(rotated, rotationSigns);
 
+    bool useQuantizationBenefit = (params.reserved & 1u) != 0u;
     for (uint pick = 0; pick < params.highPrecisionChannelCount; ++pick) {
-        float bestMagnitude = -1.0;
+        float bestBenefit = -INFINITY;
         uint bestIndex = 0;
         for (uint dim = 0; dim < 128; ++dim) {
             if (highPrecisionMask[dim]) { continue; }
-            float magnitude = fabs(rotated[dim]);
-            if (magnitude > bestMagnitude) {
-                bestMagnitude = magnitude;
+            float benefit = useQuantizationBenefit
+                ? tq_quantization_benefit(rotated[dim], params.regularBits, params.highPrecisionBits)
+                : fabs(rotated[dim]);
+            if (benefit > bestBenefit) {
+                bestBenefit = benefit;
                 bestIndex = dim;
             }
         }
@@ -389,6 +547,7 @@ kernel void turboquant_quantize_rows(
     }
 
     uint sidebandOffset = 128u * params.regularBits;
+    float reconstructedNormSq = 0.0;
     for (uint dim = 0; dim < 128; ++dim) {
         if (highPrecisionMask[dim]) {
             maskWords[dim >> 5] |= (1u << (dim & 31));
@@ -407,6 +566,20 @@ kernel void turboquant_quantize_rows(
             sidebandOffset += params.highPrecisionBits - params.regularBits;
         }
         reconstructed[dim] = tq_centroid(width, code);
+        reconstructedNormSq += reconstructed[dim] * reconstructed[dim];
+    }
+
+    if (!usesResidualPath) {
+        float reconstructedNorm = sqrt(reconstructedNormSq);
+        float correctedNorm = reconstructedNorm > 0.0 ? (rowNorm / reconstructedNorm) : rowNorm;
+        for (uint i = 0; i < params.codeWordsPerRow; ++i) { codeDst[i] = codeWords[i]; }
+        for (uint i = 0; i < 4; ++i) {
+            signDst[i] = 0u;
+            maskDst[i] = maskWords[i];
+        }
+        metaDst[0] = correctedNorm;
+        metaDst[1] = 0.0;
+        return;
     }
 
     tq_inverse_randomized_hadamard(reconstructed, rotationSigns);
@@ -456,7 +629,8 @@ inline void tq_quantize_small_aggressive_row(
     threadgroup float *reduction,
     threadgroup float &rowNormValue,
     threadgroup float &residualNormValue,
-    uint codeWordsPerRow
+    uint codeWordsPerRow,
+    bool useQuantizationBenefit
 ) {
     constexpr uint kLaneCount = 32;
     constexpr uint kRegularBits = 2;
@@ -513,7 +687,17 @@ inline void tq_quantize_small_aggressive_row(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_forward_randomized_hadamard_parallel(rotated, rotationSigns, lane, kLaneCount);
 
-    tq_select_top32_bitonic_mask(rotated, maskWords, magnitudes, indices, lane, kLaneCount);
+    tq_select_top32_bitonic_mask(
+        rotated,
+        maskWords,
+        magnitudes,
+        indices,
+        2u,
+        3u,
+        useQuantizationBenefit,
+        lane,
+        kLaneCount
+    );
 
     for (uint dim = lane; dim < 128; dim += kLaneCount) {
         bool useHighPrecision = tq_get_bit(maskWords, dim) == 1u;
@@ -634,7 +818,8 @@ kernel void turboquant_quantize_rows_small_aggressive(
         reduction,
         rowNormValue,
         residualNormValue,
-        params.codeWordsPerRow
+        params.codeWordsPerRow,
+        (params.reserved & 1u) != 0u
     );
 }
 
@@ -694,7 +879,8 @@ kernel void turboquant_quantize_rows_small_aggressive_k(
         reduction,
         rowNormValue,
         residualNormValue,
-        params.codeWordsPerRow
+        params.codeWordsPerRow,
+        false
     );
 }
 
@@ -757,7 +943,8 @@ kernel void turboquant_quantize_rows_small_aggressive_kv(
         reduction,
         rowNormValue,
         residualNormValue,
-        params.codeWordsPerRow
+        params.codeWordsPerRow,
+        false
     );
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_quantize_small_aggressive_row(
@@ -782,7 +969,8 @@ kernel void turboquant_quantize_rows_small_aggressive_kv(
         reduction,
         rowNormValue,
         residualNormValue,
-        params.codeWordsPerRow
+        params.codeWordsPerRow,
+        true
     );
 }
 
@@ -856,7 +1044,17 @@ kernel void turboquant_quantize_rows_small_aggressive_phase1(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tq_forward_randomized_hadamard_parallel(rotated, rotationSigns, lane, kLaneCount);
 
-    tq_select_top32_bitonic_mask(rotated, maskWords, magnitudes, indices, lane, kLaneCount);
+    tq_select_top32_bitonic_mask(
+        rotated,
+        maskWords,
+        magnitudes,
+        indices,
+        2u,
+        3u,
+        false,
+        lane,
+        kLaneCount
+    );
     if (lane == 0) {
         outRowNorm[rowIndex] = rowNormValue;
     }
@@ -952,13 +1150,13 @@ kernel void turboquant_quantize_rows_small_aggressive_select_only(
 
     if (lane == 0) {
         for (uint pick = 0; pick < kHighCount; ++pick) {
-            float bestMagnitude = -1.0;
+            float bestBenefit = -INFINITY;
             uint bestIndex = 0;
             for (uint dim = 0; dim < 128; ++dim) {
                 if (tq_get_bit(maskWords, dim) == 1u) { continue; }
-                float magnitude = fabs(rotated[dim]);
-                if (magnitude > bestMagnitude) {
-                    bestMagnitude = magnitude;
+                float benefit = tq_quantization_benefit(rotated[dim], 2u, 3u);
+                if (benefit > bestBenefit) {
+                    bestBenefit = benefit;
                     bestIndex = dim;
                 }
             }
@@ -984,7 +1182,7 @@ kernel void turboquant_quantize_rows_small_aggressive_select_only_bitonic(
     threadgroup float magnitudes[128];
     threadgroup uint indices[128];
     for (uint dim = lane; dim < 128; dim += 32) {
-        magnitudes[dim] = fabs(rotatedSource[rowIndex * 128 + dim]);
+        magnitudes[dim] = tq_quantization_benefit(rotatedSource[rowIndex * 128 + dim], 2u, 3u);
         indices[dim] = dim;
     }
     if (lane < 4) {
@@ -1168,6 +1366,7 @@ kernel void gqa_attention_turboquant(
     device const float *keyResidualProjectionSigns [[buffer(12)]],
     device const float *valueRotationSigns [[buffer(13)]],
     device const float *valueResidualProjectionSigns [[buffer(14)]],
+    device const float *innerQScaleInv [[buffer(15)]],
     uint2 group_id [[threadgroup_position_in_grid]],
     uint2 local_id [[thread_position_in_threadgroup]]
 ) {
@@ -1179,6 +1378,7 @@ kernel void gqa_attention_turboquant(
     const uint qOff = params.qOffset;
     const uint blockSize = params.qBlockSize;
     const uint qStride = params.numHeads * params.headDim;
+    const bool useInnerQScaling = (params.reserved & 1u) != 0u;
 
     uint qRow = qBlockIndex * blockSize + local_id.x;
     bool activeQ = (qRow < seqLen);
@@ -1202,6 +1402,9 @@ kernel void gqa_attention_turboquant(
 
         for (uint dim = 0; dim < 128; ++dim) {
             float value = Q[qBase + dim];
+            if (useInnerQScaling && innerQScaleInv != nullptr) {
+                value *= innerQScaleInv[dim];
+            }
             qRotation[dim] = value;
             qResidual[dim] = value;
             outputMSE[dim] = 0.0;
@@ -1256,7 +1459,9 @@ kernel void gqa_attention_turboquant(
                     residualDot += qResidual[dim] * (tq_get_bit(signRow, dim) == 1u ? 1.0 : -1.0);
                 }
 
-                float dot = rowNorm * (mseDot + TURBOQUANT_QJL_SCALE * residualNorm * residualDot);
+                float dot = rowNorm * (
+                    mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * residualNorm * residualDot
+                );
                 scores[kvIndex] = dot * params.scale;
                 blockMax = max(blockMax, scores[kvIndex]);
             }
@@ -1284,7 +1489,7 @@ kernel void gqa_attention_turboquant(
                 if (prob == 0.0) { continue; }
 
                 uint rowIndex = (kvStart + kvIndex) * params.numKVHeads + kvHeadIndex;
-                device const uint *codeRow = VCodes + rowIndex * params.codeWordsPerRow;
+                device const uint *codeRow = VCodes + rowIndex * params.valueCodeWordsPerRow;
                 device const uint *signRow = VResidualSigns + rowIndex * 4;
                 device const uint *maskRow = VOutlierMask + rowIndex * 4;
                 device const float *metaRow = VMetadata + rowIndex * 2;
@@ -1293,18 +1498,18 @@ kernel void gqa_attention_turboquant(
                 float mseScale = prob * rowNorm;
                 float residualScale = prob * rowNorm * residualNorm;
 
-                uint sidebandOffset = 128u * params.regularBits;
+                uint sidebandOffset = 128u * params.valueRegularBits;
                 for (uint dim = 0; dim < 128; ++dim) {
                     bool useHighPrecision = tq_get_bit(maskRow, dim) == 1u;
                     uint code = tq_extract_split_plane_code(
                         codeRow,
                         dim,
                         useHighPrecision,
-                        params.regularBits,
-                        params.highPrecisionBits,
+                        params.valueRegularBits,
+                        params.valueHighPrecisionBits,
                         sidebandOffset
                     );
-                    outputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
+                    outputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.valueHighPrecisionBits : params.valueRegularBits, code);
                     outputResidual[dim] += residualScale * (tq_get_bit(signRow, dim) == 1u ? 1.0 : -1.0);
                 }
             }
@@ -1320,10 +1525,17 @@ kernel void gqa_attention_turboquant(
         tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
         tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
 
+        if (useInnerQScaling && innerQScaleInv != nullptr) {
+            for (uint dim = 0; dim < 128; ++dim) {
+                outputMSE[dim] *= innerQScaleInv[dim];
+                outputResidual[dim] *= innerQScaleInv[dim];
+            }
+        }
+
         float invSum = runningSum > 0.0 ? 1.0 / runningSum : 0.0;
         uint oBase = qRow * qStride + headIndex * params.headDim;
         for (uint dim = 0; dim < 128; ++dim) {
-            O[oBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE)) * invSum;
+            O[oBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
         }
     }
 }
@@ -1344,10 +1556,12 @@ kernel void gqa_attention_turboquant_decode(
     device const float *keyResidualProjectionSigns [[buffer(12)]],
     device const float *valueRotationSigns [[buffer(13)]],
     device const float *valueResidualProjectionSigns [[buffer(14)]],
+    device const float *innerQScaleInv [[buffer(15)]],
     uint headIndex [[threadgroup_position_in_grid]],
     uint lane [[thread_position_in_threadgroup]]
 ) {
     if (headIndex >= params.numHeads) { return; }
+    const bool useInnerQScaling = (params.reserved & 1u) != 0u;
 
     constexpr uint kDecodeThreads = 16;
     const uint kvHeadIndex = headIndex / params.groupSize;
@@ -1373,10 +1587,15 @@ kernel void gqa_attention_turboquant_decode(
 
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
         float value = Q[qBase + dim];
+        if (useInnerQScaling && innerQScaleInv != nullptr) {
+            value *= innerQScaleInv[dim];
+        }
         qRotation[dim] = value;
         qResidual[dim] = value;
         outputMSE[dim] = 0.0;
         outputResidual[dim] = 0.0;
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
         laneOutputMSE[dim] = 0.0;
         laneOutputResidual[dim] = 0.0;
     }
@@ -1421,7 +1640,7 @@ kernel void gqa_attention_turboquant_decode(
             residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
         }
         float score = keyRowNorm * (
-            mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+            mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
         ) * params.scale;
         float nextMax = max(runningMax, score);
         float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
@@ -1434,7 +1653,7 @@ kernel void gqa_attention_turboquant_decode(
             laneOutputResidual[dim] *= correction;
         }
 
-        device const uint *vCodeRow = VCodes + rowIndex * params.codeWordsPerRow;
+        device const uint *vCodeRow = VCodes + rowIndex * params.valueCodeWordsPerRow;
         device const uint *vSignRow = VResidualSigns + rowIndex * 4;
         device const uint *vMaskRow = VOutlierMask + rowIndex * 4;
         device const float *vMetaRow = VMetadata + rowIndex * 2;
@@ -1443,18 +1662,18 @@ kernel void gqa_attention_turboquant_decode(
         float mseScale = prob * valueRowNorm;
         float residualScale = prob * valueRowNorm * valueResidualNorm;
 
-        uint valueSidebandOffset = 128u * params.regularBits;
+        uint valueSidebandOffset = 128u * params.valueRegularBits;
         for (uint dim = 0; dim < 128; ++dim) {
             bool useHighPrecision = tq_get_bit(vMaskRow, dim) == 1u;
             uint code = tq_extract_split_plane_code(
                 vCodeRow,
                 dim,
                 useHighPrecision,
-                params.regularBits,
-                params.highPrecisionBits,
+                params.valueRegularBits,
+                params.valueHighPrecisionBits,
                 valueSidebandOffset
             );
-            laneOutputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
+            laneOutputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.valueHighPrecisionBits : params.valueRegularBits, code);
             laneOutputResidual[dim] += residualScale * (tq_get_bit(vSignRow, dim) == 1u ? 1.0 : -1.0);
         }
     }
@@ -1507,14 +1726,92 @@ kernel void gqa_attention_turboquant_decode(
     if (lane == 0) {
         tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
         tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
+        if (useInnerQScaling && innerQScaleInv != nullptr) {
+            for (uint dim = 0; dim < 128; ++dim) {
+                outputMSE[dim] *= innerQScaleInv[dim];
+                outputResidual[dim] *= innerQScaleInv[dim];
+            }
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
     uint outputBase = headIndex * params.headDim;
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
-        O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE)) * invSum;
+        O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
     }
+}
+
+kernel void turboquant_debug_decode_score_terms(
+    device const float *Q [[buffer(0)]],
+    device const uint *KCodes [[buffer(1)]],
+    device const uint *KResidualSigns [[buffer(2)]],
+    device const uint *KOutlierMask [[buffer(3)]],
+    device const float *KMetadata [[buffer(4)]],
+    device ERTurboQuantDebugScoreTerms *scoreTerms [[buffer(5)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(6)]],
+    device const float *keyRotationSigns [[buffer(7)]],
+    device const float *keyResidualProjectionSigns [[buffer(8)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint kvPos = gid.x;
+    uint headIndex = gid.y;
+    if (headIndex >= params.numHeads) { return; }
+
+    const uint kvSeqLen = params.kvSeqLen;
+    const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
+    if (kvPos >= kvLimit) { return; }
+
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint qBase = headIndex * params.headDim;
+    uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+
+    thread float qRotation[128];
+    thread float qResidual[128];
+    for (uint dim = 0; dim < 128; ++dim) {
+        float value = Q[qBase + dim];
+        qRotation[dim] = value;
+        qResidual[dim] = value;
+    }
+    tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
+    tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+
+    device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
+    device const uint *kSignRow = KResidualSigns + rowIndex * 4;
+    device const uint *kMaskRow = KOutlierMask + rowIndex * 4;
+    device const float *kMetaRow = KMetadata + rowIndex * 2;
+    float keyRowNorm = kMetaRow[0];
+    float keyResidualNorm = kMetaRow[1];
+
+    float mseDot = 0.0;
+    float residualDot = 0.0;
+    uint keySidebandOffset = 128u * params.regularBits;
+    for (uint dim = 0; dim < 128; ++dim) {
+        bool useHighPrecision = tq_get_bit(kMaskRow, dim) == 1u;
+        uint code = tq_extract_split_plane_code(
+            kCodeRow,
+            dim,
+            useHighPrecision,
+            params.regularBits,
+            params.highPrecisionBits,
+            keySidebandOffset
+        );
+        mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
+        residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+    }
+
+    float score = keyRowNorm * (
+        mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
+    ) * params.scale;
+
+    uint outputIndex = headIndex * kvLimit + kvPos;
+    scoreTerms[outputIndex] = {
+        mseDot,
+        residualDot,
+        keyRowNorm,
+        keyResidualNorm,
+        score
+    };
 }
 
 kernel void gqa_attention_turboquant_decode_f16v(
@@ -1558,6 +1855,8 @@ kernel void gqa_attention_turboquant_decode_f16v(
         qRotation[dim] = value;
         qResidual[dim] = value;
         output[dim] = 0.0;
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
         laneOutput[dim] = 0.0;
     }
     if (lane == 0) {
@@ -1601,7 +1900,7 @@ kernel void gqa_attention_turboquant_decode_f16v(
             residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
         }
         float score = keyRowNorm * (
-            mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+            mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
         ) * params.scale;
         float nextMax = max(runningMax, score);
         float correction = runningMax == -INFINITY ? 0.0 : exp(runningMax - nextMax);
@@ -1722,6 +2021,8 @@ kernel void gqa_attention_turboquant_decode_aggressive(
         qResidual[dim] = value;
         outputMSE[dim] = 0.0;
         outputResidual[dim] = 0.0;
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
         laneOutputMSE[dim] = 0.0;
         laneOutputResidual[dim] = 0.0;
     }
@@ -1803,7 +2104,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
             }
 
             float score = keyRowNorm * (
-                mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+                mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
             ) * params.scale;
             tileScores[tile] = score;
             tileMax = max(tileMax, score);
@@ -1943,7 +2244,7 @@ kernel void gqa_attention_turboquant_decode_aggressive(
     float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
     uint outputBase = headIndex * params.headDim;
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
-        O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE)) * invSum;
+        O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
     }
 }
 
@@ -1993,6 +2294,8 @@ kernel void gqa_attention_turboquant_decode_aggressive_f16v(
         qRotation[dim] = value;
         qResidual[dim] = value;
         output[dim] = 0.0;
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
         laneOutput[dim] = 0.0;
     }
     if (lane == 0) {
@@ -2071,7 +2374,7 @@ kernel void gqa_attention_turboquant_decode_aggressive_f16v(
             }
 
             float score = keyRowNorm * (
-                mseDot + TURBOQUANT_QJL_SCALE * keyResidualNorm * residualDot
+                mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
             ) * params.scale;
             tileScores[tile] = score;
             tileMax = max(tileMax, score);
@@ -2219,6 +2522,8 @@ kernel void gqa_attention_turboquant_decode_aggressive_k_f16v(
         qBaseLUT[lutBase + 1] = value * tq_centroid_2bit(1u);
         qBaseLUT[lutBase + 2] = value * tq_centroid_2bit(2u);
         qBaseLUT[lutBase + 3] = value * tq_centroid_2bit(3u);
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
         laneOutput[dim] = 0.0;
     }
     if (lane == 0) {
