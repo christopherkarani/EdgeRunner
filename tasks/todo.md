@@ -25,6 +25,36 @@
   - `turboquant_v2_ttft_ms=108502.17`
 - Conclusion: the selective early-layer q8 policy is a valid diagnostic lever and slightly improves correctness, but it is not a production-usable fallback for this pinned rollout. Pure-Turbo remains blocked, and this mixed policy does not clear the repo gates either.
 
+## Current Hybrid-KV Execution Plan
+
+- [x] Add an explicit experiment override for `K=q8 / V=turbo` without changing the default TurboQuant contract
+- [x] Audit the current runtime and Metal paths for existing hybrid support before writing new kernels or dispatch branches
+- [x] Implement the narrowest viable hybrid path so keys use q8 storage/attention reads while values stay on TurboQuant storage/attention reads
+- [x] Add or tighten tests that prove the hybrid contract and runtime selection are real, not just allocator-level
+- [x] Run pinned smoke and 128-token quality on the hybrid path first
+- [x] Only run the 4096 benchmark if the hybrid path materially improves correctness
+- [x] Record whether hybrid K/V is a viable repo fallback or whether the pinned rollout is still blocked even after isolating V from the q8 promotion
+
+### Hybrid-KV Review
+
+- Added `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS` so the first `N` layers can store keys in `q8_0` while values stay on the active TurboQuant preset.
+- Fixed the runtime so prefill and decode no longer assume that key and value storage must match globally or even per layer. The active path now supports `q8 key + turbo value` storage and dispatch.
+- Added dedicated hybrid attention kernels for both prefill and single-token decode:
+  - `gqa_attention_q8k_turboquant`
+  - `gqa_attention_q8k_turboquant_decode`
+- Added tests proving the contract and allocator really expose hybrid storage on layer 0 while later layers remain TurboQuant.
+- Measured pinned rollout results:
+  - `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=1`
+    - smoke: `turboquant_v2=[16, 13, 576, 2701]`
+    - quality: `divergence_steps=3`, `first_divergence_step=5`, `max_abs_logit_delta=15.6054`
+    - generated: `[1479, 198, 3838, 374, 279, 3491, 382, 785]`
+  - `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2`
+    - smoke: `turboquant_v2=[16, 13, 220, 17]`
+    - quality: `divergence_steps=3`, `first_divergence_step=5`, `max_abs_logit_delta=11.8762`
+    - generated: `[1479, 198, 3838, 374, 279, 897, 315, 279]`
+    - 4k benchmark: `q8_decode_tok_s=1.73`, `turboquant_v2_decode_tok_s=1.78`, `q8_ttft_ms=32265.01`, `turboquant_v2_ttft_ms=107595.93`
+- Conclusion: `q8 key + turbo value` materially improves pinned-model quality relative to both pure Turbo and whole-layer q8 fallbacks, but it still fails smoke and quality gates and still carries a large TTFT penalty. It is not a production-usable fallback for this repo.
+
 - [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
 - [ ] Add or tighten failing targeted tests for that gap before changing runtime behavior
 - [ ] Port the missing or regressed fork-aligned behavior into the default TurboQuant path without restoring `q8_0` shortcut rails

@@ -105,6 +105,15 @@ struct TurboQuantAttentionTests {
             #expect(TurboQuantV2Contract.keyPreset(forLayer: 1, layerCount: 28) == .turbo3)
             #expect(TurboQuantV2Contract.valuePreset(forLayer: 1, layerCount: 28) == .turbo3)
         }
+
+        try withEnv("EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS", value: "1") {
+            #expect(TurboQuantV2Contract.keyCacheType(forLayer: 0, layerCount: 28) == .q8_0)
+            #expect(TurboQuantV2Contract.valueCacheType(forLayer: 0, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.keyCacheType(forLayer: 1, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.valueCacheType(forLayer: 1, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.keyPreset(forLayer: 0, layerCount: 28) == nil)
+            #expect(TurboQuantV2Contract.valuePreset(forLayer: 0, layerCount: 28) == .turbo3)
+        }
     }
 
     @Test
@@ -118,6 +127,29 @@ struct TurboQuantAttentionTests {
                 #expect(TurboQuantV2Contract.valueCacheType(forLayer: 26, layerCount: 28) == .q8_0)
                 #expect(TurboQuantV2Contract.valueCacheType(forLayer: 27, layerCount: 28) == .q8_0)
             }
+        }
+    }
+
+    @Test
+    func keyOnlyQ8OverrideAllocatesHybridKVStorage() throws {
+        try withEnv("EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS", value: "1") {
+            let cache = try KVCache(
+                device: device,
+                maxSeqLen: 8,
+                numLayers: 2,
+                numKVHeads: 1,
+                headDim: 128,
+                precision: .turboquantV2
+            )
+
+            #expect(try cache.keyMetalBuffer(layer: 0) != nil)
+            #expect(try cache.turboQuantKeyMetalBuffers(layer: 0) == nil)
+            #expect(try cache.valueMetalBuffer(layer: 0) == nil)
+            #expect(try cache.turboQuantValueMetalBuffers(layer: 0) != nil)
+            #expect(try cache.keyMetalBuffer(layer: 1) == nil)
+            #expect(try cache.turboQuantKeyMetalBuffers(layer: 1) != nil)
+            #expect(try cache.valueMetalBuffer(layer: 1) == nil)
+            #expect(try cache.turboQuantValueMetalBuffers(layer: 1) != nil)
         }
     }
 

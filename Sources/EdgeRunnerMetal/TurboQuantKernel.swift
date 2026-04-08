@@ -16,7 +16,10 @@ public final class TurboQuantKernel: Sendable {
     public let quantizeAggressiveSmallKPipeline: MTLComputePipelineState
     public let quantizeAggressiveSmallKVPipeline: MTLComputePipelineState
     public let attentionPipeline: MTLComputePipelineState
+    public let q8KeyTurboValueAttentionPipeline: MTLComputePipelineState
     public let decodeAttentionPipeline: MTLComputePipelineState
+    public let decodeAttentionQ8KeyTurboValuePipeline: MTLComputePipelineState
+    public let debugDecodeScoreTermsPipeline: MTLComputePipelineState
     public let decodeAttentionDenseVPipeline: MTLComputePipelineState
     public let decodeAttentionAggressivePipeline: MTLComputePipelineState
     public let decodeAttentionAggressiveDenseVPipeline: MTLComputePipelineState
@@ -32,7 +35,10 @@ public final class TurboQuantKernel: Sendable {
         self.quantizeAggressiveSmallKPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_k")
         self.quantizeAggressiveSmallKVPipeline = try registry.pipeline(for: "turboquant_quantize_rows_small_aggressive_kv")
         self.attentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant")
+        self.q8KeyTurboValueAttentionPipeline = try registry.pipeline(for: "gqa_attention_q8k_turboquant")
         self.decodeAttentionPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode")
+        self.decodeAttentionQ8KeyTurboValuePipeline = try registry.pipeline(for: "gqa_attention_q8k_turboquant_decode")
+        self.debugDecodeScoreTermsPipeline = try registry.pipeline(for: "turboquant_debug_decode_score_terms")
         self.decodeAttentionDenseVPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_f16v")
         self.decodeAttentionAggressivePipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive")
         self.decodeAttentionAggressiveDenseVPipeline = try registry.pipeline(for: "gqa_attention_turboquant_decode_aggressive_f16v")

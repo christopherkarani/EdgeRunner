@@ -3,6 +3,7 @@ import Foundation
 private enum TurboQuantEnvOverrides {
     static let keyType = "EDGERUNNER_TURBOQUANT_KEY_TYPE"
     static let valueType = "EDGERUNNER_TURBOQUANT_VALUE_TYPE"
+    static let earlyQ8KeyLayers = "EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS"
     static let adaptiveMode = "EDGERUNNER_TURBOQUANT_LAYER_ADAPTIVE"
     static let keyPolicy = "EDGERUNNER_TURBOQUANT_KEY_POLICY"
     static let valuePolicy = "EDGERUNNER_TURBOQUANT_VALUE_POLICY"
@@ -405,6 +406,10 @@ public enum TurboQuantV2Contract {
         if earlyQ8Layers > 0, layerIndex < min(earlyQ8Layers, layerCount), baseType.isTurbo {
             return .q8_0
         }
+        let earlyQ8KeyLayers = earlyQ8KeyLayerCount()
+        if earlyQ8KeyLayers > 0, layerIndex < min(earlyQ8KeyLayers, layerCount), baseType.isTurbo {
+            return .q8_0
+        }
         switch adaptiveMode {
         case .uniform, .boundaryTurbo4, .last8Turbo4, .boundaryQ8:
             return baseType
@@ -598,6 +603,10 @@ public enum TurboQuantV2Contract {
 
     private static func earlyQ8LayerCount() -> Int {
         Int(ProcessInfo.processInfo.environment[TurboQuantEnvOverrides.earlyQ8Layers] ?? "0") ?? 0
+    }
+
+    private static func earlyQ8KeyLayerCount() -> Int {
+        Int(ProcessInfo.processInfo.environment[TurboQuantEnvOverrides.earlyQ8KeyLayers] ?? "0") ?? 0
     }
 
     private static func residualScale(

@@ -159,6 +159,26 @@ struct ERTurboQuantDebugScoreTerms {
     float score;
 };
 
+constant uint TURBOQUANT_Q8_0_BLOCK_BYTES = 34u;
+constant uint TURBOQUANT_Q8_0_WEIGHTS_PER_BLOCK = 32u;
+
+inline float4 tq_q8_0_load_float4(
+    device const uchar *row,
+    uint dim4
+) {
+    const uint scalarIndex = dim4 * 4u;
+    const uint blockIndex = scalarIndex / TURBOQUANT_Q8_0_WEIGHTS_PER_BLOCK;
+    const uint inBlockIndex = scalarIndex % TURBOQUANT_Q8_0_WEIGHTS_PER_BLOCK;
+    device const uchar *block = row + blockIndex * TURBOQUANT_Q8_0_BLOCK_BYTES;
+    const float scale = float(as_type<half>(*(device const ushort *)block));
+    return scale * float4(
+        float(as_type<char>(block[2 + inBlockIndex + 0])),
+        float(as_type<char>(block[2 + inBlockIndex + 1])),
+        float(as_type<char>(block[2 + inBlockIndex + 2])),
+        float(as_type<char>(block[2 + inBlockIndex + 3]))
+    );
+}
+
 inline uint tq_get_bit(device const uint *words, uint bitIndex) {
     uint wordIndex = bitIndex >> 5;
     uint shift = bitIndex & 31;
@@ -1540,6 +1560,149 @@ kernel void gqa_attention_turboquant(
     }
 }
 
+kernel void gqa_attention_q8k_turboquant(
+    device const float *Q [[buffer(0)]],
+    device const uchar *K [[buffer(1)]],
+    device const uint *VCodes [[buffer(2)]],
+    device const uint *VResidualSigns [[buffer(3)]],
+    device const uint *VOutlierMask [[buffer(4)]],
+    device const float *VMetadata [[buffer(5)]],
+    device float *O [[buffer(6)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(7)]],
+    device const float *valueRotationSigns [[buffer(8)]],
+    device const float *valueResidualProjectionSigns [[buffer(9)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]]
+) {
+    const uint qBlockIndex = group_id.x;
+    const uint headIndex = group_id.y;
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint seqLen = params.seqLen;
+    const uint kvSeqLen = params.kvSeqLen > 0 ? params.kvSeqLen : seqLen;
+    const uint qOff = params.qOffset;
+    const uint blockSize = params.qBlockSize;
+    const uint qStride = params.numHeads * params.headDim;
+    const uint headDim4 = params.headDim / 4u;
+    const uint q8BlocksPerRow = params.headDim / TURBOQUANT_Q8_0_WEIGHTS_PER_BLOCK;
+    const uint q8RowBytes = q8BlocksPerRow * TURBOQUANT_Q8_0_BLOCK_BYTES;
+
+    uint qRow = qBlockIndex * blockSize + local_id.x;
+    bool activeQ = (qRow < seqLen);
+
+    threadgroup float outputMSEScratch[16 * 128];
+    threadgroup float outputResidualScratch[16 * 128];
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0;
+    float scores[16];
+    float probs[16];
+
+    if (activeQ) {
+        threadgroup float *outputMSE = outputMSEScratch + local_id.x * 128;
+        threadgroup float *outputResidual = outputResidualScratch + local_id.x * 128;
+        for (uint dim = 0; dim < 128; ++dim) {
+            outputMSE[dim] = 0.0;
+            outputResidual[dim] = 0.0;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint kvBlockCount = (kvSeqLen + blockSize - 1) / blockSize;
+    for (uint kvBlock = 0; kvBlock < kvBlockCount; ++kvBlock) {
+        uint kvStart = kvBlock * blockSize;
+        uint kvEnd = min(kvStart + blockSize, kvSeqLen);
+        uint kvCount = kvEnd - kvStart;
+
+        if (activeQ) {
+            threadgroup float *outputMSE = outputMSEScratch + local_id.x * 128;
+            threadgroup float *outputResidual = outputResidualScratch + local_id.x * 128;
+            uint qBase = qRow * qStride + headIndex * params.headDim;
+            const device float4 *qVec = reinterpret_cast<const device float4 *>(Q + qBase);
+
+            float blockMax = -INFINITY;
+            for (uint kvIndex = 0; kvIndex < kvCount; ++kvIndex) {
+                if (params.causal != 0 && kvStart + kvIndex > qRow + qOff) {
+                    scores[kvIndex] = -INFINITY;
+                    continue;
+                }
+
+                uint rowIndex = (kvStart + kvIndex) * params.numKVHeads + kvHeadIndex;
+                device const uchar *kRow = K + rowIndex * q8RowBytes;
+                float dot = 0.0f;
+                for (uint dim4 = 0; dim4 < headDim4; ++dim4) {
+                    dot += metal::dot(qVec[dim4], tq_q8_0_load_float4(kRow, dim4));
+                }
+                scores[kvIndex] = dot * params.scale;
+                blockMax = max(blockMax, scores[kvIndex]);
+            }
+
+            float nextMax = max(runningMax, blockMax);
+            float correction = exp(runningMax - nextMax);
+            float blockSum = 0.0f;
+            for (uint kvIndex = 0; kvIndex < kvCount; ++kvIndex) {
+                if (scores[kvIndex] == -INFINITY) {
+                    probs[kvIndex] = 0.0f;
+                } else {
+                    probs[kvIndex] = exp(scores[kvIndex] - nextMax);
+                }
+                blockSum += probs[kvIndex];
+            }
+
+            runningSum = runningSum * correction + blockSum;
+            for (uint dim = 0; dim < 128; ++dim) {
+                outputMSE[dim] *= correction;
+                outputResidual[dim] *= correction;
+            }
+
+            for (uint kvIndex = 0; kvIndex < kvCount; ++kvIndex) {
+                float prob = probs[kvIndex];
+                if (prob == 0.0f) { continue; }
+
+                uint rowIndex = (kvStart + kvIndex) * params.numKVHeads + kvHeadIndex;
+                device const uint *codeRow = VCodes + rowIndex * params.valueCodeWordsPerRow;
+                device const uint *signRow = VResidualSigns + rowIndex * 4;
+                device const uint *maskRow = VOutlierMask + rowIndex * 4;
+                device const float *metaRow = VMetadata + rowIndex * 2;
+                float rowNorm = metaRow[0];
+                float residualNorm = metaRow[1];
+                float mseScale = prob * rowNorm;
+                float residualScale = prob * rowNorm * residualNorm;
+
+                uint sidebandOffset = 128u * params.valueRegularBits;
+                for (uint dim = 0; dim < 128; ++dim) {
+                    bool useHighPrecision = tq_get_bit(maskRow, dim) == 1u;
+                    uint code = tq_extract_split_plane_code(
+                        codeRow,
+                        dim,
+                        useHighPrecision,
+                        params.valueRegularBits,
+                        params.valueHighPrecisionBits,
+                        sidebandOffset
+                    );
+                    outputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.valueHighPrecisionBits : params.valueRegularBits, code);
+                    outputResidual[dim] += residualScale * (tq_get_bit(signRow, dim) == 1u ? 1.0f : -1.0f);
+                }
+            }
+            runningMax = nextMax;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (activeQ) {
+        threadgroup float *outputMSE = outputMSEScratch + local_id.x * 128;
+        threadgroup float *outputResidual = outputResidualScratch + local_id.x * 128;
+
+        tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
+        tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
+
+        float invSum = runningSum > 0.0f ? 1.0f / runningSum : 0.0f;
+        uint oBase = qRow * qStride + headIndex * params.headDim;
+        for (uint dim = 0; dim < 128; ++dim) {
+            O[oBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
+        }
+    }
+}
+
 kernel void gqa_attention_turboquant_decode(
     device const float *Q [[buffer(0)]],
     device const uint *KCodes [[buffer(1)]],
@@ -1736,6 +1899,166 @@ kernel void gqa_attention_turboquant_decode(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float invSum = globalSum > 0.0 ? 1.0 / globalSum : 0.0;
+    uint outputBase = headIndex * params.headDim;
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
+    }
+}
+
+kernel void gqa_attention_q8k_turboquant_decode(
+    device const float *Q [[buffer(0)]],
+    device const uchar *K [[buffer(1)]],
+    device const uint *VCodes [[buffer(2)]],
+    device const uint *VResidualSigns [[buffer(3)]],
+    device const uint *VOutlierMask [[buffer(4)]],
+    device const float *VMetadata [[buffer(5)]],
+    device float *O [[buffer(6)]],
+    constant ERTurboQuantAttentionParams &params [[buffer(7)]],
+    device const float *valueRotationSigns [[buffer(8)]],
+    device const float *valueResidualProjectionSigns [[buffer(9)]],
+    uint headIndex [[threadgroup_position_in_grid]],
+    uint lane [[thread_position_in_threadgroup]]
+) {
+    if (headIndex >= params.numHeads) { return; }
+
+    constexpr uint kDecodeThreads = 16u;
+    const uint kvHeadIndex = headIndex / params.groupSize;
+    const uint kvSeqLen = params.kvSeqLen;
+    const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
+    const uint qBase = headIndex * params.headDim;
+    const uint headDim4 = params.headDim / 4u;
+    const uint q8BlocksPerRow = params.headDim / TURBOQUANT_Q8_0_WEIGHTS_PER_BLOCK;
+    const uint q8RowBytes = q8BlocksPerRow * TURBOQUANT_Q8_0_BLOCK_BYTES;
+
+    threadgroup float outputMSE[128];
+    threadgroup float outputResidual[128];
+    threadgroup float partialMSE[kDecodeThreads * 128];
+    threadgroup float partialResidual[kDecodeThreads * 128];
+    threadgroup float laneMax[kDecodeThreads];
+    threadgroup float laneSum[kDecodeThreads];
+    threadgroup float laneScale[kDecodeThreads];
+    threadgroup float reductionScratch[kDecodeThreads];
+    threadgroup float globalMax;
+    threadgroup float globalSum;
+
+    threadgroup float *laneOutputMSE = partialMSE + lane * 128;
+    threadgroup float *laneOutputResidual = partialResidual + lane * 128;
+    const device float4 *qVec = reinterpret_cast<const device float4 *>(Q + qBase);
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        outputMSE[dim] = 0.0f;
+        outputResidual[dim] = 0.0f;
+    }
+    for (uint dim = 0; dim < 128; ++dim) {
+        laneOutputMSE[dim] = 0.0f;
+        laneOutputResidual[dim] = 0.0f;
+    }
+    if (lane == 0) {
+        globalMax = -INFINITY;
+        globalSum = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+
+    for (uint kvPos = lane; kvPos < kvLimit; kvPos += kDecodeThreads) {
+        uint rowIndex = kvPos * params.numKVHeads + kvHeadIndex;
+        device const uchar *kRow = K + rowIndex * q8RowBytes;
+        float dot = 0.0f;
+        for (uint dim4 = 0; dim4 < headDim4; ++dim4) {
+            dot += metal::dot(qVec[dim4], tq_q8_0_load_float4(kRow, dim4));
+        }
+
+        float score = dot * params.scale;
+        float nextMax = max(runningMax, score);
+        float correction = runningMax == -INFINITY ? 0.0f : exp(runningMax - nextMax);
+        float prob = exp(score - nextMax);
+        runningSum = runningSum * correction + prob;
+        runningMax = nextMax;
+
+        for (uint dim = 0; dim < 128; ++dim) {
+            laneOutputMSE[dim] *= correction;
+            laneOutputResidual[dim] *= correction;
+        }
+
+        device const uint *vCodeRow = VCodes + rowIndex * params.valueCodeWordsPerRow;
+        device const uint *vSignRow = VResidualSigns + rowIndex * 4;
+        device const uint *vMaskRow = VOutlierMask + rowIndex * 4;
+        device const float *vMetaRow = VMetadata + rowIndex * 2;
+        float valueRowNorm = vMetaRow[0];
+        float valueResidualNorm = vMetaRow[1];
+        float mseScale = prob * valueRowNorm;
+        float residualScale = prob * valueRowNorm * valueResidualNorm;
+
+        uint valueSidebandOffset = 128u * params.valueRegularBits;
+        for (uint dim = 0; dim < 128; ++dim) {
+            bool useHighPrecision = tq_get_bit(vMaskRow, dim) == 1u;
+            uint code = tq_extract_split_plane_code(
+                vCodeRow,
+                dim,
+                useHighPrecision,
+                params.valueRegularBits,
+                params.valueHighPrecisionBits,
+                valueSidebandOffset
+            );
+            laneOutputMSE[dim] += mseScale * tq_centroid(useHighPrecision ? params.valueHighPrecisionBits : params.valueRegularBits, code);
+            laneOutputResidual[dim] += residualScale * (tq_get_bit(vSignRow, dim) == 1u ? 1.0f : -1.0f);
+        }
+    }
+
+    laneMax[lane] = runningMax;
+    laneSum[lane] = runningSum;
+    reductionScratch[lane] = runningMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] = max(reductionScratch[lane], reductionScratch[lane + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalMax = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localScale = runningSum > 0.0f ? exp(runningMax - globalMax) : 0.0f;
+    laneScale[lane] = localScale;
+    reductionScratch[lane] = runningSum * localScale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = kDecodeThreads >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reductionScratch[lane] += reductionScratch[lane + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) {
+        globalSum = reductionScratch[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
+        float mseAccum = 0.0f;
+        float residualAccum = 0.0f;
+        for (uint worker = 0; worker < kDecodeThreads; ++worker) {
+            float workerScale = laneScale[worker];
+            mseAccum += partialMSE[worker * 128 + dim] * workerScale;
+            residualAccum += partialResidual[worker * 128 + dim] * workerScale;
+        }
+        outputMSE[dim] = mseAccum;
+        outputResidual[dim] = residualAccum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
+        tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = globalSum > 0.0f ? 1.0f / globalSum : 0.0f;
     uint outputBase = headIndex * params.headDim;
     for (uint dim = lane; dim < 128; dim += kDecodeThreads) {
         O[outputBase + dim] = (outputMSE[dim] + (outputResidual[dim] * TURBOQUANT_QJL_SCALE * params.valueResidualScale)) * invSum;
