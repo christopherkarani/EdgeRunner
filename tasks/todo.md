@@ -53,6 +53,13 @@
     - quality: `divergence_steps=3`, `first_divergence_step=5`, `max_abs_logit_delta=11.8762`
     - generated: `[1479, 198, 3838, 374, 279, 897, 315, 279]`
     - 4k benchmark: `q8_decode_tok_s=1.73`, `turboquant_v2_decode_tok_s=1.78`, `q8_ttft_ms=32265.01`, `turboquant_v2_ttft_ms=107595.93`
+    - layerwise attribution:
+      - `first_divergent_attention_output_layer=2`
+      - `first_divergent_attention_layer=2`
+      - `first_divergent_layer=2`
+      - `q8_argmax=3838`
+      - `turboquant_v2_argmax=3838`
+      - `max_abs_logit_delta=7.886554`
 - Conclusion: `q8 key + turbo value` materially improves pinned-model quality relative to both pure Turbo and whole-layer q8 fallbacks, but it still fails smoke and quality gates and still carries a large TTFT penalty. It is not a production-usable fallback for this repo.
 
 - [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
