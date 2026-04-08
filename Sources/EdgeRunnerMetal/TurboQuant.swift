@@ -17,6 +17,7 @@ private enum TurboQuantEnvOverrides {
     static let forkAdaptiveMode = "TURBO_LAYER_ADAPTIVE"
     static let forkInnerQSamples = "TURBO_INNERQ"
     static let forkInnerQStrength = "TURBO_INNERQ_STRENGTH"
+    static let earlyQ8Layers = "EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS"
 }
 
 public enum TurboQuantError: Error, Sendable, Equatable {
@@ -400,6 +401,10 @@ public enum TurboQuantV2Contract {
 
     public static func keyCacheType(forLayer layerIndex: Int, layerCount: Int) -> TurboQuantLayerCacheType {
         let baseType = TurboQuantLayerCacheType(fixedType: keyType)
+        let earlyQ8Layers = earlyQ8LayerCount()
+        if earlyQ8Layers > 0, layerIndex < min(earlyQ8Layers, layerCount), baseType.isTurbo {
+            return .q8_0
+        }
         switch adaptiveMode {
         case .uniform, .boundaryTurbo4, .last8Turbo4, .boundaryQ8:
             return baseType
@@ -414,6 +419,10 @@ public enum TurboQuantV2Contract {
 
     public static func valueCacheType(forLayer layerIndex: Int, layerCount: Int) -> TurboQuantLayerCacheType {
         let baseType = TurboQuantLayerCacheType(fixedType: valueType)
+        let earlyQ8Layers = earlyQ8LayerCount()
+        if earlyQ8Layers > 0, layerIndex < min(earlyQ8Layers, layerCount), baseType.isTurbo {
+            return .q8_0
+        }
         switch adaptiveMode {
         case .uniform:
             return baseType
@@ -585,6 +594,10 @@ public enum TurboQuantV2Contract {
 
     private static func inferredAdaptiveMode(baseValueType: TurboQuantFixedType) -> TurboQuantAdaptiveMode {
         baseValueType == .turbo2 ? .boundaryQ8 : .uniform
+    }
+
+    private static func earlyQ8LayerCount() -> Int {
+        Int(ProcessInfo.processInfo.environment[TurboQuantEnvOverrides.earlyQ8Layers] ?? "0") ?? 0
     }
 
     private static func residualScale(

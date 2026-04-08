@@ -94,6 +94,17 @@ struct TurboQuantAttentionTests {
         try withEnv("EDGERUNNER_TURBOQUANT_VALUE_OUTLIER_SELECTION", value: "magnitude") {
             #expect(TurboQuantV2Contract.valueOutlierSelection == .magnitude)
         }
+
+        try withEnv("EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS", value: "1") {
+            #expect(TurboQuantV2Contract.keyCacheType(forLayer: 0, layerCount: 28) == .q8_0)
+            #expect(TurboQuantV2Contract.valueCacheType(forLayer: 0, layerCount: 28) == .q8_0)
+            #expect(TurboQuantV2Contract.keyCacheType(forLayer: 1, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.valueCacheType(forLayer: 1, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.keyPreset(forLayer: 0, layerCount: 28) == nil)
+            #expect(TurboQuantV2Contract.valuePreset(forLayer: 0, layerCount: 28) == nil)
+            #expect(TurboQuantV2Contract.keyPreset(forLayer: 1, layerCount: 28) == .turbo3)
+            #expect(TurboQuantV2Contract.valuePreset(forLayer: 1, layerCount: 28) == .turbo3)
+        }
     }
 
     @Test

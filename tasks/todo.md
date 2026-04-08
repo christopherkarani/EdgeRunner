@@ -1,5 +1,30 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current Mixed-Policy Execution Plan
+
+- [x] Finish the per-layer KV runtime wiring in `LlamaLanguageModel` so `KVCache` layer storage kinds are respected during both prefill and decode
+- [x] Keep the mixed-policy experiment explicit and reversible via `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS`; do not restore default short-context `q8_0` rails
+- [x] Verify the new contract/env behavior with targeted TurboQuant tests before running pinned-model gates
+- [x] Run pinned smoke and 128-token quality with `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=1`
+- [x] If layer-0 mixed policy is still red, rerun smoke and 128-token quality with `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=2`
+- [x] Only benchmark 4096-token performance for the best mixed-policy candidate that improves correctness
+- [x] Record whether the mixed policy is a production-usable repo fallback or whether pure-Turbo remains the only acceptable objective and is still blocked
+
+### Mixed-Policy Review
+
+- `KVCache` already carried per-layer storage kinds, but `LlamaLanguageModel` prefill and decode still null-selected cache families as a global mode. That bug is now fixed, so mixed-layer experiments actually execute as configured.
+- `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=1` changes the smoke output from the pure-Turbo collapse (`[16, 15, 15, 15]`) to `[21927, 11, 1246, 525]`, which confirms the override is live but still far from the Q8 baseline.
+- `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=2` remains red on smoke with `turboquant_v2=[21927, 11, 323, 358]` vs `q8=[358, 2776, 264, 5458]`.
+- `EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=2` also remains red on 128-token quality, but it improves the max logit delta relative to the pure path:
+  - pure default: `max_abs_logit_delta=19.7134`
+  - first-2-layers q8: `max_abs_logit_delta=16.8863`
+- 4k benchmark for the best mixed candidate (`EDGERUNNER_TURBOQUANT_EARLY_Q8_LAYERS=2`) still shows no throughput win and a large TTFT penalty:
+  - `q8_decode_tok_s=1.73`
+  - `turboquant_v2_decode_tok_s=1.73`
+  - `q8_ttft_ms=30279.64`
+  - `turboquant_v2_ttft_ms=108502.17`
+- Conclusion: the selective early-layer q8 policy is a valid diagnostic lever and slightly improves correctness, but it is not a production-usable fallback for this pinned rollout. Pure-Turbo remains blocked, and this mixed policy does not clear the repo gates either.
+
 - [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
 - [ ] Add or tighten failing targeted tests for that gap before changing runtime behavior
 - [ ] Port the missing or regressed fork-aligned behavior into the default TurboQuant path without restoring `q8_0` shortcut rails
