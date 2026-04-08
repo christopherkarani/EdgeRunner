@@ -100,13 +100,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     public static let modelIdentifier = "llama"
     private static let turboQuantFastHybridDecodeSeqThreshold = 16384
     private static let turboQuantDensePrefillAttentionSeqThreshold = 4096
-    // When true AND Q1 raw buffers are available AND wqRaw is nil, use Q1 GEMV kernel
-    // for layer weights instead of Q8 fused path. The v2 Q1 kernel achieves 52 GB/s
-    // on native Q1 data (7.5x less data than Q8), which can be faster than Q8 at 197 GB/s.
+    // Legacy Q1 v1 decode path (separate dispatches, slower). Kept as fallback.
     private static let prefersRawQ1LayerDecodePath = true
-    // Use optimized v2 Q1 GEMV kernel (sign-flip + sub-block granularity)
+    // Q1 v2 fused decode: sign-flip math, sub-block granularity, fused dispatches.
+    // Default ON for Q1 models — same throughput as Q8 conversion but 7.5x less
+    // memory bandwidth and 1.40 GB less GPU memory (no Q8 layer buffers needed).
+    // Disable with EDGERUNNER_Q1_USE_V2_KERNEL=0.
     private static let useQ1V2Kernel: Bool = {
-        ProcessInfo.processInfo.environment["EDGERUNNER_Q1_USE_V2_KERNEL"] == "1"
+        ProcessInfo.processInfo.environment["EDGERUNNER_Q1_USE_V2_KERNEL"] != "0"
     }()
 
     private let config: LlamaConfig
@@ -1464,8 +1465,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             layers.reserveCapacity(config.layerCount)
             for i in 0..<config.layerCount {
                 let p = "layers.\(i)"
-                // Prefer native Q8 raw buffers; fall back to Q1→Q8 conversion
-                // (always convert even when Q1 v2 is enabled — serves as fallback)
+                // Always convert Q1→Q8 for layer weights (needed by async prefill/warmup paths).
+                // The sync decode path prefers Q1 v2 fused kernels when available.
                 let wqRaw = makeRawQ8BufferIfAvailable("\(p).attention.wq.weight")
                     ?? convertQ1ToQ8Buffer("\(p).attention.wq.weight")
                 let wkRaw = makeRawQ8BufferIfAvailable("\(p).attention.wk.weight")
