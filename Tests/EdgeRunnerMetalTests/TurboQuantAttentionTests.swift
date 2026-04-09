@@ -357,6 +357,16 @@ struct TurboQuantAttentionTests {
         )
     }
 
+    @Test func groupedPlanar3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext() throws {
+        try verifyGroupedPrefillAttentionMatchesDecodedCPUReference(
+            kvSeqLen: 130,
+            numHeads: 16,
+            numKVHeads: 8,
+            keyPreset: .planar3,
+            valuePreset: .turbo3
+        )
+    }
+
     private func verifyPrefillAttentionMatchesDecodedCPUReference(
         kvSeqLen: Int,
         keyPreset: TurboQuantPreset? = nil,

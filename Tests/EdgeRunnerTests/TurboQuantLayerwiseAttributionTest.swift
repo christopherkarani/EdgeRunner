@@ -1083,6 +1083,7 @@ struct TurboQuantLayerwiseAttributionTest {
             rows: keyRows,
             preset: keyPreset,
             outlierSelection: TurboQuantV2Contract.keyOutlierSelection,
+            rotationBuffer: kernel.keyRotationBuffer(for: keyPreset),
             signs: kernel.keySigns
         )
         let valueBuffers = try quantizeTurboRowsGPU(
@@ -1092,6 +1093,7 @@ struct TurboQuantLayerwiseAttributionTest {
             rows: valueRows,
             preset: valuePreset,
             outlierSelection: TurboQuantV2Contract.valueOutlierSelection,
+            rotationBuffer: kernel.valueRotationBuffer(for: valuePreset),
             signs: kernel.valueSigns
         )
         let qBuffer = device.makeBuffer(
@@ -1123,7 +1125,10 @@ struct TurboQuantLayerwiseAttributionTest {
             valueCodeWordsPerRow: UInt32(valueLayout.codeWordsPerRow),
             valueRegularBits: UInt32(valueDescriptor.regularBits),
             valueHighPrecisionBits: UInt32(valueDescriptor.highPrecisionBits),
-            reserved: 0
+            reserved: turboQuantAttentionReservedBits(
+                keyPreset: keyPreset,
+                valuePreset: valuePreset
+            )
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -1143,9 +1148,9 @@ struct TurboQuantLayerwiseAttributionTest {
         encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: numHeads, height: 1, depth: 1),
@@ -1189,6 +1194,7 @@ struct TurboQuantLayerwiseAttributionTest {
             rows: keyRows,
             preset: keyPreset,
             outlierSelection: TurboQuantV2Contract.keyOutlierSelection,
+            rotationBuffer: kernel.keyRotationBuffer(for: keyPreset),
             signs: kernel.keySigns
         )
         let valueBuffers = try quantizeTurboRowsGPU(
@@ -1198,6 +1204,7 @@ struct TurboQuantLayerwiseAttributionTest {
             rows: valueRows,
             preset: valuePreset,
             outlierSelection: TurboQuantV2Contract.valueOutlierSelection,
+            rotationBuffer: kernel.valueRotationBuffer(for: valuePreset),
             signs: kernel.valueSigns
         )
         let flattenedQueries = queryRows.flatMap { $0 }
@@ -1230,7 +1237,10 @@ struct TurboQuantLayerwiseAttributionTest {
             valueCodeWordsPerRow: UInt32(valueLayout.codeWordsPerRow),
             valueRegularBits: UInt32(valueDescriptor.regularBits),
             valueHighPrecisionBits: UInt32(valueDescriptor.highPrecisionBits),
-            reserved: 0
+            reserved: turboQuantAttentionReservedBits(
+                keyPreset: keyPreset,
+                valuePreset: valuePreset
+            )
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -1250,9 +1260,9 @@ struct TurboQuantLayerwiseAttributionTest {
         encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: numHeads, depth: 1),
@@ -1282,6 +1292,7 @@ struct TurboQuantLayerwiseAttributionTest {
         rows: [[Float]],
         preset: TurboQuantPreset,
         outlierSelection: TurboQuantOutlierSelection,
+        rotationBuffer: MTLBuffer,
         signs: TurboQuantSignBuffers
     ) throws -> TestTurboQuantMetalBuffers {
         let rowCount = rows.count * 8
@@ -1324,7 +1335,10 @@ struct TurboQuantLayerwiseAttributionTest {
             regularBits: UInt32(preset.descriptor.regularBits),
             highPrecisionBits: UInt32(preset.descriptor.highPrecisionBits),
             highPrecisionChannelCount: UInt32(preset.descriptor.highPrecisionChannelCount),
-            reserved: outlierSelection == .quantizationBenefit ? 1 : 0
+            reserved: turboQuantQuantizeReservedBits(
+                preset: preset,
+                outlierSelection: outlierSelection
+            )
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -1339,7 +1353,7 @@ struct TurboQuantLayerwiseAttributionTest {
         encoder.setBuffer(outlierMaskBuffer, offset: 0, index: 3)
         encoder.setBuffer(metadataBuffer, offset: 0, index: 4)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantQuantizeParams>.stride, index: 5)
-        encoder.setBuffer(signs.rotation, offset: 0, index: 6)
+        encoder.setBuffer(rotationBuffer, offset: 0, index: 6)
         encoder.setBuffer(signs.residual, offset: 0, index: 7)
         encoder.dispatchThreads(
             MTLSize(width: rowCount, height: 1, depth: 1),
@@ -1358,6 +1372,31 @@ struct TurboQuantLayerwiseAttributionTest {
             outlierMask: outlierMaskBuffer,
             metadata: metadataBuffer
         )
+    }
+
+    private func turboQuantAttentionReservedBits(
+        keyPreset: TurboQuantPreset,
+        valuePreset: TurboQuantPreset
+    ) -> UInt32 {
+        var reserved: UInt32 = 0
+        if keyPreset == .planar3 {
+            reserved |= 2
+        }
+        if valuePreset == .planar3 {
+            reserved |= 4
+        }
+        return reserved
+    }
+
+    private func turboQuantQuantizeReservedBits(
+        preset: TurboQuantPreset,
+        outlierSelection: TurboQuantOutlierSelection
+    ) -> UInt32 {
+        var reserved: UInt32 = outlierSelection == .quantizationBenefit ? 1 : 0
+        if preset == .planar3 {
+            reserved |= 4
+        }
+        return reserved
     }
 
     private func cpuPresetFidelitySummaries(

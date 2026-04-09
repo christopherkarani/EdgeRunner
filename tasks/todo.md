@@ -1,5 +1,14 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current Planar3 Attribution Plan
+
+- [x] Re-run the real-activation attribution probes under `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3`
+- [x] Determine whether the remaining layer-0 blocker is dominated by stored-score/key error or value reconstruction error
+- [x] If a single missing semantic is exposed, add a failing-first regression around it before changing runtime code
+- [x] Implement only the evidenced missing behavior; avoid new heuristics
+- [x] Re-run low-level planar3 tests plus pinned smoke after the change
+- [x] If the pinned path is still red, record the blocker precisely instead of continuing blind tuning
+
 ## Current Planar3 Live-Path Unblock Plan
 
 - [x] Audit the smallest live runtime surface needed to carry planar rotation coefficients for keys without changing value-side behavior
@@ -27,10 +36,17 @@
   - `swift test --filter groupedDecodeAttentionMatchesDecodedCPUReference` passes
   - `swift test --filter planar3GPUQuantizedRowsMatchReferenceRuntimeRows` passes
   - `swift test --filter planar3DecodeScoreTermsMatchCPUReference` passes
+  - `swift test --filter groupedPlanar3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext` passes
   - score-term parity on the live decode path is now effectively exact:
     - `max_mse_dot_delta=0.00000095`
     - `max_residual_dot_delta=0.00000000`
     - `max_score_delta=0.00000048`
+- Fixed a real attribution-harness bug after the first planar replay:
+  - the GPU replay helpers in `TurboQuantLayerwiseAttributionTest.swift` were still hardcoding WHT rotation buffers and `reserved=0`
+  - after switching them to preset-aware rotation buffers and reserved bits, `planar3` replay now matches CPU decode numerically
+  - updated replay result:
+    - `cpu_vs_gpu_max_abs=0.000001`
+    - `cpu_vs_gpu_mse=0.000000`
 - Pinned smoke with explicit `planar3` keys is still red:
   - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --skip-build --filter turboQuantV2GreedyTraceMatchesQ8Baseline`
   - result: `q8=[358, 2776, 264, 5458]`
@@ -45,9 +61,24 @@
   - result: `q8_argmax=3838`
   - result: `turboquant_v2_argmax=198`
   - result: `max_abs_logit_delta=10.540858`
+- Real-activation replay and approximation still show the blocker is key-dominant at layer 0:
+  - replay command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 swift test --filter replayLayer0AttentionOnRealActivations`
+  - replay result:
+    - `exact_k_decoded_v_mse=0.000383`
+    - `decoded_k_exact_v_mse=0.013324`
+    - `cpu_vs_dense_mse=0.013716`
+    - `gpu_vs_dense_mse=0.013716`
+  - approximation command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 swift test --skip-build --filter compareAttentionApproximationAgainstQ8Baseline`
+  - approximation result:
+    - `worst_turbo_key_layer=0`
+    - `worst_turbo_key_max_abs=226.563828`
+    - `worst_turbo_key_mse=384.354004`
+    - `worst_turbo_last_token_key_layer=0`
+    - `worst_turbo_last_token_key_max_abs=111.972290`
+    - `worst_turbo_last_token_key_mse=130.500122`
 - Current conclusion:
   - the live `planar3` runtime path is no longer blocked by missing Metal/Swift plumbing
-  - the remaining blocker is still pinned-model attention fidelity, not a broken planar runtime implementation
+  - the remaining blocker is still pinned-model key/score fidelity at layer 0, not a broken planar runtime implementation
 
 ## Current RotorQuant Prototype Plan
 
