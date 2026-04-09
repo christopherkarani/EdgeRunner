@@ -62,6 +62,43 @@
       - `max_abs_logit_delta=7.886554`
 - Conclusion: `q8 key + turbo value` materially improves pinned-model quality relative to both pure Turbo and whole-layer q8 fallbacks, but it still fails smoke and quality gates and still carries a large TTFT penalty. It is not a production-usable fallback for this repo.
 
+## Current Layer-2 Isolation Plan
+
+- [x] Re-run the hybrid-safe layerwise diagnostics at layer 2 under `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2`
+- [x] Confirm whether the live layer-2 error remains key-dominant once the first 2 layers use q8 keys
+- [x] Promote layer 2 as well via `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=3` and rerun smoke plus 128-token quality as the minimal causality check
+- [x] Re-run layerwise attribution under the 3-layer hybrid to see whether the first divergence simply moves deeper
+- [x] Stop tuning and record the blocker now that deeper q8-key promotion still does not clear the pinned rollout gates
+
+### Layer-2 Isolation Review
+
+- The pure-Turbo replay harness is not valid under the hybrid path because it assumes every replayed layer has a Turbo key preset. Running `replayLayer0AttentionOnRealActivations` with `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2` and `EDGERUNNER_TURBOQUANT_V2_REPLAY_LAYER=2` fails immediately with `unsupportedBitWidth(0)`, so hybrid isolation used the live layerwise input/trace tests instead.
+- Under `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2`, layer-2 live attention inputs are already divergent and still key-dominant:
+  - `query_last_token_max_abs_delta=1.877228`
+  - `query_all_tokens_max_abs_delta=1.877228`
+  - `key_all_tokens_max_abs_delta=5.891502`
+  - `value_all_tokens_max_abs_delta=0.088129`
+- Promoting layer 2 as well with `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=3` improves smoke materially but still does not clear it:
+  - `q8=[358, 2776, 264, 5458]`
+  - `turboquant_v2=[358, 614, 264, 3491]`
+- The 128-token quality gate under `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=3` still fails:
+  - `divergence_steps=3`
+  - `first_divergence_step=5`
+  - `max_abs_logit_delta=14.5776`
+  - `turboquant_v2_generated=[1479, 198, 3838, 374, 279, 7428, 315, 279]`
+- Layerwise attribution under the 3-layer hybrid shows that deeper q8-key promotion does not cleanly eliminate the earliest hidden-state error:
+  - `first_divergent_attention_output_layer=2`
+  - `first_divergent_attention_layer=3`
+  - `first_divergent_layer=2`
+  - `q8_argmax=3838`
+  - `turboquant_v2_argmax=3838`
+  - `max_abs_logit_delta=7.905575`
+- Layer-3 live attention inputs remain key-dominant even after the first 3 layers use q8 keys:
+  - `query_last_token_max_abs_delta=1.272955`
+  - `key_all_tokens_max_abs_delta=3.167385`
+  - `value_all_tokens_max_abs_delta=0.320142`
+- Conclusion: deeper q8-key promotion remains a useful diagnostic, but it is no longer isolating a single residual Turbo key layer. The pinned blocker is now evidenced as compounded state divergence in the remaining pure-Turbo stack rather than a one-layer runtime bug that can be fixed by extending the fallback depth.
+
 - [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
 - [ ] Add or tighten failing targeted tests for that gap before changing runtime behavior
 - [ ] Port the missing or regressed fork-aligned behavior into the default TurboQuant path without restoring `q8_0` shortcut rails
