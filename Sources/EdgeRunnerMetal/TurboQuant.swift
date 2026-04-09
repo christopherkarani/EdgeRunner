@@ -30,6 +30,7 @@ public enum TurboQuantError: Error, Sendable, Equatable {
 public enum TurboQuantPreset: String, Sendable, Equatable, Codable {
     case turbo2
     case turbo3
+    case planar3
     case turbo4
     case balanced
     case balanced64
@@ -50,6 +51,13 @@ public enum TurboQuantPreset: String, Sendable, Equatable, Codable {
                 highPrecisionChannelCount: 0
             )
         case .turbo3:
+            return TurboQuantPresetDescriptor(
+                preset: self,
+                regularBits: 3,
+                highPrecisionBits: 3,
+                highPrecisionChannelCount: 0
+            )
+        case .planar3:
             return TurboQuantPresetDescriptor(
                 preset: self,
                 regularBits: 3,
@@ -122,6 +130,22 @@ public enum TurboQuantPreset: String, Sendable, Equatable, Codable {
                 highPrecisionBits: 3,
                 highPrecisionChannelCount: 64
             )
+        }
+    }
+}
+
+private enum TurboQuantRotationKind {
+    case randomizedHadamard
+    case planar
+}
+
+private extension TurboQuantPreset {
+    var rotationKind: TurboQuantRotationKind {
+        switch self {
+        case .planar3:
+            return .planar
+        case .turbo2, .turbo3, .turbo4, .balanced, .balanced64, .balanced96, .fiveBit, .sixBit, .sevenBit, .aggressive, .aggressive64:
+            return .randomizedHadamard
         }
     }
 }
@@ -616,7 +640,7 @@ public enum TurboQuantV2Contract {
         switch preset {
         case .turbo2:
             return TurboQuantFixedType.turbo2.residualScale
-        case .turbo3:
+        case .turbo3, .planar3:
             return TurboQuantFixedType.turbo3.residualScale
         case .turbo4:
             return TurboQuantFixedType.turbo4.residualScale
@@ -862,6 +886,61 @@ public enum TurboQuantTransform {
         return base
     }
 
+    public static func planarRotate(_ vector: [Float], seed: UInt64) throws -> [Float] {
+        guard (1...TurboQuantLayout.supportedDimension).contains(vector.count) else {
+            throw TurboQuantError.unsupportedDimension(vector.count)
+        }
+
+        var padded = vector
+        if vector.count < TurboQuantLayout.supportedDimension {
+            padded.append(contentsOf: repeatElement(0, count: TurboQuantLayout.supportedDimension - vector.count))
+        }
+
+        let rotations = planarRotationCoefficients(
+            pairCount: TurboQuantLayout.supportedDimension / 2,
+            seed: seed
+        )
+        for pairIndex in 0..<rotations.count {
+            let base = pairIndex * 2
+            let x = padded[base]
+            let y = padded[base + 1]
+            let (c, s) = rotations[pairIndex]
+            padded[base] = (c * x) - (s * y)
+            padded[base + 1] = (s * x) + (c * y)
+        }
+        return padded
+    }
+
+    public static func inversePlanarRotate(_ vector: [Float], seed: UInt64) throws -> [Float] {
+        guard vector.count == TurboQuantLayout.supportedDimension else {
+            throw TurboQuantError.unsupportedDimension(vector.count)
+        }
+
+        var recovered = vector
+        let rotations = planarRotationCoefficients(
+            pairCount: TurboQuantLayout.supportedDimension / 2,
+            seed: seed
+        )
+        for pairIndex in 0..<rotations.count {
+            let base = pairIndex * 2
+            let x = recovered[base]
+            let y = recovered[base + 1]
+            let (c, s) = rotations[pairIndex]
+            recovered[base] = (c * x) + (s * y)
+            recovered[base + 1] = (-s * x) + (c * y)
+        }
+        return recovered
+    }
+
+    private static func planarRotationCoefficients(pairCount: Int, seed: UInt64) -> [(Float, Float)] {
+        var generator = SplitMix64(state: seed)
+        return (0..<pairCount).map { _ in
+            let unit = Double(generator.next()) / Double(UInt64.max)
+            let angle = Float(unit * (Double.pi * 2))
+            return (cos(angle), sin(angle))
+        }
+    }
+
     static func hadamardInPlace(_ values: inout [Float]) {
         var butterflyWidth = 1
         while butterflyWidth < values.count {
@@ -908,7 +987,11 @@ public enum TurboQuantReferenceEncoder {
         }
 
         let normalized = vector.map { $0 / rowNorm }
-        let rotated = try TurboQuantTransform.randomizedHadamard(normalized, seed: rotationSeed)
+        let rotated = try rotatedVector(
+            normalized,
+            preset: preset,
+            seed: rotationSeed
+        )
         let regularBook = try TurboQuantCodebooks.forBits(descriptor.regularBits)
         let highBook = try TurboQuantCodebooks.forBits(descriptor.highPrecisionBits)
         let outlierMask = topKMask(
@@ -929,7 +1012,7 @@ public enum TurboQuantReferenceEncoder {
             reconstructedRotated[index] = book.centroid(for: code)
         }
 
-        let usesResidualPath = descriptor.highPrecisionChannelCount > 0 || descriptor.highPrecisionBits != descriptor.regularBits
+        let usesResidualPath = usesResidualPath(for: preset, descriptor: descriptor)
         if !usesResidualPath {
             let reconstructedNorm = sqrt(reconstructedRotated.reduce(Float.zero) { $0 + ($1 * $1) })
             let correctedNorm = reconstructedNorm > 0 ? (rowNorm / reconstructedNorm) : rowNorm
@@ -949,8 +1032,9 @@ public enum TurboQuantReferenceEncoder {
             )
         }
 
-        let mseApproximation = try TurboQuantTransform.inverseRandomizedHadamard(
+        let mseApproximation = try inverseRotatedVector(
             reconstructedRotated,
+            preset: preset,
             seed: rotationSeed
         )
         let residual = zip(normalized, mseApproximation).map(-)
@@ -1018,10 +1102,15 @@ public enum TurboQuantReferenceEncoder {
             return book.centroid(for: code)
         }
 
-        let mseApproximation = try TurboQuantTransform.inverseRandomizedHadamard(
+        let mseApproximation = try inverseRotatedVector(
             reconstructedRotated,
+            preset: encoded.preset,
             seed: rotationSeed
         )
+
+        guard usesResidualPath(for: encoded.preset, descriptor: descriptor) else {
+            return Array(mseApproximation.prefix(encoded.dimension)).map { $0 * encoded.rowNorm }
+        }
 
         let residualSigns = BitPacker.unpackBooleans(encoded.residualSigns, count: paddedCount)
         let residualDirection = residualSigns.map { $0 ? 1.0 as Float : -1.0 }
@@ -1210,7 +1299,11 @@ public enum TurboQuantReferenceEncoder {
             preset: runtimeRow.preset,
             layout: layout
         )
-        let qRot = try TurboQuantTransform.randomizedHadamard(query, seed: rotationSeed)
+        let qRot = try rotatedVector(
+            query,
+            preset: runtimeRow.preset,
+            seed: rotationSeed
+        )
         let qResidual = try TurboQuantTransform.randomizedHadamard(query, seed: residualSeed)
 
         var mseDot: Float = 0
@@ -1222,14 +1315,19 @@ public enum TurboQuantReferenceEncoder {
             residualDot += qResidual[dim] * (residualSigns[dim] ? 1 : -1)
         }
 
-        let score = runtimeRow.rowNorm
-            * (mseDot + (TurboQuantTransform.qjlScale * residualWeight * runtimeRow.residualNorm * residualDot))
-            * scale
+        let residualContribution: Float
+        if usesResidualPath(for: runtimeRow.preset, descriptor: descriptor) {
+            residualContribution = TurboQuantTransform.qjlScale * residualWeight * runtimeRow.residualNorm * residualDot
+        } else {
+            residualContribution = 0
+        }
+
+        let score = runtimeRow.rowNorm * (mseDot + residualContribution) * scale
         return TurboQuantScoreTerms(
             mseDot: mseDot,
-            residualDot: residualDot,
+            residualDot: usesResidualPath(for: runtimeRow.preset, descriptor: descriptor) ? residualDot : 0,
             rowNorm: runtimeRow.rowNorm,
-            residualNorm: runtimeRow.residualNorm,
+            residualNorm: usesResidualPath(for: runtimeRow.preset, descriptor: descriptor) ? runtimeRow.residualNorm : 0,
             score: score
         )
     }
@@ -1250,6 +1348,40 @@ public enum TurboQuantReferenceEncoder {
             residualSeed: residualSeed,
             scale: scale
         ).score
+    }
+
+    private static func rotatedVector(
+        _ vector: [Float],
+        preset: TurboQuantPreset,
+        seed: UInt64
+    ) throws -> [Float] {
+        switch preset.rotationKind {
+        case .randomizedHadamard:
+            return try TurboQuantTransform.randomizedHadamard(vector, seed: seed)
+        case .planar:
+            return try TurboQuantTransform.planarRotate(vector, seed: seed)
+        }
+    }
+
+    private static func inverseRotatedVector(
+        _ vector: [Float],
+        preset: TurboQuantPreset,
+        seed: UInt64
+    ) throws -> [Float] {
+        switch preset.rotationKind {
+        case .randomizedHadamard:
+            return try TurboQuantTransform.inverseRandomizedHadamard(vector, seed: seed)
+        case .planar:
+            return try TurboQuantTransform.inversePlanarRotate(vector, seed: seed)
+        }
+    }
+
+    private static func usesResidualPath(
+        for preset: TurboQuantPreset,
+        descriptor: TurboQuantPresetDescriptor
+    ) -> Bool {
+        guard preset.rotationKind == .randomizedHadamard else { return false }
+        return descriptor.highPrecisionChannelCount > 0 || descriptor.highPrecisionBits != descriptor.regularBits
     }
 }
 
@@ -1347,7 +1479,7 @@ enum BitPacker {
         layout: TurboQuantLayout
     ) throws -> [UInt32] {
         switch preset {
-        case .turbo2, .turbo3, .turbo4, .balanced, .balanced64, .balanced96, .fiveBit, .sixBit, .sevenBit, .aggressive, .aggressive64:
+        case .turbo2, .turbo3, .planar3, .turbo4, .balanced, .balanced64, .balanced96, .fiveBit, .sixBit, .sevenBit, .aggressive, .aggressive64:
             return try packCodes(
                 codes,
                 outlierMask: outlierMask,
@@ -1367,7 +1499,7 @@ enum BitPacker {
         layout: TurboQuantLayout
     ) throws -> [UInt8] {
         switch preset {
-        case .turbo2, .turbo3, .turbo4, .balanced, .balanced64, .balanced96, .fiveBit, .sixBit, .sevenBit, .aggressive, .aggressive64:
+        case .turbo2, .turbo3, .planar3, .turbo4, .balanced, .balanced64, .balanced96, .fiveBit, .sixBit, .sevenBit, .aggressive, .aggressive64:
             return try unpackCodes(
                 words,
                 count: count,

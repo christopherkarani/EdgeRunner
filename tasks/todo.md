@@ -1,5 +1,35 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current RotorQuant Prototype Plan
+
+- [x] Pull `scrya-com/rotorquant` locally and identify the narrowest K-only path that maps onto EdgeRunner’s existing KV/runtime structure
+- [x] Audit whether EdgeRunner’s split-buffer TurboQuant storage can host a block-diagonal rotation format without changing the whole attention stack
+- [x] Add a failing-first low-level regression for a `planar3`-style K-only row encode/decode or attention replay path
+- [x] Implement the smallest viable `RotorQuant K-only` prototype, preferring reuse of the existing TurboQuant test harnesses and per-layer KV routing
+- [x] Verify the new format with targeted CPU/Metal tests before any pinned-model rollout
+- [ ] Run pinned smoke and 128-token quality on the prototype path
+- [ ] Only run the 4096 benchmark if correctness materially improves
+- [ ] Record whether RotorQuant offers a viable replacement path in this repo or whether the backend mismatch is too large
+
+### RotorQuant Prototype Review
+
+- Pulled `scrya-com/rotorquant` into `/tmp/rotorquant` and audited `planarquant.py`, `fused_planar_attention.py`, and `rotor_fused.metal`.
+- The narrowest viable EdgeRunner port is `planar3` K-only, not full rotor algebra. It reuses the existing 3-bit packed row layout and swaps the transform from randomized Hadamard to deterministic pairwise planar rotations.
+- Added a reference-grade `planar3` preset in `TurboQuant.swift` with:
+  - deterministic pairwise planar rotate / inverse-rotate
+  - no residual side-channel
+  - the same row size as fixed `turbo3`
+- Added failing-first then passing reference tests in `TurboQuantReferenceTests.swift` covering:
+  - planar round-trip
+  - deterministic `planar3` encode
+  - runtime-row decode parity
+  - a pair-structured signal where `planar3` beats Hadamard `turbo3`
+- Verified:
+  - `swift test --filter TurboQuantReferenceTests` passes
+  - `swift test --skip-build --filter turbo3AttentionMatchesDecodedCPUReference` passes
+  - `swift test --skip-build --filter groupedTurbo3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext` passes
+- Current blocker for live rollout: the Metal quantize and attention path is still hard-wired to WHT/sign buffers in `TurboQuantKernel.swift`, `TurboQuant.metal`, and `LlamaLanguageModel.swift`. `planar3` is a reference prototype only until those kernels can consume planar rotation coefficients.
+
 ## Current Mixed-Policy Execution Plan
 
 - [x] Finish the per-layer KV runtime wiring in `LlamaLanguageModel` so `KVCache` layer storage kinds are respected during both prefill and decode
