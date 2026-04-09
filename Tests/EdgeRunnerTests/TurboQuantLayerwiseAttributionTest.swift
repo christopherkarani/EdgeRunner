@@ -367,12 +367,17 @@ struct TurboQuantLayerwiseAttributionTest {
             tokenIDs: traceTokens,
             compression: .disabled
         )
-        let turboTrace = try await loadTrace(
-            modelURL: modelURL,
-            tokenIDs: traceTokens,
-            compression: .turboquantV2,
-            captureDenseValueReference: true
-        )
+        let turboTrace: LlamaLayerwiseTrace? = if TurboQuantV2Contract.keyPreset(forLayer: 0, layerCount: 28) != nil,
+            TurboQuantV2Contract.valuePreset(forLayer: 0, layerCount: 28) != nil {
+            try await loadTrace(
+                modelURL: modelURL,
+                tokenIDs: traceTokens,
+                compression: .turboquantV2,
+                captureDenseValueReference: true
+            )
+        } else {
+            nil
+        }
 
         let query = inputs.queries[layerIndex]
         let queryRows = inputs.queryRows[layerIndex]
@@ -401,18 +406,19 @@ struct TurboQuantLayerwiseAttributionTest {
             query: query,
             keyRows: keyRows,
             valueRows: valueRows,
-            keyPreset: TurboQuantV2Contract.keyPreset
+            keyPreset: try #require(TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: 28))
         )
         let cpuTurboOutput = try turboGroupedAttentionCPU(
             query: query,
             keyRows: keyRows,
             valueRows: valueRows,
-            keyPreset: TurboQuantV2Contract.keyPreset,
-            valuePreset: TurboQuantV2Contract.valuePreset
+            keyPreset: try #require(TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: 28)),
+            valuePreset: try #require(TurboQuantV2Contract.valuePreset(forLayer: layerIndex, layerCount: 28))
         )
         let gpuTurboOutput = try turboGroupedAttentionGPU(
             device: device,
             commandQueue: commandQueue,
+            layerIndex: layerIndex,
             query: query,
             keyRows: keyRows,
             valueRows: valueRows
@@ -420,6 +426,7 @@ struct TurboQuantLayerwiseAttributionTest {
         let gpuTurboPrefillOutput = try turboGroupedAttentionPrefillGPU(
             device: device,
             commandQueue: commandQueue,
+            layerIndex: layerIndex,
             queryRows: queryRows,
             keyRows: keyRows,
             valueRows: valueRows
@@ -439,11 +446,18 @@ struct TurboQuantLayerwiseAttributionTest {
         let cpuGpuMSE = meanSquaredError(cpuTurboOutput, gpuTurboOutput)
         let cpuGpuPrefillMax = maxAbsoluteDelta(cpuTurboOutput, gpuTurboPrefillOutput)
         let cpuGpuPrefillMSE = meanSquaredError(cpuTurboOutput, gpuTurboPrefillOutput)
-        let runtimeReplayMax = maxAbsoluteDelta(turboTrace.attentionOutputStates[layerIndex], gpuTurboPrefillOutput)
-        let runtimeReplayMSE = meanSquaredError(turboTrace.attentionOutputStates[layerIndex], gpuTurboPrefillOutput)
-        let runtimeDenseRef = try #require(turboTrace.denseAttentionReferenceAttentionOutputStates)
-        let runtimeDenseRefMax = maxAbsoluteDelta(runtimeDenseRef[layerIndex], gpuTurboPrefillOutput)
-        let runtimeDenseRefMSE = meanSquaredError(runtimeDenseRef[layerIndex], gpuTurboPrefillOutput)
+        let runtimeReplayMax = turboTrace.map { maxAbsoluteDelta($0.attentionOutputStates[layerIndex], gpuTurboPrefillOutput) }
+        let runtimeReplayMSE = turboTrace.map { meanSquaredError($0.attentionOutputStates[layerIndex], gpuTurboPrefillOutput) }
+        let runtimeDenseRefMax = turboTrace.flatMap { trace in
+            trace.denseAttentionReferenceAttentionOutputStates.map {
+                maxAbsoluteDelta($0[layerIndex], gpuTurboPrefillOutput)
+            }
+        }
+        let runtimeDenseRefMSE = turboTrace.flatMap { trace in
+            trace.denseAttentionReferenceAttentionOutputStates.map {
+                meanSquaredError($0[layerIndex], gpuTurboPrefillOutput)
+            }
+        }
         let denseOutputMax = denseOutput.reduce(Float.zero) { max($0, abs($1)) }
 
         print("""
@@ -457,8 +471,8 @@ struct TurboQuantLayerwiseAttributionTest {
           query_all_tokens_max_abs=\(String(format: "%.6f", queryRowsMax))
           key_all_tokens_max_abs=\(String(format: "%.6f", keyRowsMax))
           value_all_tokens_max_abs=\(String(format: "%.6f", valueRowsMax))
-          key_preset=\(TurboQuantV2Contract.keyPreset.rawValue)
-          value_preset=\(TurboQuantV2Contract.valuePreset.rawValue)
+          key_preset=\(try #require(TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: 28)).rawValue)
+          value_preset=\(try #require(TurboQuantV2Contract.valuePreset(forLayer: layerIndex, layerCount: 28)).rawValue)
           cpu_vs_dense_max_abs=\(String(format: "%.6f", cpuDenseMax))
           cpu_vs_dense_mse=\(String(format: "%.6f", cpuDenseMSE))
           gpu_vs_dense_max_abs=\(String(format: "%.6f", gpuDenseMax))
@@ -473,10 +487,10 @@ struct TurboQuantLayerwiseAttributionTest {
           cpu_vs_gpu_mse=\(String(format: "%.6f", cpuGpuMSE))
           cpu_vs_gpu_prefill_max_abs=\(String(format: "%.6f", cpuGpuPrefillMax))
           cpu_vs_gpu_prefill_mse=\(String(format: "%.6f", cpuGpuPrefillMSE))
-          runtime_trace_vs_gpu_prefill_max_abs=\(String(format: "%.6f", runtimeReplayMax))
-          runtime_trace_vs_gpu_prefill_mse=\(String(format: "%.6f", runtimeReplayMSE))
-          runtime_dense_reference_vs_gpu_prefill_max_abs=\(String(format: "%.6f", runtimeDenseRefMax))
-          runtime_dense_reference_vs_gpu_prefill_mse=\(String(format: "%.6f", runtimeDenseRefMSE))
+          runtime_trace_vs_gpu_prefill_max_abs=\(runtimeReplayMax.map { String(format: "%.6f", $0) } ?? "n/a")
+          runtime_trace_vs_gpu_prefill_mse=\(runtimeReplayMSE.map { String(format: "%.6f", $0) } ?? "n/a")
+          runtime_dense_reference_vs_gpu_prefill_max_abs=\(runtimeDenseRefMax.map { String(format: "%.6f", $0) } ?? "n/a")
+          runtime_dense_reference_vs_gpu_prefill_mse=\(runtimeDenseRefMSE.map { String(format: "%.6f", $0) } ?? "n/a")
           dense_output_max_abs=\(String(format: "%.6f", denseOutputMax))
         """)
 
@@ -1050,6 +1064,7 @@ struct TurboQuantLayerwiseAttributionTest {
     private func turboGroupedAttentionGPU(
         device: MTLDevice,
         commandQueue: MTLCommandQueue,
+        layerIndex: Int,
         query: [Float],
         keyRows: [[Float]],
         valueRows: [[Float]]
@@ -1059,12 +1074,14 @@ struct TurboQuantLayerwiseAttributionTest {
         let kvSeqLen = keyRows.count
         let headDim = 128
         let kernel = try TurboQuantKernel(device: device)
+        let keyPreset = try #require(TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: 28))
+        let valuePreset = try #require(TurboQuantV2Contract.valuePreset(forLayer: layerIndex, layerCount: 28))
         let keyBuffers = try quantizeTurboRowsGPU(
             device: device,
             commandQueue: commandQueue,
             kernel: kernel,
             rows: keyRows,
-            preset: TurboQuantV2Contract.keyPreset,
+            preset: keyPreset,
             outlierSelection: TurboQuantV2Contract.keyOutlierSelection,
             signs: kernel.keySigns
         )
@@ -1073,7 +1090,7 @@ struct TurboQuantLayerwiseAttributionTest {
             commandQueue: commandQueue,
             kernel: kernel,
             rows: valueRows,
-            preset: TurboQuantV2Contract.valuePreset,
+            preset: valuePreset,
             outlierSelection: TurboQuantV2Contract.valueOutlierSelection,
             signs: kernel.valueSigns
         )
@@ -1082,10 +1099,10 @@ struct TurboQuantLayerwiseAttributionTest {
             length: query.count * MemoryLayout<Float>.stride
         )!
         let outputBuffer = device.makeBuffer(length: query.count * MemoryLayout<Float>.stride)!
-        let keyLayout = try TurboQuantV2Contract.makeKeyLayout()
-        let valueLayout = try TurboQuantV2Contract.makeValueLayout()
-        let keyDescriptor = TurboQuantV2Contract.keyPreset.descriptor
-        let valueDescriptor = TurboQuantV2Contract.valuePreset.descriptor
+        let keyLayout = try TurboQuantV2Contract.makeKeyLayout(layerIndex: layerIndex, layerCount: 28)
+        let valueLayout = try TurboQuantV2Contract.makeValueLayout(layerIndex: layerIndex, layerCount: 28)
+        let keyDescriptor = keyPreset.descriptor
+        let valueDescriptor = valuePreset.descriptor
         var params = TurboQuantAttentionParams(
             seqLen: 1,
             headDim: UInt32(headDim),
@@ -1152,6 +1169,7 @@ struct TurboQuantLayerwiseAttributionTest {
     private func turboGroupedAttentionPrefillGPU(
         device: MTLDevice,
         commandQueue: MTLCommandQueue,
+        layerIndex: Int,
         queryRows: [[Float]],
         keyRows: [[Float]],
         valueRows: [[Float]]
@@ -1162,12 +1180,14 @@ struct TurboQuantLayerwiseAttributionTest {
         let headDim = 128
         let qDim = numHeads * headDim
         let kernel = try TurboQuantKernel(device: device)
+        let keyPreset = try #require(TurboQuantV2Contract.keyPreset(forLayer: layerIndex, layerCount: 28))
+        let valuePreset = try #require(TurboQuantV2Contract.valuePreset(forLayer: layerIndex, layerCount: 28))
         let keyBuffers = try quantizeTurboRowsGPU(
             device: device,
             commandQueue: commandQueue,
             kernel: kernel,
             rows: keyRows,
-            preset: TurboQuantV2Contract.keyPreset,
+            preset: keyPreset,
             outlierSelection: TurboQuantV2Contract.keyOutlierSelection,
             signs: kernel.keySigns
         )
@@ -1176,7 +1196,7 @@ struct TurboQuantLayerwiseAttributionTest {
             commandQueue: commandQueue,
             kernel: kernel,
             rows: valueRows,
-            preset: TurboQuantV2Contract.valuePreset,
+            preset: valuePreset,
             outlierSelection: TurboQuantV2Contract.valueOutlierSelection,
             signs: kernel.valueSigns
         )
@@ -1186,10 +1206,10 @@ struct TurboQuantLayerwiseAttributionTest {
             length: flattenedQueries.count * MemoryLayout<Float>.stride
         )!
         let outputBuffer = device.makeBuffer(length: flattenedQueries.count * MemoryLayout<Float>.stride)!
-        let keyLayout = try TurboQuantV2Contract.makeKeyLayout()
-        let valueLayout = try TurboQuantV2Contract.makeValueLayout()
-        let keyDescriptor = TurboQuantV2Contract.keyPreset.descriptor
-        let valueDescriptor = TurboQuantV2Contract.valuePreset.descriptor
+        let keyLayout = try TurboQuantV2Contract.makeKeyLayout(layerIndex: layerIndex, layerCount: 28)
+        let valueLayout = try TurboQuantV2Contract.makeValueLayout(layerIndex: layerIndex, layerCount: 28)
+        let keyDescriptor = keyPreset.descriptor
+        let valueDescriptor = valuePreset.descriptor
         var params = TurboQuantAttentionParams(
             seqLen: UInt32(kvSeqLen),
             headDim: UInt32(headDim),

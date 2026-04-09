@@ -73,11 +73,16 @@
 ### Layer-2 Isolation Review
 
 - The pure-Turbo replay harness is not valid under the hybrid path because it assumes every replayed layer has a Turbo key preset. Running `replayLayer0AttentionOnRealActivations` with `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2` and `EDGERUNNER_TURBOQUANT_V2_REPLAY_LAYER=2` fails immediately with `unsupportedBitWidth(0)`, so hybrid isolation used the live layerwise input/trace tests instead.
+- The replay harness is now fixed to use the replayed layer’s TurboQuant layout instead of implicitly assuming layer 0. That let the real-activation replay run directly on hybrid layer 2 and layer 3.
 - Under `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2`, layer-2 live attention inputs are already divergent and still key-dominant:
   - `query_last_token_max_abs_delta=1.877228`
   - `query_all_tokens_max_abs_delta=1.877228`
   - `key_all_tokens_max_abs_delta=5.891502`
   - `value_all_tokens_max_abs_delta=0.088129`
+- Direct replay at hybrid layer 2 confirms that decoded keys are still the larger local error term on real activations:
+  - `exact_k_decoded_v_mse=0.001464`
+  - `decoded_k_exact_v_mse=0.005187`
+  - `cpu_vs_gpu_max_abs=0.000001`
 - Promoting layer 2 as well with `EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=3` improves smoke materially but still does not clear it:
   - `q8=[358, 2776, 264, 5458]`
   - `turboquant_v2=[358, 614, 264, 3491]`
@@ -97,6 +102,10 @@
   - `query_last_token_max_abs_delta=1.272955`
   - `key_all_tokens_max_abs_delta=3.167385`
   - `value_all_tokens_max_abs_delta=0.320142`
+- Direct replay at hybrid layer 3 still shows keys as the larger local approximation error, even though the absolute error is much smaller than layer 2:
+  - `exact_k_decoded_v_mse=0.000037`
+  - `decoded_k_exact_v_mse=0.000119`
+  - `cpu_vs_gpu_max_abs=0.000001`
 - Conclusion: deeper q8-key promotion remains a useful diagnostic, but it is no longer isolating a single residual Turbo key layer. The pinned blocker is now evidenced as compounded state divergence in the remaining pure-Turbo stack rather than a one-layer runtime bug that can be fixed by extending the fallback depth.
 
 - [ ] Rebaseline the active branch against checkpoint `93a72e980d51e9ae4f0fbc6220856db6873aa681`, the dirty local worktree, and the fork sources to identify the exact remaining pure-`turbo3/turbo3` semantic gap
