@@ -1,5 +1,40 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current Planar3/F16 Decode-Isolation Plan
+
+- [x] Make the real-activation replay harness support `turbo-K / dense-V` so the new path can be analyzed directly
+- [x] Re-run real-activation replay on the first guided-divergence layer of the `planar3 / f16 + deferred-prefill` path
+- [x] Record whether `decoded_k_exact_v` still dominates once prompt-time compounding is reduced
+- [x] If key fidelity remains dominant at the first decode-divergence layer, record that as the blocker and stop extending this path heuristically
+
+### Planar3/F16 Decode-Isolation Review
+
+- `TurboQuantLayerwiseAttributionTest.swift` now supports replaying `turbo-K / dense-V` layers directly instead of hard-requiring a compressed value preset.
+- Re-ran guided layerwise attribution on the explicit `planar3 / f16 + deferred-prefill` path:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 swift test --skip-build --filter TurboQuantLayerwiseAttributionTest/compareLayerwiseTraceAgainstQ8Baseline`
+  - result: `first_divergent_attention_output_layer=9`
+  - result: `first_divergent_attention_layer=8`
+  - result: `first_divergent_layer=8`
+  - result: `q8_argmax=3838`
+  - result: `turboquant_v2_argmax=3838`
+  - result: `max_abs_logit_delta=1.123308`
+- Replayed the first guided-divergence attention layer directly with dense values preserved:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 EDGERUNNER_TURBOQUANT_V2_REPLAY_LAYER=8 swift test --skip-build --filter TurboQuantLayerwiseAttributionTest/replayLayer0AttentionOnRealActivations`
+  - result: `exact_k_decoded_v_mse=0.000000`
+  - result: `decoded_k_exact_v_mse=0.041111`
+  - result: `runtime_trace_vs_gpu_decode_mse=0.041125`
+  - result: `cpu_vs_gpu_max_abs=0.000001`
+- Replayed the first guided-divergent attention-output layer directly:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 EDGERUNNER_TURBOQUANT_V2_REPLAY_LAYER=9 swift test --skip-build --filter TurboQuantLayerwiseAttributionTest/replayLayer0AttentionOnRealActivations`
+  - result: `exact_k_decoded_v_mse=0.000000`
+  - result: `decoded_k_exact_v_mse=0.225832`
+  - result: `runtime_trace_vs_gpu_decode_mse=0.225815`
+  - result: `cpu_vs_gpu_max_abs=0.000001`
+- Current conclusion:
+  - the dense-value replay harness now matches the live runtime path closely enough to use as blocker evidence
+  - once values are exact, the remaining approximation error is still entirely on the key side at both the first guided-divergence attention layer and the first guided-divergent attention-output layer
+  - this path is blocked by decode-time planar3 key fidelity, so continuing heuristic rollout tuning is not justified
+
 ## Current Planar3/F16 Deferred-Prefill Plan
 
 - [x] Port a source-backed `planar3 / f16` experiment path instead of continuing `planar3 / turbo3` tuning
