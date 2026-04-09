@@ -336,6 +336,8 @@ public final class KVCache: Sendable {
             for kvHead in 0..<numKVHeads {
                 let rowIndex = tokenIndex * numKVHeads + kvHead
                 switch keyStorageKinds[layer] {
+                case .dense:
+                    keys.append(contentsOf: decodeDenseF16Row(from: try denseBuffer(layer: layer, kind: .key), rowIndex: rowIndex))
                 case .q8_0:
                     keys.append(contentsOf: decodeQ8Row(from: try denseBuffer(layer: layer, kind: .key), rowIndex: rowIndex))
                 case let .turboQuant(preset, layout):
@@ -350,11 +352,11 @@ public final class KVCache: Sendable {
                         rotationSeed: TurboQuantSeeds.keyRotation,
                         residualSeed: TurboQuantSeeds.keyResidual
                     ))
-                case .dense:
-                    throw KVCacheError.precisionMismatch
                 }
 
                 switch valueStorageKinds[layer] {
+                case .dense:
+                    values.append(contentsOf: decodeDenseF16Row(from: try denseBuffer(layer: layer, kind: .value), rowIndex: rowIndex))
                 case .q8_0:
                     values.append(contentsOf: decodeQ8Row(from: try denseBuffer(layer: layer, kind: .value), rowIndex: rowIndex))
                 case let .turboQuant(preset, layout):
@@ -370,8 +372,6 @@ public final class KVCache: Sendable {
                         rotationSeed: TurboQuantSeeds.valueRotation,
                         residualSeed: TurboQuantSeeds.valueResidual
                     ))
-                case .dense:
-                    throw KVCacheError.precisionMismatch
                 }
             }
         }
@@ -553,6 +553,8 @@ public final class KVCache: Sendable {
         headDim: Int
     ) throws -> LayerStorageKind {
         switch cacheType {
+        case .dense:
+            return .dense
         case .q8_0:
             guard headDim % Self.q8BlockElementCount == 0 else {
                 throw KVCacheError.unsupportedStorage
@@ -580,7 +582,15 @@ public final class KVCache: Sendable {
     ) throws -> (denseBuffer: MetalBufferHandle?, turboBuffer: TurboQuantLayerStorage?) {
         switch layerStorage {
         case .dense:
-            guard let bytesPerElement = precision.denseBytesPerElement else {
+            let bytesPerElement: Int
+            switch precision {
+            case .float32:
+                bytesPerElement = MemoryLayout<Float>.stride
+            case .float16, .turboquantV2, .turboQuantBalanced, .turboQuantAggressive:
+                bytesPerElement = MemoryLayout<Float16>.stride
+            case .float8:
+                bytesPerElement = 1
+            case .q8_0:
                 throw KVCacheError.unsupportedStorage
             }
             let bytesPerToken = elementsPerToken * bytesPerElement
@@ -705,6 +715,13 @@ public final class KVCache: Sendable {
             let end = start + headDim
             let rowIndex = writePos * numKVHeads + kvHead
             switch keyStorageKinds[layer] {
+            case .dense:
+                let keyBase = try denseBuffer(layer: layer, kind: .key).contents().assumingMemoryBound(to: UInt8.self)
+                encodeDenseF16Row(
+                    source: keys,
+                    sourceOffset: start,
+                    destination: keyBase.advanced(by: rowIndex * headDim * MemoryLayout<Float16>.stride)
+                )
             case .q8_0:
                 let keyBase = try denseBuffer(layer: layer, kind: .key).contents().assumingMemoryBound(to: UInt8.self)
                 encodeQ8Row(
@@ -721,11 +738,16 @@ public final class KVCache: Sendable {
                     residualSeed: TurboQuantSeeds.keyResidual
                 )
                 writeTurboQuantRow(encodedKey, to: try turboBuffer(layer: layer, kind: .key), layout: layout, rowIndex: rowIndex)
-            case .dense:
-                throw KVCacheError.precisionMismatch
             }
 
             switch valueStorageKinds[layer] {
+            case .dense:
+                let valueBase = try denseBuffer(layer: layer, kind: .value).contents().assumingMemoryBound(to: UInt8.self)
+                encodeDenseF16Row(
+                    source: values,
+                    sourceOffset: start,
+                    destination: valueBase.advanced(by: rowIndex * headDim * MemoryLayout<Float16>.stride)
+                )
             case .q8_0:
                 let valueBase = try denseBuffer(layer: layer, kind: .value).contents().assumingMemoryBound(to: UInt8.self)
                 encodeQ8Row(
@@ -742,8 +764,6 @@ public final class KVCache: Sendable {
                     residualSeed: TurboQuantSeeds.valueResidual
                 )
                 writeTurboQuantRow(encodedValue, to: try turboBuffer(layer: layer, kind: .value), layout: layout, rowIndex: rowIndex)
-            case .dense:
-                throw KVCacheError.precisionMismatch
             }
         }
     }
@@ -828,6 +848,19 @@ public final class KVCache: Sendable {
         }
 
         return values
+    }
+
+    private func encodeDenseF16Row(source: [Float], sourceOffset: Int, destination: UnsafeMutablePointer<UInt8>) {
+        let destinationF16 = UnsafeMutableRawPointer(destination).assumingMemoryBound(to: Float16.self)
+        for lane in 0..<headDim {
+            destinationF16[lane] = Float16(source[sourceOffset + lane])
+        }
+    }
+
+    private func decodeDenseF16Row(from buffer: MetalBufferHandle, rowIndex: Int) -> [Float] {
+        let rowStride = headDim * MemoryLayout<Float16>.stride
+        let rowStart = UnsafeRawPointer(buffer.contents().advanced(by: rowIndex * rowStride)).assumingMemoryBound(to: Float16.self)
+        return (0..<headDim).map { Float(rowStart[$0]) }
     }
 
     private func writeTurboQuantRow(

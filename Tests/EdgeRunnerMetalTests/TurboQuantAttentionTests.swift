@@ -114,6 +114,15 @@ struct TurboQuantAttentionTests {
             #expect(TurboQuantV2Contract.keyPreset(forLayer: 0, layerCount: 28) == nil)
             #expect(TurboQuantV2Contract.valuePreset(forLayer: 0, layerCount: 28) == .turbo3)
         }
+
+        try withEnv("EDGERUNNER_TURBOQUANT_KEY_PRESET", value: "planar3") {
+            try withEnv("EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE", value: "dense") {
+                #expect(TurboQuantV2Contract.keyCacheType(forLayer: 0, layerCount: 28) == .turbo3)
+                #expect(TurboQuantV2Contract.valueCacheType(forLayer: 0, layerCount: 28) == .dense)
+                #expect(TurboQuantV2Contract.keyPreset(forLayer: 0, layerCount: 28) == .planar3)
+                #expect(TurboQuantV2Contract.valuePreset(forLayer: 0, layerCount: 28) == nil)
+            }
+        }
     }
 
     @Test
@@ -150,6 +159,27 @@ struct TurboQuantAttentionTests {
             #expect(try cache.turboQuantKeyMetalBuffers(layer: 1) != nil)
             #expect(try cache.valueMetalBuffer(layer: 1) == nil)
             #expect(try cache.turboQuantValueMetalBuffers(layer: 1) != nil)
+        }
+    }
+
+    @Test
+    func planar3DenseValueOverrideAllocatesTurboKeyDenseValueStorage() throws {
+        try withEnv("EDGERUNNER_TURBOQUANT_KEY_PRESET", value: "planar3") {
+            try withEnv("EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE", value: "dense") {
+                let cache = try KVCache(
+                    device: device,
+                    maxSeqLen: 8,
+                    numLayers: 2,
+                    numKVHeads: 1,
+                    headDim: 128,
+                    precision: .turboquantV2
+                )
+
+                #expect(try cache.keyMetalBuffer(layer: 0) == nil)
+                #expect(try cache.turboQuantKeyMetalBuffers(layer: 0) != nil)
+                #expect(try cache.valueMetalBuffer(layer: 0) != nil)
+                #expect(try cache.turboQuantValueMetalBuffers(layer: 0) == nil)
+            }
         }
     }
 
@@ -887,6 +917,90 @@ struct TurboQuantAttentionTests {
     @Test func planar3DecodeScoreTermsMatchCPUReference() throws {
         try withEnv("EDGERUNNER_TURBOQUANT_KEY_PRESET", value: "planar3") {
             try verifyDecodeScoreTermsMatchCPUReference()
+        }
+    }
+
+    @Test func planar3DecodeAttentionWithDenseValueBufferMatchesCPUReference() throws {
+        let keyPreset: TurboQuantPreset = .planar3
+        let cache = try KVCache(
+            device: device,
+            maxSeqLen: 8,
+            numLayers: 1,
+            numKVHeads: 1,
+            headDim: 128,
+            precision: .turboquantV2
+        )
+
+        let keyRows = (0..<3).map { row in makeSignal(phase: Float(row) * 0.21) }
+        let valueRows = (0..<3).map { row in makeSignal(phase: 0.63 + Float(row) * 0.17) }
+        for index in keyRows.indices {
+            try cache.append(layer: 0, keys: keyRows[index], values: valueRows[index])
+        }
+
+        let maybeKeyBuffers = try cache.turboQuantKeyMetalBuffers(layer: 0)
+        let keyBuffers = try #require(maybeKeyBuffers)
+        let denseValueBuffer = device.makeBuffer(
+            bytes: valueRows.flatMap { $0.map(Float16.init) },
+            length: valueRows.count * 128 * MemoryLayout<Float16>.stride
+        )!
+
+        let q = makeSignal(phase: 0.09)
+        let expected = try cpuTurboQuantAttention(
+            q: q,
+            keyRows: keyRows,
+            decodedValues: valueRows.flatMap { $0 },
+            keyPreset: keyPreset
+        )
+
+        let kernel = try TurboQuantKernel(device: device)
+        let qBuffer = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride)!
+        let outputBuffer = device.makeBuffer(length: q.count * MemoryLayout<Float>.stride)!
+        var params = try makeAttentionParams(
+            seqLen: 1,
+            kvSeqLen: keyRows.count,
+            qOffset: keyRows.count - 1,
+            keyPreset: keyPreset,
+            valuePreset: .turbo3
+        )
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            Issue.record("Failed to create Metal command buffer")
+            return
+        }
+
+        encoder.setComputePipelineState(kernel.decodeAttentionDenseVPipeline)
+        encoder.setBuffer(qBuffer, offset: 0, index: 0)
+        encoder.setBuffer(keyBuffers.codes, offset: 0, index: 1)
+        encoder.setBuffer(keyBuffers.residualSigns, offset: 0, index: 2)
+        encoder.setBuffer(keyBuffers.outlierMask, offset: 0, index: 3)
+        encoder.setBuffer(keyBuffers.metadata, offset: 0, index: 4)
+        encoder.setBuffer(denseValueBuffer, offset: 0, index: 5)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 6)
+        encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 7)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 8)
+        encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 9)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: GQAKernel.blockSize, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let gpu = Array(
+            UnsafeBufferPointer(
+                start: outputBuffer.contents().bindMemory(to: Float.self, capacity: 128),
+                count: 128
+            )
+        )
+
+        for (lhs, rhs) in zip(gpu, expected) {
+            #expect(abs(lhs - rhs) < 0.25)
         }
     }
 

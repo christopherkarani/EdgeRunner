@@ -1,5 +1,51 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current Planar3/F16 Deferred-Prefill Plan
+
+- [x] Port a source-backed `planar3 / f16` experiment path instead of continuing `planar3 / turbo3` tuning
+- [x] Apply deferred exact-attention semantics to every prefill phase, including prefix-reuse suffix-prefill, not only `startPosition == 0`
+- [x] Add failing-first tests for dense value-cache routing plus `turbo-K / dense-V` attention dispatch
+- [x] Implement the narrowest runtime/KV-cache changes needed for explicit `f16` value storage under `turboquantV2`
+- [x] Re-run low-level tests, then rerun pinned smoke and 128-token quality on the explicit `planar3 / f16` path
+- [x] If the path still fails, record whether the remaining blocker is decode-time `planar3` key fidelity even after deferred-prefill and exact values
+
+### Planar3/F16 Deferred-Prefill Review
+
+- Added an explicit `dense` cache type override so `EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense` yields a real `planar3 / f16`-style value cache under `turboquantV2`.
+- `KVCache` now supports dense `Float16` rows inside the `turboquantV2` runtime, so mixed `turbo-K / dense-V` storage is no longer just a contract-level fiction.
+- `LlamaLanguageModel` now keeps a deferred exact-prefill planar3 key shadow cache and uses it with dense `Float16` values during prefill attention, while decode still uses quantized planar3 keys.
+- Added targeted tests:
+  - `planar3DenseValueOverrideAllocatesTurboKeyDenseValueStorage`
+  - `planar3DecodeAttentionWithDenseValueBufferMatchesCPUReference`
+- Verified low-level coverage:
+  - `swift test --filter TurboQuantAttentionTests/contractPresetOverridesFollowEnvironment` passes
+  - `swift test --skip-build --filter TurboQuantAttentionTests/planar3DenseValueOverrideAllocatesTurboKeyDenseValueStorage` passes
+  - `swift test --skip-build --filter TurboQuantAttentionTests/planar3DecodeAttentionWithDenseValueBufferMatchesCPUReference` passes
+  - `swift test --skip-build --filter TurboQuantAttentionTests/groupedPlanar3PrefillAttentionMatchesDecodedCPUReferenceAtLongContext` passes
+- Pinned smoke improved materially but still fails:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --filter turboQuantV2GreedyTraceMatchesQ8Baseline`
+  - result: `q8=[358, 2776, 264, 5458]`
+  - result: `turboquant_v2=[358, 386, 0, 42]`
+- 128-token quality still fails:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_QUALITY=1 EDGERUNNER_TURBOQUANT_V2_QUALITY_PROMPT_LENS=128 swift test --skip-build --filter compareTurboQuantV2AgainstQ8BaselineAcrossContexts`
+  - result: `divergence_steps=7`
+  - result: `first_divergence_step=1`
+  - result: `max_abs_logit_delta=22.5455`
+  - result: `q8_generated=[1479, 198, 3838, 374, 279, 374, 279, 897]`
+  - result: `turboquant_v2_generated=[1479, 15, 198, 198, 198, 198, 198, 198]`
+- Guided layerwise attribution on the same path shows prompt-time behavior is much healthier even though unguided decode still fails:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE=dense EDGERUNNER_TURBOQUANT_DEFER_EXACT_PREFILL=1 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 swift test --skip-build --filter compareLayerwiseTraceAgainstQ8Baseline`
+  - result: `first_divergent_attention_output_layer=9`
+  - result: `first_divergent_attention_layer=8`
+  - result: `first_divergent_layer=8`
+  - result: `q8_argmax=3838`
+  - result: `turboquant_v2_argmax=3838`
+  - result: `max_abs_logit_delta=1.123308`
+- Current conclusion:
+  - the source-backed `planar3 / f16 + deferred-prefill` experiment fixes a real part of the problem and pushes the first guided divergence deep into the stack
+  - it still fails the real pinned smoke and quality gates
+  - the remaining blocker is decode-time planar3 key fidelity on the pinned model, not missing prefill lifecycle or dense-value support
+
 ## Current Planar3 Attribution Plan
 
 - [x] Re-run the real-activation attribution probes under `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3`

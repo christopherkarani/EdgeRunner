@@ -1,6 +1,8 @@
 import Foundation
 
 private enum TurboQuantEnvOverrides {
+    static let keyCacheType = "EDGERUNNER_TURBOQUANT_KEY_CACHE_TYPE"
+    static let valueCacheType = "EDGERUNNER_TURBOQUANT_VALUE_CACHE_TYPE"
     static let keyType = "EDGERUNNER_TURBOQUANT_KEY_TYPE"
     static let valueType = "EDGERUNNER_TURBOQUANT_VALUE_TYPE"
     static let earlyQ8KeyLayers = "EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS"
@@ -190,6 +192,7 @@ public enum TurboQuantFixedType: String, Sendable, Equatable, Codable {
 }
 
 public enum TurboQuantLayerCacheType: String, Sendable, Equatable, Codable {
+    case dense
     case q8_0
     case turbo2
     case turbo3
@@ -208,6 +211,8 @@ public enum TurboQuantLayerCacheType: String, Sendable, Equatable, Codable {
 
     public var fixedType: TurboQuantFixedType? {
         switch self {
+        case .dense:
+            return nil
         case .q8_0:
             return nil
         case .turbo2:
@@ -425,7 +430,10 @@ public enum TurboQuantV2Contract {
     }
 
     public static func keyCacheType(forLayer layerIndex: Int, layerCount: Int) -> TurboQuantLayerCacheType {
-        let baseType = TurboQuantLayerCacheType(fixedType: keyType)
+        let baseType = cacheTypeOverride(
+            envKey: TurboQuantEnvOverrides.keyCacheType,
+            defaultType: TurboQuantLayerCacheType(fixedType: keyType)
+        )
         let earlyQ8Layers = earlyQ8LayerCount()
         if earlyQ8Layers > 0, layerIndex < min(earlyQ8Layers, layerCount), baseType.isTurbo {
             return .q8_0
@@ -447,7 +455,10 @@ public enum TurboQuantV2Contract {
     }
 
     public static func valueCacheType(forLayer layerIndex: Int, layerCount: Int) -> TurboQuantLayerCacheType {
-        let baseType = TurboQuantLayerCacheType(fixedType: valueType)
+        let baseType = cacheTypeOverride(
+            envKey: TurboQuantEnvOverrides.valueCacheType,
+            defaultType: TurboQuantLayerCacheType(fixedType: valueType)
+        )
         let earlyQ8Layers = earlyQ8LayerCount()
         if earlyQ8Layers > 0, layerIndex < min(earlyQ8Layers, layerCount), baseType.isTurbo {
             return .q8_0
@@ -576,6 +587,29 @@ public enum TurboQuantV2Contract {
             return defaultType
         }
         return type
+    }
+
+    private static func cacheTypeOverride(
+        envKey: String,
+        defaultType: TurboQuantLayerCacheType
+    ) -> TurboQuantLayerCacheType {
+        guard let rawValue = ProcessInfo.processInfo.environment[envKey]?.lowercased() else {
+            return defaultType
+        }
+        switch rawValue {
+        case "dense", "f16":
+            return .dense
+        case "q8_0":
+            return .q8_0
+        case "turbo2":
+            return .turbo2
+        case "turbo3":
+            return .turbo3
+        case "turbo4":
+            return .turbo4
+        default:
+            return defaultType
+        }
     }
 
     private static func valuePolicyOverride(
