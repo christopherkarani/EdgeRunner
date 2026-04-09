@@ -932,6 +932,13 @@ public enum TurboQuantTransform {
         return recovered
     }
 
+    public static func planarRotationBuffer(seed: UInt64) -> [Float] {
+        planarRotationCoefficients(
+            pairCount: TurboQuantLayout.supportedDimension / 2,
+            seed: seed
+        ).flatMap { [$0.0, $0.1] }
+    }
+
     private static func planarRotationCoefficients(pairCount: Int, seed: UInt64) -> [(Float, Float)] {
         var generator = SplitMix64(state: seed)
         return (0..<pairCount).map { _ in

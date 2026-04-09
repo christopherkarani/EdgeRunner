@@ -686,6 +686,36 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         turboQuantKeyPreset(for: layerIndex) == .aggressive && turboQuantValuePreset(for: layerIndex) == .aggressive
     }
 
+    private func turboQuantQuantizeReservedBits(
+        preset: TurboQuantPreset,
+        enableInnerQScaling: Bool,
+        preferQuantizationBenefitSelection: Bool
+    ) -> UInt32 {
+        var reserved: UInt32 = preferQuantizationBenefitSelection ? 1 : 0
+        if enableInnerQScaling {
+            reserved |= 2
+        }
+        if preset == .planar3 {
+            reserved |= 4
+        }
+        return reserved
+    }
+
+    private func turboQuantAttentionReservedBits(
+        keyPreset: TurboQuantPreset,
+        valuePreset: TurboQuantPreset,
+        enableInnerQScaling: Bool
+    ) -> UInt32 {
+        var reserved: UInt32 = enableInnerQScaling ? 1 : 0
+        if keyPreset == .planar3 {
+            reserved |= 2
+        }
+        if valuePreset == .planar3 {
+            reserved |= 4
+        }
+        return reserved
+    }
+
     private func layerUsesTurboQuantKey(_ layerIndex: Int) -> Bool {
         guard usesTurboQuantV2 else { return false }
         return turboQuantKCaches[layerIndex] != nil
@@ -1684,6 +1714,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         sourceRowStride: Int,
         destinationRowBase: Int,
         destination: TurboQuantMetalBuffers,
+        rotationBuffer: MTLBuffer,
         signs: TurboQuantSignBuffers,
         preset: TurboQuantPreset,
         layout: TurboQuantLayout,
@@ -1704,7 +1735,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             regularBits: UInt32(descriptor.regularBits),
             highPrecisionBits: UInt32(descriptor.highPrecisionBits),
             highPrecisionChannelCount: UInt32(descriptor.highPrecisionChannelCount),
-            reserved: (preferQuantizationBenefitSelection ? 1 : 0) | (enableInnerQScaling ? 2 : 0)
+            reserved: turboQuantQuantizeReservedBits(
+                preset: preset,
+                enableInnerQScaling: enableInnerQScaling,
+                preferQuantizationBenefitSelection: preferQuantizationBenefitSelection
+            )
         )
 
         let quantizePipeline = isAggressiveSmallRowPath
@@ -1717,7 +1752,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         encoder.setBuffer(destination.outlierMask, offset: 0, index: 3)
         encoder.setBuffer(destination.metadata, offset: 0, index: 4)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantQuantizeParams>.stride, index: 5)
-        encoder.setBuffer(signs.rotation, offset: 0, index: 6)
+        encoder.setBuffer(rotationBuffer, offset: 0, index: 6)
         encoder.setBuffer(signs.residual, offset: 0, index: 7)
         encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 8)
         if isAggressiveSmallRowPath {
@@ -1880,7 +1915,11 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             valueCodeWordsPerRow: UInt32(valueLayout.codeWordsPerRow),
             valueRegularBits: UInt32(valueDescriptor.regularBits),
             valueHighPrecisionBits: UInt32(valueDescriptor.highPrecisionBits),
-            reserved: enableInnerQScaling ? 1 : 0
+            reserved: turboQuantAttentionReservedBits(
+                keyPreset: keyPreset,
+                valuePreset: valuePreset,
+                enableInnerQScaling: enableInnerQScaling
+            )
         )
 
         let isSingleTokenDecode = seqLen == 1
@@ -1902,7 +1941,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             encoder.setBuffer(denseValueBuffer, offset: 0, index: 5)
             encoder.setBuffer(outputBuffer, offset: outputBufferOffsetBytes, index: 6)
             encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 7)
-            encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 8)
+            encoder.setBuffer(turboQuantKernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 8)
             encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 9)
             encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 10)
         } else {
@@ -1926,9 +1965,9 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 8)
             encoder.setBuffer(outputBuffer, offset: outputBufferOffsetBytes, index: 9)
             encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-            encoder.setBuffer(turboQuantKernel.keySigns.rotation, offset: 0, index: 11)
+            encoder.setBuffer(turboQuantKernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
             encoder.setBuffer(turboQuantKernel.keySigns.residual, offset: 0, index: 12)
-            encoder.setBuffer(turboQuantKernel.valueSigns.rotation, offset: 0, index: 13)
+            encoder.setBuffer(turboQuantKernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
             encoder.setBuffer(turboQuantKernel.valueSigns.residual, offset: 0, index: 14)
             encoder.setBuffer(innerQScaleInvBuffer, offset: 0, index: 15)
         }
@@ -2014,7 +2053,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         encoder.setBuffer(valueBuffers.metadata, offset: 0, index: 5)
         encoder.setBuffer(outputBuffer, offset: outputBufferOffsetBytes, index: 6)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 7)
-        encoder.setBuffer(turboQuantKernel.valueSigns.rotation, offset: 0, index: 8)
+        encoder.setBuffer(turboQuantKernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 8)
         encoder.setBuffer(turboQuantKernel.valueSigns.residual, offset: 0, index: 9)
 
         if useSingleTokenDecodePipeline {
@@ -2553,6 +2592,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         sourceRowStride: headDim,
                         destinationRowBase: startPosition * numKVHeads,
                         destination: turboVCache!,
+                        rotationBuffer: turboQuantKernel!.valueRotationBuffer(for: turboQuantValuePreset(for: layerIndex)!),
                         signs: turboQuantKernel!.valueSigns,
                         preset: turboQuantValuePreset(for: layerIndex)!,
                         layout: turboQuantValueLayout(for: layerIndex)!,
@@ -2694,6 +2734,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         sourceRowStride: headDim,
                         destinationRowBase: startPosition * numKVHeads,
                         destination: turboKCache!,
+                        rotationBuffer: turboQuantKernel!.keyRotationBuffer(for: turboQuantKeyPreset(for: layerIndex)!),
                         signs: turboQuantKernel!.keySigns,
                         preset: turboQuantKeyPreset(for: layerIndex)!,
                         layout: turboQuantKeyLayout(for: layerIndex)!,
@@ -3493,6 +3534,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     sourceRowStride: headDim,
                     destinationRowBase: currentPos * numKVHeads,
                     destination: turboVCache!,
+                    rotationBuffer: turboQuantKernel!.valueRotationBuffer(for: turboQuantValuePreset(for: layerIndex)!),
                     signs: turboQuantKernel!.valueSigns,
                     preset: turboQuantValuePreset(for: layerIndex)!,
                     layout: turboQuantValueLayout(for: layerIndex)!,
@@ -3627,6 +3669,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                         sourceRowStride: headDim,
                         destinationRowBase: currentPos * numKVHeads,
                         destination: turboKCache!,
+                        rotationBuffer: turboQuantKernel!.keyRotationBuffer(for: turboQuantKeyPreset(for: layerIndex)!),
                         signs: turboQuantKernel!.keySigns,
                         preset: turboQuantKeyPreset(for: layerIndex)!,
                         layout: turboQuantKeyLayout(for: layerIndex)!,

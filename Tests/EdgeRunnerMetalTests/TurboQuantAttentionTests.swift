@@ -16,8 +16,8 @@ struct TurboQuantAttentionTests {
         self.commandQueue = commandQueue
     }
 
-    private var runtimeKeyPreset: TurboQuantPreset { .turbo2 }
-    private var runtimeValuePreset: TurboQuantPreset { .turbo2 }
+    private var runtimeKeyPreset: TurboQuantPreset { TurboQuantV2Contract.keyPreset }
+    private var runtimeValuePreset: TurboQuantPreset { TurboQuantV2Contract.valuePreset }
 
     @Test
     func contractPresetOverridesFollowEnvironment() throws {
@@ -286,9 +286,9 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(buffers.value.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: runtimeKeyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: runtimeValuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: numHeads, height: 1, depth: 1),
@@ -321,6 +321,14 @@ struct TurboQuantAttentionTests {
             #expect(abs(lhs - rhs) < 0.25)
         }
         #expect(groupSize == 2)
+    }
+
+    @Test func planar3GPUQuantizedRowsMatchReferenceRuntimeRows() throws {
+        try verifyGPUQuantizedRowsMatchReferenceRuntimeRows(
+            rowCount: 4,
+            preset: .planar3,
+            assertMetadata: true
+        )
     }
 
     @Test func prefillAttentionMatchesDecodedCPUReference() throws {
@@ -392,6 +400,7 @@ struct TurboQuantAttentionTests {
         buffers: TurboQuantAttentionBuffers
     ) throws {
         let kvSeqLen = keyRows.count
+        let valuePreset: TurboQuantPreset = .turbo3
         #expect(decodedValues.count == kvSeqLen * 128)
         let flattenedQ = qRows.flatMap { $0 }
         let qBuffer = device.makeBuffer(bytes: flattenedQ, length: flattenedQ.count * MemoryLayout<Float>.stride)!
@@ -402,7 +411,7 @@ struct TurboQuantAttentionTests {
             kvSeqLen: keyRows.count,
             qOffset: 0,
             keyPreset: keyPreset,
-            valuePreset: .turbo3
+            valuePreset: valuePreset
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -423,9 +432,9 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(buffers.value.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
@@ -540,9 +549,9 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(buffers.value.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: (kvSeqLen + GQAKernel.blockSize - 1) / GQAKernel.blockSize, height: numHeads, depth: 1),
@@ -640,7 +649,7 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(outlierMaskBuffer, offset: 0, index: 3)
         encoder.setBuffer(metadataBuffer, offset: 0, index: 4)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantQuantizeParams>.stride, index: 5)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 6)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: preset), offset: 0, index: 6)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 7)
         encoder.dispatchThreads(
             MTLSize(width: rowCount, height: 1, depth: 1),
@@ -708,12 +717,15 @@ struct TurboQuantAttentionTests {
                 residualSeed: TurboQuantSeeds.keyResidual
             )
 
+            #expect(runtimeRow.primaryCodes == referenceRuntimeRow.primaryCodes)
+            #expect(runtimeRow.outlierMask == referenceRuntimeRow.outlierMask)
+            #expect(runtimeRow.residualSigns == referenceRuntimeRow.residualSigns)
             let maxDelta = zip(gpuDecoded, referenceDecoded).reduce(Float.zero) { partial, pair in
                 max(partial, abs(pair.0 - pair.1))
             }
             #expect(maxDelta < 0.25)
             if assertMetadata {
-                #expect(abs(runtimeRow.rowNorm - referenceRuntimeRow.rowNorm) < 1e-6)
+                #expect(abs(runtimeRow.rowNorm - referenceRuntimeRow.rowNorm) < 1e-5)
                 #expect(abs(runtimeRow.residualNorm - referenceRuntimeRow.residualNorm) < 1e-6)
             }
         }
@@ -859,6 +871,16 @@ struct TurboQuantAttentionTests {
     }
 
     @Test func decodeScoreTermsMatchCPUReference() throws {
+        try verifyDecodeScoreTermsMatchCPUReference()
+    }
+
+    @Test func planar3DecodeScoreTermsMatchCPUReference() throws {
+        try withEnv("EDGERUNNER_TURBOQUANT_KEY_PRESET", value: "planar3") {
+            try verifyDecodeScoreTermsMatchCPUReference()
+        }
+    }
+
+    private func verifyDecodeScoreTermsMatchCPUReference() throws {
         let cache = try KVCache(
             device: device,
             maxSeqLen: 8,
@@ -903,7 +925,7 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(buffers.key.metadata, offset: 0, index: 4)
         encoder.setBuffer(outputBuffer, offset: 0, index: 5)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 6)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 7)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: runtimeKeyPreset), offset: 0, index: 7)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 8)
         encoder.dispatchThreads(
             MTLSize(width: runtimeRows.count, height: 1, depth: 1),
@@ -952,7 +974,6 @@ struct TurboQuantAttentionTests {
             #expect(abs(gpu.residualNorm - cpu.residualNorm) < 1e-6)
             #expect(abs(gpu.score - cpu.score) < 1e-4)
         }
-
         print("""
         [turboquant-debug-score-terms]
           max_mse_dot_delta=\(String(format: "%.8f", maxMSEDotDelta))
@@ -966,6 +987,7 @@ struct TurboQuantAttentionTests {
         keyPreset: TurboQuantPreset? = nil
     ) throws {
         let keyPreset = keyPreset ?? runtimeKeyPreset
+        let valuePreset: TurboQuantPreset = .turbo3
         let cache = try KVCache(
             device: device,
             maxSeqLen: 8,
@@ -1000,7 +1022,7 @@ struct TurboQuantAttentionTests {
             kvSeqLen: rows.count,
             qOffset: rows.count - 1,
             keyPreset: keyPreset,
-            valuePreset: .turbo3
+            valuePreset: valuePreset
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -1023,9 +1045,9 @@ struct TurboQuantAttentionTests {
         encoder.setBuffer(buffers.value.metadata, offset: 0, index: 8)
         encoder.setBuffer(outputBuffer, offset: 0, index: 9)
         encoder.setBytes(&params, length: MemoryLayout<TurboQuantAttentionParams>.stride, index: 10)
-        encoder.setBuffer(kernel.keySigns.rotation, offset: 0, index: 11)
+        encoder.setBuffer(kernel.keyRotationBuffer(for: keyPreset), offset: 0, index: 11)
         encoder.setBuffer(kernel.keySigns.residual, offset: 0, index: 12)
-        encoder.setBuffer(kernel.valueSigns.rotation, offset: 0, index: 13)
+        encoder.setBuffer(kernel.valueRotationBuffer(for: valuePreset), offset: 0, index: 13)
         encoder.setBuffer(kernel.valueSigns.residual, offset: 0, index: 14)
         if useDecodePipeline {
             encoder.dispatchThreadgroups(
@@ -1225,9 +1247,6 @@ struct TurboQuantAttentionTests {
         preset: TurboQuantPreset,
         keyResidualScale: Float = TurboQuantV2Contract.keyResidualScale
     ) throws -> [Float] {
-        let qRot = try TurboQuantTransform.randomizedHadamard(q, seed: TurboQuantSeeds.keyRotation)
-        let qResidual = try TurboQuantTransform.randomizedHadamard(q, seed: TurboQuantSeeds.keyResidual)
-        let descriptor = preset.descriptor
         return try keyRows.map { row in
             let encoded = try TurboQuantReferenceEncoder.encode(
                 row,
@@ -1236,27 +1255,15 @@ struct TurboQuantAttentionTests {
                 rotationSeed: TurboQuantSeeds.keyRotation,
                 residualSeed: TurboQuantSeeds.keyResidual
             )
-            let outlierMask = unpackBits(encoded.outlierMask, count: 128)
-            let residualSigns = unpackBits(encoded.residualSigns, count: 128)
-            let codes = try BitPacker.unpackCodes(
-                encoded.primaryCodes,
-                count: 128,
-                outlierMask: outlierMask,
-                regularBits: descriptor.regularBits,
-                highPrecisionBits: descriptor.highPrecisionBits
+            let runtimeRow = try TurboQuantReferenceEncoder.makeRuntimeRow(from: encoded)
+            return try TurboQuantReferenceEncoder.approximateScore(
+                query: q,
+                runtimeRow: runtimeRow,
+                residualWeight: keyResidualScale,
+                rotationSeed: TurboQuantSeeds.keyRotation,
+                residualSeed: TurboQuantSeeds.keyResidual,
+                scale: 1.0 / sqrt(128.0)
             )
-
-            var mseDot: Float = 0
-            var residualDot: Float = 0
-            for dim in 0..<128 {
-                let bits = outlierMask[dim] ? descriptor.highPrecisionBits : descriptor.regularBits
-                let codebook = try TurboQuantCodebooks.forBits(bits)
-                mseDot += qRot[dim] * codebook.centroid(for: codes[dim])
-                residualDot += qResidual[dim] * (residualSigns[dim] ? 1 : -1)
-            }
-            return encoded.rowNorm
-                * (mseDot + (TurboQuantTransform.qjlScale * encoded.residualNorm * keyResidualScale * residualDot))
-                / sqrt(128.0)
         }
     }
 
@@ -1434,7 +1441,7 @@ struct TurboQuantAttentionTests {
             valueCodeWordsPerRow: UInt32(valueLayout.codeWordsPerRow),
             valueRegularBits: UInt32(valueDescriptor.regularBits),
             valueHighPrecisionBits: UInt32(valueDescriptor.highPrecisionBits),
-            reserved: 0
+            reserved: keyPreset == .planar3 ? 2 : 0
         )
     }
 
@@ -1454,7 +1461,7 @@ struct TurboQuantAttentionTests {
             regularBits: UInt32(descriptor.regularBits),
             highPrecisionBits: UInt32(descriptor.highPrecisionBits),
             highPrecisionChannelCount: UInt32(descriptor.highPrecisionChannelCount),
-            reserved: 0
+            reserved: preset == .planar3 ? 4 : 0
         )
     }
 

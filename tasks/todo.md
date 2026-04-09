@@ -1,5 +1,54 @@
 # TurboQuant Pinned Rollout Execution
 
+## Current Planar3 Live-Path Unblock Plan
+
+- [x] Audit the smallest live runtime surface needed to carry planar rotation coefficients for keys without changing value-side behavior
+- [x] Reproduce the current grouped decode failure on its own and determine whether it is part of the planar3 blocker or an unrelated pre-existing regression
+- [x] Add failing-first low-level tests for live `planar3` key quantize and/or score replay that do not require full pinned rollout
+- [x] Implement planar coefficient buffers and preset-aware key transform selection in the Metal quantize path
+- [x] Implement preset-aware key query transform and key decode-score path in the Metal attention kernels
+- [x] Wire `planar3` through `LlamaLanguageModel` only for the explicit experiment path; do not change the default pinned contract yet
+- [x] Verify targeted low-level tests and re-run the grouped decode check
+- [x] Run pinned smoke on the explicit planar3 path
+- [ ] Only benchmark 4096 if correctness materially improves
+- [x] Record whether live planar3 actually changes the pinned-model blocker or whether deeper backend differences remain
+
+### Planar3 Live-Path Review
+
+- Fixed a real stale-test blocker first: `groupedDecodeAttentionMatchesDecodedCPUReference` was still hardcoded to `turbo2` test params even though the active contract is `turbo3/turbo3`. The builder now follows `TurboQuantV2Contract`.
+- Added failing-first live `planar3` regressions in `TurboQuantAttentionTests.swift`:
+  - `planar3GPUQuantizedRowsMatchReferenceRuntimeRows`
+  - `planar3DecodeScoreTermsMatchCPUReference`
+- Plumbed deterministic planar rotation coefficients through the real runtime:
+  - `TurboQuantKernel` now owns key/value planar rotation buffers
+  - `LlamaLanguageModel` now passes preset-aware rotation buffers into quantize and attention dispatches
+  - `TurboQuant.metal` now supports planar forward/inverse rotation in the generic quantize, prefill, decode, and debug-score kernels
+- Verified the live low-level path:
+  - `swift test --filter groupedDecodeAttentionMatchesDecodedCPUReference` passes
+  - `swift test --filter planar3GPUQuantizedRowsMatchReferenceRuntimeRows` passes
+  - `swift test --filter planar3DecodeScoreTermsMatchCPUReference` passes
+  - score-term parity on the live decode path is now effectively exact:
+    - `max_mse_dot_delta=0.00000095`
+    - `max_residual_dot_delta=0.00000000`
+    - `max_score_delta=0.00000048`
+- Pinned smoke with explicit `planar3` keys is still red:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --skip-build --filter turboQuantV2GreedyTraceMatchesQ8Baseline`
+  - result: `q8=[358, 2776, 264, 5458]`
+  - result: `turboquant_v2=[220, 220, 15, 220]`
+- Bounded selective check with early q8 keys plus `planar3` deeper in the stack is also still red:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_TURBOQUANT_EARLY_Q8_KEY_LAYERS=2 EDGERUNNER_RUN_TURBOQUANT_V2_SMOKE=1 swift test --skip-build --filter turboQuantV2GreedyTraceMatchesQ8Baseline`
+  - result: `turboquant_v2=[220, 1210, 220, 220]`
+- Layerwise attribution on the explicit `planar3` path still shows first divergence at layer-0 attention output:
+  - command: `EDGERUNNER_TURBOQUANT_KEY_PRESET=planar3 EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE=1 swift test --skip-build --filter compareLayerwiseTraceAgainstQ8Baseline`
+  - result: `first_divergent_attention_output_layer=0`
+  - result: `first_divergent_attention_output_layer_max_abs_delta=0.969264`
+  - result: `q8_argmax=3838`
+  - result: `turboquant_v2_argmax=198`
+  - result: `max_abs_logit_delta=10.540858`
+- Current conclusion:
+  - the live `planar3` runtime path is no longer blocked by missing Metal/Swift plumbing
+  - the remaining blocker is still pinned-model attention fidelity, not a broken planar runtime implementation
+
 ## Current RotorQuant Prototype Plan
 
 - [x] Pull `scrya-com/rotorquant` locally and identify the narrowest K-only path that maps onto EdgeRunner’s existing KV/runtime structure

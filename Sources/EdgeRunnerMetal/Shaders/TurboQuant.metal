@@ -423,6 +423,86 @@ inline void tq_inverse_randomized_hadamard_parallel(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+inline void tq_forward_planar(thread float *values, device const float *rotationCoefficients) {
+    for (uint pair = 0; pair < 64; ++pair) {
+        uint base = pair * 2u;
+        float x = values[base];
+        float y = values[base + 1u];
+        float c = rotationCoefficients[base];
+        float s = rotationCoefficients[base + 1u];
+        values[base] = (c * x) - (s * y);
+        values[base + 1u] = (s * x) + (c * y);
+    }
+}
+
+inline void tq_inverse_planar(thread float *values, device const float *rotationCoefficients) {
+    for (uint pair = 0; pair < 64; ++pair) {
+        uint base = pair * 2u;
+        float x = values[base];
+        float y = values[base + 1u];
+        float c = rotationCoefficients[base];
+        float s = rotationCoefficients[base + 1u];
+        values[base] = (c * x) + (s * y);
+        values[base + 1u] = (-s * x) + (c * y);
+    }
+}
+
+inline void tq_forward_planar(threadgroup float *values, device const float *rotationCoefficients) {
+    for (uint pair = 0; pair < 64; ++pair) {
+        uint base = pair * 2u;
+        float x = values[base];
+        float y = values[base + 1u];
+        float c = rotationCoefficients[base];
+        float s = rotationCoefficients[base + 1u];
+        values[base] = (c * x) - (s * y);
+        values[base + 1u] = (s * x) + (c * y);
+    }
+}
+
+inline void tq_inverse_planar(threadgroup float *values, device const float *rotationCoefficients) {
+    for (uint pair = 0; pair < 64; ++pair) {
+        uint base = pair * 2u;
+        float x = values[base];
+        float y = values[base + 1u];
+        float c = rotationCoefficients[base];
+        float s = rotationCoefficients[base + 1u];
+        values[base] = (c * x) + (s * y);
+        values[base + 1u] = (-s * x) + (c * y);
+    }
+}
+
+inline void tq_forward_rotation(thread float *values, device const float *rotationData, bool usePlanar) {
+    if (usePlanar) {
+        tq_forward_planar(values, rotationData);
+    } else {
+        tq_forward_randomized_hadamard(values, rotationData);
+    }
+}
+
+inline void tq_inverse_rotation(thread float *values, device const float *rotationData, bool usePlanar) {
+    if (usePlanar) {
+        tq_inverse_planar(values, rotationData);
+    } else {
+        tq_inverse_randomized_hadamard(values, rotationData);
+    }
+}
+
+inline void tq_forward_rotation(threadgroup float *values, device const float *rotationData, bool usePlanar) {
+    if (usePlanar) {
+        tq_forward_planar(values, rotationData);
+    } else {
+        tq_forward_randomized_hadamard(values, rotationData);
+    }
+}
+
+inline void tq_inverse_rotation(threadgroup float *values, device const float *rotationData, bool usePlanar) {
+    if (usePlanar) {
+        tq_inverse_planar(values, rotationData);
+    } else {
+        tq_inverse_randomized_hadamard(values, rotationData);
+    }
+}
+
 inline void tq_select_top32_bitonic_mask(
     threadgroup const float *rotated,
     threadgroup uint *maskWords,
@@ -493,6 +573,7 @@ kernel void turboquant_quantize_rows(
 ) {
     if (rowIndex >= params.rowCount) { return; }
     const bool useInnerQScaling = ((params.reserved >> 1) & 1u) != 0u;
+    const bool usePlanarRotation = ((params.reserved >> 2) & 1u) != 0u;
 
     thread float normalized[128];
     thread float rotated[128];
@@ -547,7 +628,7 @@ kernel void turboquant_quantize_rows(
         normalized[dim] /= rowNorm;
         rotated[dim] = normalized[dim];
     }
-    tq_forward_randomized_hadamard(rotated, rotationSigns);
+    tq_forward_rotation(rotated, rotationSigns, usePlanarRotation);
 
     bool useQuantizationBenefit = (params.reserved & 1u) != 0u;
     for (uint pick = 0; pick < params.highPrecisionChannelCount; ++pick) {
@@ -602,7 +683,7 @@ kernel void turboquant_quantize_rows(
         return;
     }
 
-    tq_inverse_randomized_hadamard(reconstructed, rotationSigns);
+    tq_inverse_rotation(reconstructed, rotationSigns, usePlanarRotation);
     float residualNormSq = 0.0;
     for (uint dim = 0; dim < 128; ++dim) {
         residual[dim] = normalized[dim] - reconstructed[dim];
@@ -1399,6 +1480,9 @@ kernel void gqa_attention_turboquant(
     const uint blockSize = params.qBlockSize;
     const uint qStride = params.numHeads * params.headDim;
     const bool useInnerQScaling = (params.reserved & 1u) != 0u;
+    const bool usePlanarKeyRotation = (params.reserved & 2u) != 0u;
+    const bool usePlanarValueRotation = (params.reserved & 4u) != 0u;
+    const bool useKeyResidualPath = params.keyResidualScale != 0.0f;
 
     uint qRow = qBlockIndex * blockSize + local_id.x;
     bool activeQ = (qRow < seqLen);
@@ -1430,8 +1514,10 @@ kernel void gqa_attention_turboquant(
             outputMSE[dim] = 0.0;
             outputResidual[dim] = 0.0;
         }
-        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
-        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        tq_forward_rotation(qRotation, keyRotationSigns, usePlanarKeyRotation);
+        if (useKeyResidualPath) {
+            tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1476,7 +1562,9 @@ kernel void gqa_attention_turboquant(
                         sidebandOffset
                     );
                     mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
-                    residualDot += qResidual[dim] * (tq_get_bit(signRow, dim) == 1u ? 1.0 : -1.0);
+                    if (useKeyResidualPath) {
+                        residualDot += qResidual[dim] * (tq_get_bit(signRow, dim) == 1u ? 1.0 : -1.0);
+                    }
                 }
 
                 float dot = rowNorm * (
@@ -1542,7 +1630,7 @@ kernel void gqa_attention_turboquant(
         threadgroup float *outputMSE = outputMSEScratch + local_id.x * 128;
         threadgroup float *outputResidual = outputResidualScratch + local_id.x * 128;
 
-        tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
+        tq_inverse_rotation(outputMSE, valueRotationSigns, usePlanarValueRotation);
         tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
 
         if (useInnerQScaling && innerQScaleInv != nullptr) {
@@ -1725,6 +1813,9 @@ kernel void gqa_attention_turboquant_decode(
 ) {
     if (headIndex >= params.numHeads) { return; }
     const bool useInnerQScaling = (params.reserved & 1u) != 0u;
+    const bool usePlanarKeyRotation = (params.reserved & 2u) != 0u;
+    const bool usePlanarValueRotation = (params.reserved & 4u) != 0u;
+    const bool useKeyResidualPath = params.keyResidualScale != 0.0f;
 
     constexpr uint kDecodeThreads = 16;
     const uint kvHeadIndex = headIndex / params.groupSize;
@@ -1769,8 +1860,10 @@ kernel void gqa_attention_turboquant_decode(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (lane == 0) {
-        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
-        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        tq_forward_rotation(qRotation, keyRotationSigns, usePlanarKeyRotation);
+        if (useKeyResidualPath) {
+            tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1800,7 +1893,9 @@ kernel void gqa_attention_turboquant_decode(
                 keySidebandOffset
             );
             mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
-            residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+            if (useKeyResidualPath) {
+                residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+            }
         }
         float score = keyRowNorm * (
             mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot
@@ -1887,7 +1982,7 @@ kernel void gqa_attention_turboquant_decode(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (lane == 0) {
-        tq_inverse_randomized_hadamard(outputMSE, valueRotationSigns);
+        tq_inverse_rotation(outputMSE, valueRotationSigns, usePlanarValueRotation);
         tq_inverse_randomized_hadamard(outputResidual, valueResidualProjectionSigns);
         if (useInnerQScaling && innerQScaleInv != nullptr) {
             for (uint dim = 0; dim < 128; ++dim) {
@@ -2080,6 +2175,8 @@ kernel void turboquant_debug_decode_score_terms(
     uint kvPos = gid.x;
     uint headIndex = gid.y;
     if (headIndex >= params.numHeads) { return; }
+    const bool usePlanarKeyRotation = (params.reserved & 2u) != 0u;
+    const bool useKeyResidualPath = params.keyResidualScale != 0.0f;
 
     const uint kvSeqLen = params.kvSeqLen;
     const uint kvLimit = params.causal != 0 ? min(kvSeqLen, params.qOffset + 1) : kvSeqLen;
@@ -2096,8 +2193,10 @@ kernel void turboquant_debug_decode_score_terms(
         qRotation[dim] = value;
         qResidual[dim] = value;
     }
-    tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
-    tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+    tq_forward_rotation(qRotation, keyRotationSigns, usePlanarKeyRotation);
+    if (useKeyResidualPath) {
+        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+    }
 
     device const uint *kCodeRow = KCodes + rowIndex * params.codeWordsPerRow;
     device const uint *kSignRow = KResidualSigns + rowIndex * 4;
@@ -2120,7 +2219,9 @@ kernel void turboquant_debug_decode_score_terms(
             keySidebandOffset
         );
         mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
-        residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+        if (useKeyResidualPath) {
+            residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+        }
     }
 
     float score = keyRowNorm * (
@@ -2130,9 +2231,9 @@ kernel void turboquant_debug_decode_score_terms(
     uint outputIndex = headIndex * kvLimit + kvPos;
     scoreTerms[outputIndex] = {
         mseDot,
-        residualDot,
+        useKeyResidualPath ? residualDot : 0.0f,
         keyRowNorm,
-        keyResidualNorm,
+        useKeyResidualPath ? keyResidualNorm : 0.0f,
         score
     };
 }
@@ -2152,6 +2253,8 @@ kernel void gqa_attention_turboquant_decode_f16v(
     uint lane [[thread_position_in_threadgroup]]
 ) {
     if (headIndex >= params.numHeads) { return; }
+    const bool usePlanarKeyRotation = (params.reserved & 2u) != 0u;
+    const bool useKeyResidualPath = params.keyResidualScale != 0.0f;
 
     constexpr uint kDecodeThreads = 16;
     const uint kvHeadIndex = headIndex / params.groupSize;
@@ -2189,8 +2292,10 @@ kernel void gqa_attention_turboquant_decode_f16v(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (lane == 0) {
-        tq_forward_randomized_hadamard(qRotation, keyRotationSigns);
-        tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        tq_forward_rotation(qRotation, keyRotationSigns, usePlanarKeyRotation);
+        if (useKeyResidualPath) {
+            tq_forward_randomized_hadamard(qResidual, keyResidualProjectionSigns);
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -2220,7 +2325,9 @@ kernel void gqa_attention_turboquant_decode_f16v(
                 keySidebandOffset
             );
             mseDot += qRotation[dim] * tq_centroid(useHighPrecision ? params.highPrecisionBits : params.regularBits, code);
-            residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+            if (useKeyResidualPath) {
+                residualDot += qResidual[dim] * (tq_get_bit(kSignRow, dim) == 1u ? 1.0 : -1.0);
+            }
         }
         float score = keyRowNorm * (
             mseDot + TURBOQUANT_QJL_SCALE * params.keyResidualScale * keyResidualNorm * residualDot

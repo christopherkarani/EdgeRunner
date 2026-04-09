@@ -10,7 +10,7 @@ public struct TurboQuantAttentionBuffers: @unchecked Sendable {
     public let value: TurboQuantMetalBuffers
 }
 
-public final class TurboQuantKernel: Sendable {
+public final class TurboQuantKernel: @unchecked Sendable {
     public let quantizePipeline: MTLComputePipelineState
     public let quantizeAggressiveSmallPipeline: MTLComputePipelineState
     public let quantizeAggressiveSmallKPipeline: MTLComputePipelineState
@@ -27,6 +27,8 @@ public final class TurboQuantKernel: Sendable {
 
     public let keySigns: TurboQuantSignBuffers
     public let valueSigns: TurboQuantSignBuffers
+    public let keyPlanarRotation: MTLBuffer
+    public let valuePlanarRotation: MTLBuffer
 
     public init(device: MTLDevice) throws {
         let registry = try KernelRegistry(device: device)
@@ -48,10 +50,18 @@ public final class TurboQuantKernel: Sendable {
             rotationSeed: TurboQuantSeeds.keyRotation,
             residualSeed: TurboQuantSeeds.keyResidual
         )
+        self.keyPlanarRotation = try Self.makePlanarRotationBuffer(
+            device: device,
+            seed: TurboQuantSeeds.keyRotation
+        )
         self.valueSigns = try Self.makeSignBuffers(
             device: device,
             rotationSeed: TurboQuantSeeds.valueRotation,
             residualSeed: TurboQuantSeeds.valueResidual
+        )
+        self.valuePlanarRotation = try Self.makePlanarRotationBuffer(
+            device: device,
+            seed: TurboQuantSeeds.valueRotation
         )
     }
 
@@ -78,5 +88,25 @@ public final class TurboQuantKernel: Sendable {
             throw GQAError.encodingFailed
         }
         return buffer
+    }
+
+    private static func makePlanarRotationBuffer(device: MTLDevice, seed: UInt64) throws -> MTLBuffer {
+        let coefficients = TurboQuantTransform.planarRotationBuffer(seed: seed)
+        guard let buffer = device.makeBuffer(
+            bytes: coefficients,
+            length: coefficients.count * MemoryLayout<Float>.stride,
+            options: [.storageModeShared, .hazardTrackingModeUntracked]
+        ) else {
+            throw GQAError.encodingFailed
+        }
+        return buffer
+    }
+
+    public func keyRotationBuffer(for preset: TurboQuantPreset) -> MTLBuffer {
+        preset == .planar3 ? keyPlanarRotation : keySigns.rotation
+    }
+
+    public func valueRotationBuffer(for preset: TurboQuantPreset) -> MTLBuffer {
+        preset == .planar3 ? valuePlanarRotation : valueSigns.rotation
     }
 }
