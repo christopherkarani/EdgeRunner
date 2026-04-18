@@ -128,4 +128,62 @@ struct KVCacheGemma4Tests {
             #expect(params.maxSeqLen == 2048)
         }
     }
+
+    @Test("Rejects TurboQuant compression with heterogeneous layout")
+    func rejectsTurboQuantOnHeterogeneous() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        let config = try Gemma4ModelConfig(
+            metadata: Gemma4ModelConfigTests.makeReferenceMetadata()
+        )
+        for compression in [KVCacheCompression.turboQuantBalanced, .turboQuantAggressive] {
+            do {
+                _ = try KVCache.gemma4(
+                    device: device,
+                    config: config,
+                    maxSeqLen: 128,
+                    compression: compression
+                )
+                Issue.record("Expected unsupportedStorage for \(compression)")
+            } catch let error as KVCacheError {
+                if case .unsupportedStorage = error {
+                    continue
+                }
+                Issue.record("Expected unsupportedStorage, got \(error) for \(compression)")
+            }
+        }
+    }
+
+    @Test("append/retrieve use per-layer headDim (global layer writes 512-element vectors)")
+    func perLayerElementsPerTokenMatchesHeadDim() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        let config = try Gemma4ModelConfig(
+            metadata: Gemma4ModelConfigTests.makeReferenceMetadata()
+        )
+        let cache = try KVCache.gemma4(device: device, config: config, maxSeqLen: 128)
+
+        // Sliding layer 0: headDim 256, expect 2 * 256 = 512 elements per token
+        #expect(cache.elementsPerToken(forLayer: 0) == 2 * 256)
+        // Global layer 5: headDim 512, expect 2 * 512 = 1024 elements per token
+        #expect(cache.elementsPerToken(forLayer: 5) == 2 * 512)
+        // Dense byte math: float32 stride = 4
+        #expect(cache.denseBytesPerToken(forLayer: 0) == 2 * 256 * 4)
+        #expect(cache.denseBytesPerToken(forLayer: 5) == 2 * 512 * 4)
+
+        // Round-trip append/retrieve on a global layer with 1024-element vectors
+        // succeeds (scalar elementsPerToken would have been 512 and tripped
+        // the precondition).
+        let globalElements = cache.elementsPerToken(forLayer: 5)
+        let keys = (0..<globalElements).map { Float($0) }
+        let values = (0..<globalElements).map { Float($0 + globalElements) }
+        try cache.append(layer: 5, keys: keys, values: values)
+        let (retrievedKeys, retrievedValues) = try cache.retrieve(layer: 5, asType: Float.self)
+        #expect(retrievedKeys == keys)
+        #expect(retrievedValues == values)
+    }
 }

@@ -108,13 +108,44 @@ public final class KVCache: Sendable {
         return valueBuffers[layer].rawValue
     }
 
-    private var elementsPerToken: Int {
+    /// Returns elements-per-token using the cache's dominant head_dim.
+    ///
+    /// For homogeneous caches (Llama, Qwen, Bonsai) this equals
+    /// `elementsPerToken(forLayer:)` for every layer. For heterogeneous
+    /// caches (Gemma 4) this reports the dominant head_dim and should not
+    /// be used for per-layer offset math — use
+    /// ``elementsPerToken(forLayer:)`` instead.
+    public var elementsPerToken: Int {
         numKVHeads * headDim
     }
 
-    private var denseBytesPerToken: Int? {
+    /// Returns dense-bytes-per-token using the cache's dominant head_dim.
+    ///
+    /// Same caveat as ``elementsPerToken`` — heterogeneous caches should
+    /// use ``denseBytesPerToken(forLayer:)``.
+    public var denseBytesPerToken: Int? {
         guard let bytesPerElement = precision.denseBytesPerElement else { return nil }
         return elementsPerToken * bytesPerElement
+    }
+
+    /// Returns per-token dense element count for the given layer.
+    ///
+    /// For heterogeneous caches (Gemma 4), `headDim` varies across layers
+    /// (sliding: 256, global: 512). For homogeneous caches every layer
+    /// returns the same value as ``elementsPerToken``.
+    public func elementsPerToken(forLayer layer: Int) -> Int {
+        precondition((0..<numLayers).contains(layer), "invalid layer \(layer)")
+        return numKVHeads * headDimByLayer[layer]
+    }
+
+    /// Returns per-token dense byte count for the given layer.
+    ///
+    /// Returns `nil` for TurboQuant storage (packed formats have no dense
+    /// bytes-per-token). For homogeneous caches every layer returns the
+    /// same value as ``denseBytesPerToken``.
+    public func denseBytesPerToken(forLayer layer: Int) -> Int? {
+        guard let bytesPerElement = precision.denseBytesPerElement else { return nil }
+        return elementsPerToken(forLayer: layer) * bytesPerElement
     }
 
     private var turboQuantRows: Int {
@@ -223,14 +254,19 @@ public final class KVCache: Sendable {
             throw KVCacheError.unsupportedStorage
         }
         // Validate KV-share map: source indices must be in range, point to
-        // a layer that owns its buffer, and match head_dim.
+        // a layer that owns its buffer, precede the sharing layer, and match
+        // head_dim.
         for (layer, source) in kvSourceLayers.enumerated() {
             guard (0..<numLayers).contains(source) else {
                 throw KVCacheError.unsupportedStorage
             }
-            // If a layer shares, its source must own (source == source index
-            // in its own row) so chains cannot form.
             if source != layer {
+                // Source must strictly precede this layer so buffer
+                // allocation is single-pass (no forward references).
+                guard source < layer else {
+                    throw KVCacheError.unsupportedStorage
+                }
+                // Source must own its own KV buffer so chains cannot form.
                 guard kvSourceLayers[source] == source else {
                     throw KVCacheError.unsupportedStorage
                 }
@@ -324,13 +360,17 @@ public final class KVCache: Sendable {
 
     public func append(layer: Int, keys: [Float], values: [Float]) throws {
         guard (0..<numLayers).contains(layer) else { throw KVCacheError.invalidLayer(layer) }
-        precondition(keys.count == elementsPerToken)
-        precondition(values.count == elementsPerToken)
+        let layerElements = elementsPerToken(forLayer: layer)
+        precondition(keys.count == layerElements)
+        precondition(values.count == layerElements)
 
         switch precision {
         case .float32:
             let writePos = nextWritePosition(for: layer)
-            let byteOffset = writePos * denseBytesPerToken!
+            guard let layerBytesPerToken = denseBytesPerToken(forLayer: layer) else {
+                throw KVCacheError.precisionMismatch
+            }
+            let byteOffset = writePos * layerBytesPerToken
 
             keys.withUnsafeBytes { bytes in
                 keyBuffers[layer].contents().advanced(by: byteOffset).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
@@ -356,11 +396,15 @@ public final class KVCache: Sendable {
     public func appendF16(layer: Int, keys: [Float16], values: [Float16]) throws {
         guard (0..<numLayers).contains(layer) else { throw KVCacheError.invalidLayer(layer) }
         guard precision == .float16 else { throw KVCacheError.precisionMismatch }
-        precondition(keys.count == elementsPerToken)
-        precondition(values.count == elementsPerToken)
+        let layerElements = elementsPerToken(forLayer: layer)
+        precondition(keys.count == layerElements)
+        precondition(values.count == layerElements)
 
         let writePos = nextWritePosition(for: layer)
-        let byteOffset = writePos * denseBytesPerToken!
+        guard let layerBytesPerToken = denseBytesPerToken(forLayer: layer) else {
+            throw KVCacheError.precisionMismatch
+        }
+        let byteOffset = writePos * layerBytesPerToken
 
         keys.withUnsafeBytes { bytes in
             keyBuffers[layer].contents().advanced(by: byteOffset).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
@@ -380,9 +424,10 @@ public final class KVCache: Sendable {
             return ([], [])
         }
 
-        let totalElements = currentLen * elementsPerToken
-        let keyPtr = keyBuffers[layer].contents().bindMemory(to: T.self, capacity: maxSeqLen * elementsPerToken)
-        let valuePtr = valueBuffers[layer].contents().bindMemory(to: T.self, capacity: maxSeqLen * elementsPerToken)
+        let layerElements = elementsPerToken(forLayer: layer)
+        let totalElements = currentLen * layerElements
+        let keyPtr = keyBuffers[layer].contents().bindMemory(to: T.self, capacity: maxSeqLen * layerElements)
+        let valuePtr = valueBuffers[layer].contents().bindMemory(to: T.self, capacity: maxSeqLen * layerElements)
 
         var keys: [T] = []
         var values: [T] = []
@@ -396,13 +441,13 @@ public final class KVCache: Sendable {
             let firstChunkTokens = maxSeqLen - state.writePos
             let secondChunkTokens = state.writePos
             if firstChunkTokens > 0 {
-                let start = state.writePos * elementsPerToken
-                let count = firstChunkTokens * elementsPerToken
+                let start = state.writePos * layerElements
+                let count = firstChunkTokens * layerElements
                 keys.append(contentsOf: UnsafeBufferPointer(start: keyPtr.advanced(by: start), count: count))
                 values.append(contentsOf: UnsafeBufferPointer(start: valuePtr.advanced(by: start), count: count))
             }
             if secondChunkTokens > 0 {
-                let count = secondChunkTokens * elementsPerToken
+                let count = secondChunkTokens * layerElements
                 keys.append(contentsOf: UnsafeBufferPointer(start: keyPtr, count: count))
                 values.append(contentsOf: UnsafeBufferPointer(start: valuePtr, count: count))
             }
@@ -423,10 +468,11 @@ public final class KVCache: Sendable {
 
         let keyStorage = turboQuantKeyBuffers[layer]
         let valueStorage = turboQuantValueBuffers[layer]
+        let layerElements = elementsPerToken(forLayer: layer)
         var keys: [Float] = []
         var values: [Float] = []
-        keys.reserveCapacity(currentLen * elementsPerToken)
-        values.reserveCapacity(currentLen * elementsPerToken)
+        keys.reserveCapacity(currentLen * layerElements)
+        values.reserveCapacity(currentLen * layerElements)
 
         let rowIndices = orderedRowIndices(for: state, currentLen: currentLen)
         for tokenIndex in rowIndices {

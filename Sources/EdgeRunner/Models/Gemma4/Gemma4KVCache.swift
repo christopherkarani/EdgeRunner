@@ -16,11 +16,15 @@ extension KVCache {
     ///   - config: Gemma 4 hyperparameters (expects
     ///       `numHiddenLayers == layerTypes.count`).
     ///   - maxSeqLen: Ring-buffer length (tokens) per layer.
-    ///   - compression: KV cache compression policy. Gemma 4 does not
-    ///       currently support TurboQuant — `automatic`/`turboQuant*` fall
-    ///       back to dense float32.
+    ///   - compression: KV cache compression policy. Gemma 4's heterogeneous
+    ///       KV layout does not yet support TurboQuant — requesting
+    ///       `turboQuantBalanced` or `turboQuantAggressive` throws
+    ///       ``KVCacheError/unsupportedStorage``. `disabled` and `automatic`
+    ///       use dense float32 storage.
     /// - Returns: A `KVCache` configured for Gemma 4's dual head_dim + KV
     ///     sharing layout.
+    /// - Throws: ``KVCacheError/unsupportedStorage`` when compression is
+    ///     `turboQuantBalanced` or `turboQuantAggressive`.
     public static func gemma4(
         device: MTLDevice,
         config: Gemma4ModelConfig,
@@ -51,18 +55,22 @@ extension KVCache {
             numKVHeads: config.numKeyValueHeads,
             headDimByLayer: headDimByLayer,
             kvSourceLayers: kvSourceLayers,
-            precision: Self.resolveGemma4Precision(compression)
+            precision: try Self.resolveGemma4Precision(compression)
         )
     }
 
     private static func resolveGemma4Precision(
         _ compression: KVCacheCompression
-    ) -> Precision {
+    ) throws -> Precision {
         switch compression {
-        case .disabled, .automatic, .turboQuantBalanced, .turboQuantAggressive:
-            // Gemma 4's heterogeneous KV layout does not yet support
-            // TurboQuant. All compression modes fall back to float32.
+        case .disabled, .automatic:
             return .float32
+        case .turboQuantBalanced, .turboQuantAggressive:
+            // Gemma 4's heterogeneous KV layout (dual head_dim + shared
+            // buffers) is incompatible with TurboQuant's homogeneous
+            // packing. Fail loudly instead of silently falling back so
+            // callers catch configuration mismatches at setup time.
+            throw KVCacheError.unsupportedStorage
         }
     }
 }
