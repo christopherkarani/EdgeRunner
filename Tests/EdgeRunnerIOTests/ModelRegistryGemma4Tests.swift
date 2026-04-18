@@ -24,7 +24,7 @@ struct ModelRegistryGemma4Tests: Sendable {
     func createThrowsNotYetImplemented() {
         let factory = Gemma4ArchitectureFactory()
         let config = ModelConfig(architectureName: "gemma4", metadata: [:])
-        #expect(throws: ModelLoadError.self) {
+        #expect(throws: ModelLoadError.notYetImplemented(architecture: "gemma4")) {
             _ = try factory.create(config: config)
         }
     }
