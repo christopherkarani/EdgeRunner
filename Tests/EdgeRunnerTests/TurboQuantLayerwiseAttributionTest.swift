@@ -7,7 +7,7 @@ import EdgeRunnerMetal
 @Suite("TurboQuant v2 Layerwise Attribution")
 struct TurboQuantLayerwiseAttributionTest {
     private static let runEnvKey = "EDGERUNNER_RUN_TURBOQUANT_V2_LAYERWISE"
-    private static let modelPath = BenchmarkContract.pinnedModelPath
+    private static let modelPath = BenchmarkContract.pinned.model.localPath
 
     @Test
     func compareLayerwiseTraceAgainstQ8Baseline() async throws {
