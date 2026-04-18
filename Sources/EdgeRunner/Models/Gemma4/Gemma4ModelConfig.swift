@@ -6,7 +6,7 @@ public enum Gemma4LayerType: String, Sendable, Equatable {
     case global
 }
 
-public enum GGUFMetadataError: Error, Equatable {
+public enum GGUFMetadataError: Error, Sendable, Equatable {
     case missingKey(String)
     case invalidValue(key: String, value: String)
 }
@@ -125,7 +125,10 @@ public struct Gemma4ModelConfig: Sendable, Equatable {
             }
             probe -= 1
         }
-        return layer
+        preconditionFailure(
+            "Layer \(layer) (\(targetType)) has no same-type predecessor "
+            + "below firstSharedLayer \(firstSharedLayer)"
+        )
     }
 
     private static func parseLayerTypes(_ raw: String) throws -> [Gemma4LayerType] {
