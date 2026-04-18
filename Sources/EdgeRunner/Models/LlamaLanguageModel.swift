@@ -3773,7 +3773,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 } else if layerTurboKeyEnabled {
                     do {
                         var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
-                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1, partialRotaryFactor: 1.0)
                         enc.setComputePipelineState(activeRopePSO)
                         enc.setBuffer(ropeKInput, offset: 0, index: 0)
                         enc.setBuffer(ropeKOutput, offset: 0, index: 1)
@@ -4518,7 +4518,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
     /// - Execution-only barriers (`MTL4VisibilityOptionNone`) — no cache flushes on unified memory
     /// - Pre-allocated params buffer with 256-byte aligned slots — no `setBytes` copies
     /// - Single MTL4ComputeCommandEncoder for entire forward pass
-    @available(macOS 26.0, iOS 26.0, *)
+    #if os(macOS)
+    @available(macOS 26.0, *)
     private func fusedDecodePassMetal4(
         hiddenBuf: MTLBuffer,
         currentPos: Int,
@@ -4832,6 +4833,17 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 
         return logitsBuf
     }
+    #else
+    private func fusedDecodePassMetal4(
+        hiddenBuf: MTLBuffer,
+        currentPos: Int,
+        state: Metal4State
+    ) async throws -> MTLBuffer {
+        throw GenerationError.modelLoadFailed(
+            reason: "Metal 4 decode path is unavailable on this platform."
+        )
+    }
+    #endif
 
     // MARK: - GPU Pipeline Helpers
 
@@ -5639,7 +5651,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
 /// Created once at init; reused across all decode passes.
 /// @unchecked Sendable: MTL4 objects are thread-safe for the usage pattern here
 /// (single-writer during encode, no concurrent encode).
-@available(macOS 26.0, iOS 26.0, *)
+#if os(macOS)
+@available(macOS 26.0, *)
 private final class Metal4State: @unchecked Sendable {
     let commandQueue: any MTL4CommandQueue
     let commandBuffer: any MTL4CommandBuffer
@@ -5753,6 +5766,24 @@ private final class Metal4State: @unchecked Sendable {
         residencySet.requestResidency()
     }
 }
+#else
+private final class Metal4State: @unchecked Sendable {
+    init(device: MTLDevice) throws {
+        throw GenerationError.modelLoadFailed(
+            reason: "Metal 4 decode path is unavailable on this platform."
+        )
+    }
+
+    func populateResidencySet(
+        scratch: ScratchBuffers,
+        layerKCaches: [MTLBuffer],
+        layerVCaches: [MTLBuffer],
+        preloadedWeights: PreloadedWeightsStore
+    ) {
+        // Metal 4 residency management is macOS-only for now.
+    }
+}
+#endif
 
 // MARK: - Pre-allocated Scratch Buffers
 
