@@ -31,6 +31,19 @@ struct Gemma4ModelConfigTests {
         #expect(globalLayers == [5, 11, 17, 23, 29, 35, 41])
     }
 
+    @Test("KV share map routes layers 24..41 to nearest same-type predecessor")
+    func kvShareMapIsCorrect() throws {
+        let metadata = Gemma4ModelConfigTests.makeReferenceMetadata()
+        let config = try Gemma4ModelConfig(metadata: metadata)
+
+        #expect(config.kvSourceLayer(for: 0) == 0)
+        #expect(config.kvSourceLayer(for: 23) == 23)
+        #expect(config.kvSourceLayer(for: 24) == 22)  // sliding; 23 is sliding
+        #expect(config.kvSourceLayer(for: 29) == 23)  // global; last global before was 23
+        #expect(config.kvSourceLayer(for: 35) == 23)
+        #expect(config.kvSourceLayer(for: 41) == 23)
+    }
+
     static func makeReferenceMetadata() -> [String: GGUFMetadataValue] {
         [
             "general.architecture": .string("gemma4"),

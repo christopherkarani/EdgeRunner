@@ -108,6 +108,26 @@ public struct Gemma4ModelConfig: Sendable, Equatable {
         return string
     }
 
+    /// Returns the layer whose KV cache layer `layer` should share.
+    ///
+    /// Layers in `[numHiddenLayers - numKVSharedLayers, numHiddenLayers)` reuse
+    /// the KV cache of the nearest earlier layer with the same attention type
+    /// that sits below the shared-layer boundary. Non-shared layers return
+    /// themselves.
+    public func kvSourceLayer(for layer: Int) -> Int {
+        let firstSharedLayer = numHiddenLayers - numKVSharedLayers
+        guard layer >= firstSharedLayer else { return layer }
+        let targetType = layerTypes[layer]
+        var probe = layer - 1
+        while probe >= 0 {
+            if layerTypes[probe] == targetType && probe < firstSharedLayer {
+                return probe
+            }
+            probe -= 1
+        }
+        return layer
+    }
+
     private static func parseLayerTypes(_ raw: String) throws -> [Gemma4LayerType] {
         let key = "gemma4.layer_types"
         var result: [Gemma4LayerType] = []
