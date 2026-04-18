@@ -34,7 +34,8 @@ struct PLEInputsKernelTests {
             pleRows: pleRows,
             L: L,
             P: P,
-            BS: BS
+            BS: BS,
+            rmsEps: 1e-6
         )
         #expect(out.count == expected.count)
         for i in 0..<out.count {
@@ -74,13 +75,52 @@ struct PLEInputsKernelTests {
         }
     }
 
+    @Test("Rejects mismatched buffer shapes")
+    func rejectsMismatchedShapes() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        let kernel = try PLEInputsKernel(device: device)
+        let H = 4, L = 1, P = 4, BS = 1
+        let goodProj = [Float](repeating: 1.0, count: BS * L * P)
+        let wrongProj = [Float](repeating: 1.0, count: BS * L * P + 1)
+        let goodNormW = [Float](repeating: 0.0, count: P)
+        let wrongNormW = [Float](repeating: 0.0, count: P + 1)
+        let goodPleRows = [Float](repeating: 0.0, count: BS * L * P)
+
+        #expect(throws: PLEInputsError.self) {
+            _ = try kernel.run(
+                proj: wrongProj,
+                normWeight: goodNormW,
+                pleRows: goodPleRows,
+                hiddenSize: H,
+                perLayerDim: P,
+                numLayers: L,
+                batchSeq: BS
+            )
+        }
+        #expect(throws: PLEInputsError.self) {
+            _ = try kernel.run(
+                proj: goodProj,
+                normWeight: wrongNormW,
+                pleRows: goodPleRows,
+                hiddenSize: H,
+                perLayerDim: P,
+                numLayers: L,
+                batchSeq: BS
+            )
+        }
+    }
+
     static func referenceForward(
         proj: [Float],
         norm: [Float],
         pleRows: [Float],
         L: Int,
         P: Int,
-        BS: Int
+        BS: Int,
+        rmsEps: Float = 1e-6
     ) -> [Float] {
         let scaleMix = 1.0 / Float(2.0).squareRoot()
         var out = [Float](repeating: 0, count: BS * L * P)
@@ -91,7 +131,7 @@ struct PLEInputsKernelTests {
                     let v = proj[b * L * P + ell * P + p]
                     sumSq += v * v
                 }
-                let rms = sqrt(sumSq / Float(P) + 1e-6)
+                let rms = sqrt(sumSq / Float(P) + rmsEps)
                 for p in 0..<P {
                     let w = Float(1) + norm[p]
                     let idx = b * L * P + ell * P + p

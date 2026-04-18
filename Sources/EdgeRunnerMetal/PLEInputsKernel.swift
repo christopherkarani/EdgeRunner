@@ -57,18 +57,21 @@ public struct PLEInputsKernel: Sendable {
         batchSeq: Int,
         rmsEps: Float = 1e-6
     ) throws -> [Float] {
-        precondition(
-            proj.count == batchSeq * numLayers * perLayerDim,
-            "proj shape mismatch: expected \(batchSeq * numLayers * perLayerDim), got \(proj.count)"
-        )
-        precondition(
-            normWeight.count == perLayerDim,
-            "normWeight shape mismatch: expected \(perLayerDim), got \(normWeight.count)"
-        )
-        precondition(
-            pleRows.count == batchSeq * numLayers * perLayerDim,
-            "pleRows shape mismatch: expected \(batchSeq * numLayers * perLayerDim), got \(pleRows.count)"
-        )
+        guard proj.count == batchSeq * numLayers * perLayerDim else {
+            throw PLEInputsError.invalidShape(
+                "proj must have batchSeq*numLayers*perLayerDim = \(batchSeq * numLayers * perLayerDim) elements, got \(proj.count)"
+            )
+        }
+        guard normWeight.count == perLayerDim else {
+            throw PLEInputsError.invalidShape(
+                "normWeight must have perLayerDim = \(perLayerDim) elements, got \(normWeight.count)"
+            )
+        }
+        guard pleRows.count == batchSeq * numLayers * perLayerDim else {
+            throw PLEInputsError.invalidShape(
+                "pleRows must have batchSeq*numLayers*perLayerDim = \(batchSeq * numLayers * perLayerDim) elements, got \(pleRows.count)"
+            )
+        }
 
         let outputCount = batchSeq * numLayers * perLayerDim
         guard outputCount > 0 else {
@@ -153,4 +156,5 @@ public struct PLEInputsKernel: Sendable {
 
 public enum PLEInputsError: Error, Sendable {
     case encodingFailed
+    case invalidShape(String)
 }
