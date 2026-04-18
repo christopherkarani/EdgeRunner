@@ -1686,7 +1686,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 // RoPE Q
                 do {
                     var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads),
-                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1)
+                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1,
+                        partialRotaryFactor: 1)
                     enc.setComputePipelineState(activeRopePSO)
                     enc.setBuffer(ropeQIn, offset: 0, index: 0)
                     enc.setBuffer(ropeQOutLocal, offset: 0, index: 1)
@@ -1699,7 +1700,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let ropeKOut = hasQKNorm ? allKBuf : ropeKBuf
                 do {
                     var p = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads),
-                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1)
+                        headDim: UInt32(headDim), startPos: UInt32(startPosition), theta: ropeTheta, scalingFactor: 1,
+                        partialRotaryFactor: 1)
                     enc.setBuffer(ropeKIn, offset: 0, index: 0)
                     enc.setBuffer(ropeKOut, offset: 0, index: 1)
                     enc.setBytes(&p, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
@@ -2331,7 +2333,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 let ropeKInput = hasQKNorm ? ropeKBuf : allKBuf
                 do {
                     var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numHeads),
-                        headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                        headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1,
+                        partialRotaryFactor: 1)
                     enc.setComputePipelineState(activeRopePSO)
                     enc.setBuffer(ropeQInput, offset: 0, index: 0)
                     enc.setBuffer(ropeQOutput, offset: 0, index: 1)
@@ -2344,7 +2347,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     let ropeKOutput = scratch.ropeK
                     do {
                         var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
-                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1,
+                            partialRotaryFactor: 1)
                         enc.setComputePipelineState(activeRopePSO)
                         enc.setBuffer(ropeKInput, offset: 0, index: 0)
                         enc.setBuffer(ropeKOutput, offset: 0, index: 1)
@@ -2430,7 +2434,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 } else {
                     do {
                         var p = ERRoPEParams(seqLen: 1, numHeads: UInt32(numKVHeads),
-                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1)
+                            headDim: UInt32(headDim), startPos: UInt32(currentPos), theta: ropeTheta, scalingFactor: 1,
+                            partialRotaryFactor: 1)
                         enc.setComputePipelineState(ropeNeoXF16OutPipeline)
                         enc.setBuffer(ropeKInput, offset: 0, index: 0)
                         enc.setBuffer(layerKCache!, offset: cacheWriteOffF16, index: 1)
