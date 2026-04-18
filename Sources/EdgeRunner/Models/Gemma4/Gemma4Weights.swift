@@ -9,19 +9,19 @@ import EdgeRunnerIO
 /// reuses the source layer's cached K/V — the GGUF file ships no dedicated
 /// `attn_k.weight` / `attn_v.weight` tensors for that block.
 public struct Gemma4BlockWeights: Sendable {
-    public var inputNorm: TensorStorage
-    public var attnQ: TensorStorage
-    public var attnK: TensorStorage?
-    public var attnV: TensorStorage?
-    public var attnO: TensorStorage
-    public var postAttentionNorm: TensorStorage
-    public var ffnGate: TensorStorage
-    public var ffnUp: TensorStorage
-    public var ffnDown: TensorStorage
-    public var postFFNNorm: TensorStorage
-    public var perLayerInputGate: TensorStorage
-    public var perLayerProjection: TensorStorage
-    public var postPerLayerInputNorm: TensorStorage
+    public let inputNorm: TensorStorage
+    public let attnQ: TensorStorage
+    public let attnK: TensorStorage?
+    public let attnV: TensorStorage?
+    public let attnO: TensorStorage
+    public let postAttentionNorm: TensorStorage
+    public let ffnGate: TensorStorage
+    public let ffnUp: TensorStorage
+    public let ffnDown: TensorStorage
+    public let postFFNNorm: TensorStorage
+    public let perLayerInputGate: TensorStorage
+    public let perLayerProjection: TensorStorage
+    public let postPerLayerInputNorm: TensorStorage
 }
 
 public enum Gemma4LoadError: Error, Sendable, Equatable {
@@ -60,17 +60,16 @@ public struct Gemma4Weights: Sendable {
         self.tokenEmbedding = try Self.require("token_embd.weight", from: weightMap)
         self.outputNorm = try Self.require("output_norm.weight", from: weightMap)
 
-        let ple = try Self.requirePLE("per_layer_token_embd.weight", from: weightMap)
-        guard Self.allowedPLEQuants.contains(ple.dataType) else {
-            throw Gemma4LoadError.unsupportedPLEQuant(Self.quantName(for: ple.dataType))
-        }
-        self.perLayerTokenEmbed = ple
-        self.perLayerModelProjection = try Self.requirePLE(
-            "per_layer_model_proj.weight",
+        self.perLayerTokenEmbed = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_token_embd.weight",
             from: weightMap
         )
-        self.perLayerProjectionNorm = try Self.requirePLE(
-            "per_layer_proj_norm.weight",
+        self.perLayerModelProjection = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_model_proj.weight",
+            from: weightMap
+        )
+        self.perLayerProjectionNorm = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_proj_norm.weight",
             from: weightMap
         )
 
@@ -143,6 +142,20 @@ public struct Gemma4Weights: Sendable {
     ) throws -> TensorStorage {
         guard let tensor = weightMap[name] else {
             throw Gemma4LoadError.missingPLETensor(name)
+        }
+        return tensor
+    }
+
+    /// Loads a PLE tensor and verifies its quant is supported. Rejecting unsupported
+    /// quants here prevents the forward pass from silently proceeding with a format
+    /// that would otherwise fail deep inside a Metal kernel.
+    private static func requirePLEWithQuantCheck(
+        name: String,
+        from weightMap: WeightMap
+    ) throws -> TensorStorage {
+        let tensor = try requirePLE(name, from: weightMap)
+        guard allowedPLEQuants.contains(tensor.dataType) else {
+            throw Gemma4LoadError.unsupportedPLEQuant(quantName(for: tensor.dataType))
         }
         return tensor
     }

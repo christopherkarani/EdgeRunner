@@ -104,7 +104,7 @@ struct Gemma4WeightsTests {
             name: "per_layer_token_embd.weight"
         )
 
-        #expect(throws: Gemma4LoadError.self) {
+        #expect(throws: Gemma4LoadError.unsupportedPLEQuant("q4_K")) {
             try Gemma4Weights(
                 weightMap: weightMap,
                 config: config,
