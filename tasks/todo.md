@@ -1,3 +1,239 @@
+# Current Bonsai 8B iPhone Benchmark Plan
+
+- [ ] Confirm the exact Bonsai 8B GGUF artifact and local compatibility assumptions for EdgeRunner
+- [ ] Add or reuse the narrowest on-device benchmark path that can run at a 4096-token context window on the connected iPhone 15 Pro Max
+- [ ] Download the Bonsai 8B GGUF artifact and verify the loader/runtime can parse it locally
+- [ ] Build and install the iOS app or harness, copy the model into the app sandbox, and launch the benchmark on-device
+- [ ] Capture measured decode throughput in tok/s and record the result with evidence and any proven blockers
+
+### Bonsai 8B iPhone Benchmark Spec
+
+- Target repo: `prism-ml/Bonsai-8B-gguf`
+- Expected artifact: `Bonsai-8B-Q1_0.gguf` if present, otherwise `Bonsai-8B.gguf`
+- Target device: connected `iPhone 15 Pro Max` (`00008130-001831360C08001C`)
+- Target context: `ModelConfiguration(contextWindowSize: 4096)`
+- Success criteria:
+  - download a concrete Bonsai 8B GGUF artifact locally
+  - prove EdgeRunner can load it or report the first concrete blocker with evidence
+  - if it runs on-device, report measured tok/s from a real iPhone 15 Pro Max run
+- Constraints:
+  - keep changes surgical
+  - do not disturb unrelated in-flight repo work
+
+### Bonsai 8B iPhone Benchmark Review
+
+- Delivery:
+  - Added an app-side benchmark automation path in `Examples/EdgeRunnerChatApp` that:
+    - resolves a model from the app sandbox `Documents` directory
+    - runs a fixed prompt at a requested context window
+    - writes a machine-readable JSON result back into `Documents`
+  - Wired the iOS app entry point in `Examples/EdgeRunnerChat/EdgeRunnerChatApp.swift` to trigger that automation on launch when benchmark env vars are present
+- Tests:
+  - added targeted example-package coverage for:
+    - benchmark env/config resolution
+    - default fallback values
+    - automated benchmark metric collection through the shared runtime
+  - verified with:
+    - `cd Examples/EdgeRunnerChatApp && swift test` ✅
+- Device build/install:
+  - built the iOS app for the connected `iPhone 15 Pro Max` with explicit team override:
+    - `xcodebuild -project Examples/EdgeRunnerChat/EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'id=00008130-001831360C08001C' DEVELOPMENT_TEAM=BTSZ26LN83 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates build` ✅
+  - installed successfully with:
+    - `xcrun devicectl device install app --device 00008130-001831360C08001C .../EdgeRunnerChat.app` ✅
+- Concrete blocker:
+  - launch is currently denied by iOS security:
+    - `Unable to launch com.chriskarani.EdgeRunnerChat because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user`
+  - this is no longer a code or signing-generation problem; it is a one-time device trust gate
+- Model acquisition:
+  - confirmed the target repo exposes `Bonsai-8B-Q1_0.gguf` at roughly `1.16 GB`
+  - local download was started to `~/edgerunner-models/Bonsai-8B-Q1_0.gguf`
+  - the benchmark cannot be completed until the device trust gate is cleared, because the installed app cannot yet launch on the phone
+
+# Current Chat App Plan
+
+# Current Gemma 4 E4B + PLE Implementation Plan
+
+**Detailed plan:** `docs/superpowers/plans/2026-04-18-gemma-4-e4b-ple-support.md` (26 tasks, 1886 lines)
+
+## Phase 1 — Config & Loader Foundation
+- [ ] Task 1: Parse Gemma 4 GGUF hparams into `Gemma4ModelConfig`
+- [ ] Task 2: Build KV-share source map for layers 24–41
+- [ ] Task 3: `Gemma4Weights` tensor handle bundle (incl. PLE tensors + quant gate)
+- [ ] Task 4: `Gemma4ArchitectureFactory` registration in `ModelRegistry`
+
+## Phase 2 — Tokenizer & Chat Template
+- [ ] Task 5: Gemma 4 chat template (`<|turn>...<turn|>` sentinel format)
+- [ ] Task 6: Extend tokenizer parity test for Gemma 4 sentinels
+
+## Phase 3 — Metal Kernels
+- [ ] Task 7: GeGLU kernel (gelu_pytorch_tanh × up, fused)
+- [ ] Task 8: PLE single-row Q8_0 gather kernel
+- [ ] Task 9: `per_layer_inputs` builder (proj + RMSNorm + PLE row + mix)
+- [ ] Task 10: PLE side-channel finalize (RMSNorm + residual add)
+- [ ] Task 11: Logit softcap kernel (tanh(x/30)·30)
+
+## Phase 4 — Hybrid Attention
+- [ ] Task 12: Sliding-window causal mask kernel
+- [ ] Task 13: Dual RoPE tables (local θ=1e4 full / global θ=1e6 partial=0.25)
+- [ ] Task 14: Extend `KVCache` for dual head-dim + KV-share map
+- [ ] Task 15: GQA dispatch accepts precomputed additive mask
+
+## Phase 5 — Forward Pass Integration
+- [ ] Task 16: Decoder-layer forward block (single-layer parity vs HF)
+- [ ] Task 17: Full-model prefill parity (42 layers, logits vs HF)
+- [ ] Task 18: Decode path (incremental KV-cache reuse)
+- [ ] Task 19: Route `ModelLoader.load()` to Gemma 4 before Llama fallthrough
+
+## Phase 6 — iPhone Integration
+- [ ] Task 20: `mmap`-backed shared-storage PLE table
+- [ ] Task 21: iPhone 15 Pro Max TTFT + RSS benchmark
+
+## Phase 7 — Public API + Docs
+- [ ] Task 22: Expose Gemma 4 in `EdgeRunnerFacade`
+- [ ] Task 23: Update `EdgeRunnerChat` example with Gemma 4 picker
+- [ ] Task 24: Update ROADMAP / public_api / README
+
+## Phase 8 — Long-Context & Robustness
+- [ ] Task 25: 128K context stress test (64K prompt → decode)
+- [ ] Task 26: Q4_K_M end-to-end coherence smoke test
+- [ ] Run a release benchmark or equivalent greedy decode measurement on EdgeRunner
+- [ ] Record tok/s, validation evidence, and any remaining functional limitations
+
+## Follow-ups from Wave 1 code review
+- [ ] Align Metal-kernel test convenience methods (`GeGLUKernel.run`, `LogitSoftcapKernel.run`, `SlidingWindowMask.build`) with async + caller-supplied-queue house pattern. Required before Task 16 forward-pass integration. (Source: Task 7/11/12 code-quality reviews; identical HIGH finding on each.)
+- [ ] Move `GGUFMetadataError` from `Sources/EdgeRunner/Models/Gemma4/` into `Sources/EdgeRunnerIO/GGUF/` and standardize `invalidValue(key:description:)` label to match existing `GGUFTokenizerMetadataError`. (Source: Task 1 code-quality review Issue 3.)
+- [ ] Fix pre-existing `.gitignore` rule `Edgerunner` (line 16) that matches case-insensitively on macOS FS — required `git add -f` workaround during Wave 1. (Source: Task 1 + Task 5 implementer concerns.)
+- [ ] Add `encode(commandBuffer:...)` fusion method to `GeGLUKernel` mirroring `ActivationKernels.encodeSwiglu`. Needed when GeGLU is wired into the MLP forward path. (Source: Task 7 implementer note + code-quality review.)
+- [ ] Add `window > seqLen` test case to `SlidingWindowMaskTests` (current test only covers `window == seqLen`). (Source: Task 12 code-quality review LOW.)
+
+### Gemma 4 E4B GGUF Spec
+
+- Target repo: `unsloth/gemma-4-E4B-it-GGUF`
+- Success criteria:
+  - prove whether EdgeRunner can load a concrete Gemma 4 E4B GGUF artifact
+  - if it runs, report measured decode throughput in tok/s with the exact file used
+  - if it does not run, report the first concrete blocker with evidence
+- Constraints:
+  - keep changes surgical
+  - do not change benchmark semantics unrelated to Gemma 4 compatibility
+
+- [x] Confirm the narrowest production-safe delivery shape for a chat app inside this repo
+- [x] Add failing-first tests for throughput metrics and chat-session state transitions
+- [x] Implement a macOS SwiftUI example app package that depends on the local `EdgeRunner` package
+- [x] Wire prompt submission, streaming assistant output, cancel/reset behavior, and live tokens/sec reporting
+- [x] Default the app to a 4096-token context window and expose model-path driven loading for Gemma 4B GGUF testing
+- [x] Build the example app and run its targeted tests
+- [x] Record verification results and any proven blockers or next performance work
+
+### Chat App Spec
+
+- Delivery shape: standalone example package under `Examples/` so the core library package remains stable
+- Runtime: local `EdgeRunner` package dependency, no network services
+- UI: macOS SwiftUI chat window with model path entry, transcript, composer, generate/cancel, and reset
+- Metrics: show time to first token, rolling decode tokens/sec, total generated tokens, and final decode tokens/sec for each response
+- Target config: `ModelConfiguration(contextWindowSize: 4096)` for Gemma 4B testing
+- Model assumption: GGUF Gemma architecture is already recognized by `ModelLoader`; the app only needs a valid local Gemma 4B GGUF path
+
+### Chat App Verification
+
+- Tests:
+  - Throughput tracker computes TTFT, rolling throughput, and final throughput correctly from deterministic timestamps
+  - Chat session state handles user-send, streamed assistant chunks, cancel, and reset transitions correctly
+- Manual/build checks:
+  - `swift test` in the example package passes
+  - `swift build` in the example package passes
+  - App can be launched locally with a model path argument or typed path
+
+### Chat App Review
+
+- Delivery:
+  - Added `Examples/EdgeRunnerChatApp`, a standalone macOS SwiftUI example package with:
+    - `EdgeRunnerChatAppCore` for the tested runtime, throughput tracker, and `EdgeRunner` adapter
+    - `EdgeRunnerChatApp` executable target for the UI shell
+- Core API improvement:
+  - `EdgeRunner` now exposes `stream(messages:...)` and `generate(messages:...)`, so the app can use model-native chat templates for Gemma/Qwen-style chat flows without reaching into internal modules
+- Verification:
+  - failing-first tests added for:
+    - TTFT / rolling decode tok/s / final tok/s math
+    - chat runtime streaming, reset, and blank-input handling
+  - commands run:
+    - `cd Examples/EdgeRunnerChatApp && swift test`
+    - `cd Examples/EdgeRunnerChatApp && swift build`
+  - result: both commands passed
+- Remaining blocker to the user goal:
+  - the app now measures the right signals for Gemma 4B at 4k context, but the `30 tok/s` target is still hardware/runtime dependent and requires a live run against the actual local Gemma 4B GGUF on the target device
+- Suggested next step:
+  - run `swift run EdgeRunnerChatApp --model /absolute/path/to/gemma-4-4b-it-q4.gguf`, capture TTFT + final decode tok/s, then optimize the decode path against that measured baseline
+
+# Current iOS App Plan
+
+- [x] Reuse the existing shared chat runtime/UI instead of forking another inference flow
+- [x] Make the shared example package usable from iOS as well as macOS
+- [x] Generate a real iOS Xcode project under `Examples/EdgeRunnerChat`
+- [x] Replace the unfinished placeholder app flow with the shared EdgeRunner-backed chat UI
+- [x] Verify the iOS app builds from Xcode command line
+- [x] Record any remaining signing/device-install constraints
+
+### iOS App Spec
+
+- Delivery shape: Xcode project generated with `xcodegen` at `Examples/EdgeRunnerChat/EdgeRunnerChat.xcodeproj`
+- App target: iOS SwiftUI app that depends on the local `EdgeRunnerChatAppCore` package product
+- Shared runtime: reuse `ChatRuntime` and the throughput-aware chat UI so the iOS app and macOS app stay aligned
+- Model loading: local GGUF path entry, `ModelConfiguration(contextWindowSize: 4096)`, live streaming generation
+- Verification: simulator or generic iOS build from `xcodebuild`, with device install/signing handled separately if needed
+
+### iOS App Review
+
+- Delivery:
+  - `Examples/EdgeRunnerChat/project.yml` now generates a real iOS app project that depends on the local `EdgeRunnerChatAppCore` package product
+  - `Examples/EdgeRunnerChat/EdgeRunnerChatApp.swift` now launches the shared `ChatWindow` + `ChatRuntime` instead of the unfinished placeholder flow
+  - `Examples/EdgeRunnerChatApp` now supports both iOS and macOS, with `ChatWindow` moved into `EdgeRunnerChatAppCore` for reuse across both app fronts
+- Portability fix:
+  - `Sources/EdgeRunner/Models/LlamaLanguageModel.swift` now compiles on iOS by stubbing the optional Metal 4 decode path off-platform instead of referencing unavailable `MTL4*` symbols
+- Verification:
+  - `cd Examples/EdgeRunnerChatApp && swift test` ✅
+  - `cd Examples/EdgeRunnerChat && xcodegen generate` ✅
+  - `xcodebuild -project EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' build` ✅
+  - `xcodebuild -project EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` ✅
+- Remaining install constraint:
+  - the app now builds for iPhone, but actual install to a physical device still needs a signed build/provisioning pass
+
+# Current Autoresearch 100-Experiment Plan
+
+- [x] Audit the current publishable benchmark contract, relevant runtime files, and repo safety constraints for a 100-experiment run
+- [x] Add a disposable-worktree autoresearch harness so the dirty main worktree is never mutated by the loop
+- [x] Add failing-first coverage for the harness' benchmark parsing / experiment bookkeeping logic
+- [x] Implement the narrowest production-grade automation needed to run, score, keep, or roll back experiments
+- [x] Dry-run the harness on a small bounded count to verify parsing, isolation, logging, and failure handling
+- [x] Execute at least 100 experiments against the publishable benchmark harness
+- [x] Review generated artifacts, append outcome notes here, and summarize any proven blockers or wins
+
+### Autoresearch 100-Experiment Review
+
+- Added `benchmarks/autoresearch_harness.py` plus `benchmarks/test_autoresearch_harness.py` to automate a bounded benchmark sweep with JSON artifact capture, correctness gating, and build-state fallback.
+- The harness first attempts a detached worktree from `HEAD`, but this repo's clean `HEAD` does not build right now. The sweep therefore fell back to the current checkout, which does build.
+- Dry run passed:
+  - command: `python3 benchmarks/autoresearch_harness.py --count 3 --canonical-top-k 1`
+  - result: baseline `237.9 tok/s`, `decode_no_mega` recheck `237.3 tok/s`
+- Full sweep completed:
+  - command: `python3 benchmarks/autoresearch_harness.py --count 100 --canonical-top-k 5`
+  - artifacts: `benchmarks/autoresearch_runs/20260409T221743Z`
+  - sweep result: all 100 experiments preserved the pinned prefix/hash and completed successfully
+  - top single-run results clustered around `239-241 tok/s`
+  - strongest single-run variants:
+    - `baseline`: `241.2 tok/s`
+    - `decode_base__decode_metal4`: `240.4 tok/s`
+    - `decode_no_mega__decode_no_kv_barrier`: `240.3 tok/s`
+    - `decode_base__decode_no_mega__decode_no_kv_barrier`: `240.2 tok/s`
+    - `decode_base__decode_no_kv_barrier__decode_metal4`: `239.7 tok/s`
+- 5-run rechecks under sustained load were materially lower:
+  - `baseline__canonical`: `129.7 tok/s`
+  - `decode_base__decode_no_kv_barrier__decode_metal4__canonical`: `151.2 tok/s`
+  - follow-up fresh canonical rerun after the sweep: `158.6 tok/s` median with one severe outlier run at `61.7 tok/s`
+- Current blocker:
+  - correctness is stable, but publishable benchmark stability is not
+  - sustained multi-run measurements are dominated by system variance and/or thermal throttling, so single-run sweep winners do not hold their margin in canonical rechecks
+
 # TurboQuant Pinned Rollout Execution
 
 ## Current Planar3/F16 Decode-Isolation Plan
