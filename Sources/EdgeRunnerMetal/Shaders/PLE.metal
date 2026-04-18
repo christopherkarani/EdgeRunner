@@ -41,3 +41,57 @@ kernel void ple_gather_q8_0(
     const float sqrtP = sqrt(float(params.perLayerDim));
     out[tIdx * totalElems + elem] = scale * float(q) * sqrtP;
 }
+
+// === PLE (Per-Layer Embedding) inputs builder kernel ===
+//
+// Combines the projected hidden state (RMSNorm-normalized) with the gathered
+// PLE rows and mixes via scaleMix (typically 1/sqrt(2)). Per (batchSeq, layer)
+// slice computes RMSNorm along the last dim (P) using Gemma's (1 + w) weight
+// trick, then adds pleRows and multiplies by scaleMix.
+//
+// Inputs:
+//   proj       [B*S, L*P]  — output of GEMV(Wproj, h), already scaled by 1/sqrt(H)
+//   normW      [P]         — per_layer_proj_norm.weight (applied as (1 + w))
+//   pleRows    [B*S, L, P] — output of ple_gather_q8_0 (already scaled by sqrt(P))
+// Output:
+//   out        [B*S, L, P] — per_layer_inputs
+
+struct PLEInputsParams {
+    uint hidden;       // H (not consumed by kernel; proj is pre-scaled)
+    uint perLayerDim;  // P
+    uint numLayers;    // L
+    uint batchSeq;     // B*S
+    float rmsEps;      // typically 1e-6
+    float scaleMix;    // 1/sqrt(2)
+};
+
+kernel void ple_inputs_build(
+    device const float *proj        [[buffer(0)]],
+    device const float *normW       [[buffer(1)]],
+    device const float *pleRows     [[buffer(2)]],
+    device float *out               [[buffer(3)]],
+    constant PLEInputsParams &p     [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    // gid.y indexes (batchSeq * numLayers) combined; gid.x indexes perLayerDim
+    uint layerIdx = gid.y % p.numLayers;
+    uint batchSeq = gid.y / p.numLayers;
+    uint pIdx = gid.x;
+    if (batchSeq >= p.batchSeq || pIdx >= p.perLayerDim) return;
+
+    uint sliceBase = batchSeq * p.numLayers * p.perLayerDim + layerIdx * p.perLayerDim;
+
+    // Per-thread RMS reduction over P elements (naive — production version can use simdgroup reduce)
+    float sumSq = 0;
+    for (uint i = 0; i < p.perLayerDim; ++i) {
+        float v = proj[sliceBase + i];
+        sumSq += v * v;
+    }
+    float rms = sqrt(sumSq / float(p.perLayerDim) + p.rmsEps);
+
+    float v = proj[sliceBase + pIdx];
+    float w = 1.0f + normW[pIdx];        // Gemma (1 + w) trick
+    float normed = (v / rms) * w;
+    float ple = pleRows[sliceBase + pIdx];
+    out[sliceBase + pIdx] = (normed + ple) * p.scaleMix;
+}
