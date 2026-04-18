@@ -15,6 +15,9 @@ public final class RoPEKernel: Sendable {
         self.pipelineNeoXF16Out = try registry.pipeline(for: "rope_neox_f32_to_f16")
     }
 
+    /// Apply RoPE rotation. `partialRotaryFactor` controls pRoPE: the fraction of
+    /// `headDim` channels that get rotated. 1.0 = full rotation (standard RoPE, default).
+    /// Values <1.0 enable partial rotary (e.g. Gemma 4 global layers use 0.25).
     public func execute(
         input: [Float],
         seqLen: Int,
@@ -23,10 +26,13 @@ public final class RoPEKernel: Sendable {
         startPos: Int,
         theta: Float,
         scalingFactor: Float = 1,
+        partialRotaryFactor: Float = 1.0,
         commandQueue: MTLCommandQueue
     ) async throws -> [Float] {
         precondition(headDim % 2 == 0, "headDim must be even")
         precondition(input.count == seqLen * numHeads * headDim)
+        precondition(partialRotaryFactor >= 0 && partialRotaryFactor <= 1,
+                     "partialRotaryFactor must be in [0, 1]")
 
         let inputBuffer = device.makeBuffer(
             bytes: input,
@@ -44,7 +50,8 @@ public final class RoPEKernel: Sendable {
             headDim: UInt32(headDim),
             startPos: UInt32(startPos),
             theta: theta,
-            scalingFactor: scalingFactor
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor
         )
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -89,11 +96,14 @@ public final class RoPEKernel: Sendable {
         startPos: Int,
         theta: Float,
         scalingFactor: Float = 1,
+        partialRotaryFactor: Float = 1.0,
         commandQueue: MTLCommandQueue
     ) async throws -> ([Float], [Float]) {
         precondition(headDim % 2 == 0, "headDim must be even")
         precondition(q.count == seqLen * numHeads * headDim)
         precondition(k.count == seqLen * numKVHeads * headDim)
+        precondition(partialRotaryFactor >= 0 && partialRotaryFactor <= 1,
+                     "partialRotaryFactor must be in [0, 1]")
 
         let qInBuf = device.makeBuffer(bytes: q, length: q.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
         let qOutBuf = device.makeBuffer(length: q.count * MemoryLayout<Float>.stride, options: .storageModeShared)!
@@ -106,7 +116,8 @@ public final class RoPEKernel: Sendable {
         // Encode Q RoPE
         do {
             var params = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numHeads), headDim: UInt32(headDim),
-                                       startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor)
+                                       startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor,
+                                       partialRotaryFactor: partialRotaryFactor)
             guard let enc = cmdBuf.makeComputeCommandEncoder() else { throw RoPEError.encodingFailed }
             enc.setComputePipelineState(pipelineF32)
             enc.setBuffer(qInBuf, offset: 0, index: 0)
@@ -120,7 +131,8 @@ public final class RoPEKernel: Sendable {
         // Encode K RoPE (same command buffer)
         do {
             var params = ERRoPEParams(seqLen: UInt32(seqLen), numHeads: UInt32(numKVHeads), headDim: UInt32(headDim),
-                                       startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor)
+                                       startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor,
+                                       partialRotaryFactor: partialRotaryFactor)
             guard let enc = cmdBuf.makeComputeCommandEncoder() else { throw RoPEError.encodingFailed }
             enc.setComputePipelineState(pipelineF32)
             enc.setBuffer(kInBuf, offset: 0, index: 0)
@@ -146,15 +158,20 @@ public final class RoPEKernel: Sendable {
         commandBuffer: MTLCommandBuffer,
         inputBuffer: MTLBuffer, outputBuffer: MTLBuffer,
         seqLen: Int, numHeads: Int, headDim: Int,
-        startPos: Int, theta: Float, scalingFactor: Float = 1
+        startPos: Int, theta: Float, scalingFactor: Float = 1,
+        partialRotaryFactor: Float = 1.0
     ) throws {
+        precondition(partialRotaryFactor >= 0 && partialRotaryFactor <= 1,
+                     "partialRotaryFactor must be in [0, 1]")
+
         var params = ERRoPEParams(
             seqLen: UInt32(seqLen),
             numHeads: UInt32(numHeads),
             headDim: UInt32(headDim),
             startPos: UInt32(startPos),
             theta: theta,
-            scalingFactor: scalingFactor
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor
         )
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {

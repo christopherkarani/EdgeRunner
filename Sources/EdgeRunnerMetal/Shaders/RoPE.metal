@@ -8,6 +8,9 @@ struct ERRoPEParams {
     uint startPos;
     float theta;
     float scalingFactor;
+    // Fraction of head_dim to rotate (pRoPE). 1.0 = rotate all channels (standard RoPE).
+    // <1.0 = only rotate channels with 2*pair < headDim * partialRotaryFactor; rest pass through.
+    float partialRotaryFactor;
 };
 
 kernel void rope_f32(
@@ -25,13 +28,24 @@ kernel void rope_f32(
         return;
     }
 
+    uint baseIndex = (seq * params.numHeads * params.headDim) + (head * params.headDim) + (2 * dimPair);
+
+    // pRoPE pass-through: channels beyond the partial boundary are copied verbatim.
+    // rotatedPairs = floor(halfDim * partialRotaryFactor). For partial=1.0 this == halfDim,
+    // so the guard never fires (full rotation, identical to standard RoPE).
+    uint rotatedPairs = uint(float(halfDim) * params.partialRotaryFactor);
+    if (dimPair >= rotatedPairs) {
+        output[baseIndex] = input[baseIndex];
+        output[baseIndex + 1] = input[baseIndex + 1];
+        return;
+    }
+
     float exponent = float(2 * dimPair) / float(params.headDim);
     float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
 
-    uint baseIndex = (seq * params.numHeads * params.headDim) + (head * params.headDim) + (2 * dimPair);
     float x0 = input[baseIndex];
     float x1 = input[baseIndex + 1];
     output[baseIndex] = x0 * cosValue - x1 * sinValue;
@@ -55,13 +69,23 @@ kernel void rope_neox_f32(
         return;
     }
 
+    uint headBase = (seq * params.numHeads * params.headDim) + (head * params.headDim);
+
+    // pRoPE pass-through (NeoX layout pairs (d, d+halfDim)). For partial=1.0, rotatedPairs == halfDim
+    // and this guard never fires — standard NeoX RoPE behavior preserved.
+    uint rotatedPairs = uint(float(halfDim) * params.partialRotaryFactor);
+    if (dimPair >= rotatedPairs) {
+        output[headBase + dimPair]           = input[headBase + dimPair];
+        output[headBase + dimPair + halfDim] = input[headBase + dimPair + halfDim];
+        return;
+    }
+
     float exponent = float(2 * dimPair) / float(params.headDim);
     float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
 
-    uint headBase = (seq * params.numHeads * params.headDim) + (head * params.headDim);
     float x0 = input[headBase + dimPair];
     float x1 = input[headBase + dimPair + halfDim];
     output[headBase + dimPair]           = x0 * cosValue - x1 * sinValue;
@@ -484,13 +508,22 @@ kernel void rope_neox_f32_to_f16(
 
     if (dimPair >= halfDim || head >= params.numHeads || seq >= params.seqLen) return;
 
+    uint headBase = (seq * params.numHeads * params.headDim) + (head * params.headDim);
+
+    // pRoPE pass-through (NeoX f32->f16 variant). For partial=1.0, rotatedPairs == halfDim.
+    uint rotatedPairs = uint(float(halfDim) * params.partialRotaryFactor);
+    if (dimPair >= rotatedPairs) {
+        output[headBase + dimPair]           = half(input[headBase + dimPair]);
+        output[headBase + dimPair + halfDim] = half(input[headBase + dimPair + halfDim]);
+        return;
+    }
+
     float exponent = float(2 * dimPair) / float(params.headDim);
     float frequency = 1.0f / powr(params.theta, exponent);
     float angle = float(seq + params.startPos) * (frequency / params.scalingFactor);
     float cosValue = cos(angle);
     float sinValue = sin(angle);
 
-    uint headBase = (seq * params.numHeads * params.headDim) + (head * params.headDim);
     float x0 = input[headBase + dimPair];
     float x1 = input[headBase + dimPair + halfDim];
     output[headBase + dimPair]           = half(x0 * cosValue - x1 * sinValue);
