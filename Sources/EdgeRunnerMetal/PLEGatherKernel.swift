@@ -50,6 +50,19 @@ public struct PLEGatherKernel: Sendable {
                 "q8Table size (\(q8Table.count)) is not a multiple of per-token row stride (\(rowStrideBytes))"
             )
         }
+        let vocabSize = q8Table.count / rowStrideBytes
+        for (i, tokenId) in tokens.enumerated() {
+            guard tokenId >= 0 else {
+                throw PLEGatherError.invalidShape(
+                    "negative token id at index \(i): \(tokenId)"
+                )
+            }
+            guard Int(tokenId) < vocabSize else {
+                throw PLEGatherError.invalidShape(
+                    "token id \(tokenId) at index \(i) exceeds vocab size \(vocabSize)"
+                )
+            }
+        }
         let numTokens = tokens.count
         guard numTokens > 0 else {
             return []

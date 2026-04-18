@@ -39,6 +39,29 @@ struct PLEGatherKernelTests {
         }
     }
 
+    @Test("Rejects negative and out-of-range token ids")
+    func rejectsInvalidTokenIds() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        let P = 256
+        let L = 42
+        let vocab = 4
+        let totalElems = vocab * L * P
+        let rows = [Float](repeating: 0.1, count: totalElems)
+        let (q8Bytes, _) = Self.quantizeToQ8_0(floats: rows, blockSize: 32)
+
+        let kernel = try PLEGatherKernel(device: device)
+
+        #expect(throws: (any Error).self) {
+            _ = try kernel.run(q8Table: q8Bytes, tokens: [-1, 0], perLayerDim: P, numLayers: L)
+        }
+        #expect(throws: (any Error).self) {
+            _ = try kernel.run(q8Table: q8Bytes, tokens: [0, Int32(vocab)], perLayerDim: P, numLayers: L)
+        }
+    }
+
     // Test helper: Q8_0 quantize per block of 32 elements.
     // Returns packed bytes + the reference-dequantized floats (for expected-value comparison,
     // so tolerance accounts for Q8 rounding).

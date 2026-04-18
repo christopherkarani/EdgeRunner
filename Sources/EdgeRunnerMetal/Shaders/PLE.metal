@@ -17,9 +17,6 @@ struct PLEGatherParams {
     uint rowStrideBytes;   // bytes per (token, L*P row) in Q8_0 storage
 };
 
-constant uint kQ8BlockBytes = 34;
-constant uint kQ8BlockElems = 32;
-
 kernel void ple_gather_q8_0(
     device const uchar *q8Table        [[buffer(0)]],
     device const int *tokens           [[buffer(1)]],
@@ -34,13 +31,13 @@ kernel void ple_gather_q8_0(
 
     int tokenId = tokens[tIdx];
     uint rowBase = uint(tokenId) * params.rowStrideBytes;
-    uint blockIndex = elem / kQ8BlockElems;
-    uint inBlock = elem % kQ8BlockElems;
-    device const uchar *blockPtr = q8Table + rowBase + blockIndex * kQ8BlockBytes;
+    uint blockIndex = elem / q8_0WeightsPerBlock;
+    uint inBlock = elem % q8_0WeightsPerBlock;
+    device const uchar *blockPtr = q8Table + rowBase + blockIndex * q8_0BlockBytes;
 
-    half scale = *reinterpret_cast<device const half *>(blockPtr);
-    int8_t q = *reinterpret_cast<device const int8_t *>(blockPtr + 2 + inBlock);
+    float scale = float(as_type<half>(*(device const ushort*)blockPtr));
+    int8_t q = as_type<char>(blockPtr[2 + inBlock]);
 
     const float sqrtP = sqrt(float(params.perLayerDim));
-    out[tIdx * totalElems + elem] = float(scale) * float(q) * sqrtP;
+    out[tIdx * totalElems + elem] = scale * float(q) * sqrtP;
 }
