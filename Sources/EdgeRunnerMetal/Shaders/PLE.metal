@@ -1,6 +1,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// q8_0BlockBytes (34) and q8_0WeightsPerBlock (32) are declared in Dequant_Q8_0.metal
+// and visible here because KernelRegistry concatenates all .metal files into one library.
+
 // === PLE (Per-Layer Embedding) single-row Q8_0 gather kernel ===
 //
 // For Gemma 4 E4B: per_layer_token_embd has shape [vocab_size, num_layers * perLayerDim]
