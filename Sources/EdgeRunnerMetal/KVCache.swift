@@ -80,6 +80,33 @@ public final class KVCache: Sendable {
     private let turboQuantValueBuffers: [TurboQuantLayerStorage]
     private let layerStates: Mutex<[LayerState]>
     private let turboQuantLayout: TurboQuantLayout?
+    /// Per-layer head_dim (to support Gemma 4 dual head_dim).
+    /// Homogeneous caches have every entry equal to `headDim`.
+    private let headDimByLayer: [Int]
+
+    /// Returns the head_dim used for the KV cache of the given layer.
+    /// For homogeneous caches this is identical to ``headDim``.
+    public func headDim(forLayer layer: Int) -> Int {
+        precondition((0..<numLayers).contains(layer), "invalid layer \(layer)")
+        return headDimByLayer[layer]
+    }
+
+    /// Returns the MTLBuffer backing this layer's KV keys.
+    /// Aliased layers (e.g. Gemma 4 KV-shared layers) return the SAME
+    /// `MTLBuffer` reference as their source layer — `===` identity holds.
+    public func keyBuffer(forLayer layer: Int) -> MTLBuffer {
+        precondition((0..<numLayers).contains(layer), "invalid layer \(layer)")
+        precondition(!precision.isTurboQuant, "keyBuffer(forLayer:) is a dense-path accessor")
+        return keyBuffers[layer].rawValue
+    }
+
+    /// Returns the MTLBuffer backing this layer's KV values.
+    /// Aliased layers return the SAME `MTLBuffer` reference as their source layer.
+    public func valueBuffer(forLayer layer: Int) -> MTLBuffer {
+        precondition((0..<numLayers).contains(layer), "invalid layer \(layer)")
+        precondition(!precision.isTurboQuant, "valueBuffer(forLayer:) is a dense-path accessor")
+        return valueBuffers[layer].rawValue
+    }
 
     private var elementsPerToken: Int {
         numKVHeads * headDim
@@ -112,6 +139,7 @@ public final class KVCache: Sendable {
         self.numLayers = numLayers
         self.numKVHeads = numKVHeads
         self.headDim = headDim
+        self.headDimByLayer = Array(repeating: headDim, count: numLayers)
         self.precision = precision
         self.layerStates = Mutex(Array(repeating: LayerState(), count: numLayers))
         self.turboQuantLayout = try precision.turboQuantPreset.map {
@@ -165,6 +193,133 @@ public final class KVCache: Sendable {
         } else {
             throw KVCacheError.unsupportedStorage
         }
+    }
+
+    /// Heterogeneous-layout initializer for architectures such as Gemma 4
+    /// that mix per-layer head_dim and reuse KV buffers across layers.
+    ///
+    /// - Parameters:
+    ///   - device: Metal device for buffer allocation.
+    ///   - maxSeqLen: Ring-buffer length (tokens) per layer.
+    ///   - numKVHeads: Number of KV heads (constant across layers).
+    ///   - headDimByLayer: Per-layer head_dim (must have length == numLayers).
+    ///   - kvSourceLayers: Per-layer source-layer index. Entry `i` equals `i`
+    ///       for layers that own their KV buffers, or a lower index for
+    ///       layers that alias a source layer's buffer. The head_dim of a
+    ///       shared layer MUST match the head_dim of its source.
+    ///   - precision: Storage precision (dense paths only — TurboQuant is
+    ///       rejected for heterogeneous layouts).
+    public init(
+        device: MTLDevice,
+        maxSeqLen: Int,
+        numKVHeads: Int,
+        headDimByLayer: [Int],
+        kvSourceLayers: [Int],
+        precision: Precision
+    ) throws {
+        let numLayers = headDimByLayer.count
+        guard numLayers > 0 else { throw KVCacheError.unsupportedStorage }
+        guard kvSourceLayers.count == numLayers else {
+            throw KVCacheError.unsupportedStorage
+        }
+        // Validate KV-share map: source indices must be in range, point to
+        // a layer that owns its buffer, and match head_dim.
+        for (layer, source) in kvSourceLayers.enumerated() {
+            guard (0..<numLayers).contains(source) else {
+                throw KVCacheError.unsupportedStorage
+            }
+            // If a layer shares, its source must own (source == source index
+            // in its own row) so chains cannot form.
+            if source != layer {
+                guard kvSourceLayers[source] == source else {
+                    throw KVCacheError.unsupportedStorage
+                }
+                // Shared layer must agree with source on head_dim.
+                guard headDimByLayer[layer] == headDimByLayer[source] else {
+                    throw KVCacheError.unsupportedStorage
+                }
+            }
+        }
+        // TurboQuant was designed for homogeneous head_dim. Reject it here
+        // until a heterogeneous TurboQuant path is added.
+        guard !precision.isTurboQuant else {
+            throw KVCacheError.unsupportedStorage
+        }
+        guard let bytesPerElement = precision.denseBytesPerElement else {
+            throw KVCacheError.unsupportedStorage
+        }
+
+        self.maxSeqLen = maxSeqLen
+        self.numLayers = numLayers
+        self.numKVHeads = numKVHeads
+        // headDim exposes the most common per-layer head_dim so homogeneous
+        // consumers (shader kernels that look at `.headDim`) keep working;
+        // heterogeneous consumers should use `headDim(forLayer:)`.
+        self.headDim = Self.dominantHeadDim(headDimByLayer)
+        self.headDimByLayer = headDimByLayer
+        self.precision = precision
+        self.layerStates = Mutex(Array(repeating: LayerState(), count: numLayers))
+        self.turboQuantLayout = nil
+        self.turboQuantKeyBuffers = []
+        self.turboQuantValueBuffers = []
+
+        var keyBuffers: [MetalBufferHandle?] = Array(repeating: nil, count: numLayers)
+        var valueBuffers: [MetalBufferHandle?] = Array(repeating: nil, count: numLayers)
+
+        for layer in 0..<numLayers {
+            let source = kvSourceLayers[layer]
+            if source == layer {
+                let bytesPerToken = numKVHeads * headDimByLayer[layer] * bytesPerElement
+                let bufferLength = maxSeqLen * bytesPerToken
+                guard let keyBuffer = device.makeBuffer(
+                    length: bufferLength,
+                    options: [.storageModeShared, .hazardTrackingModeUntracked]
+                ),
+                let valueBuffer = device.makeBuffer(
+                    length: bufferLength,
+                    options: [.storageModeShared, .hazardTrackingModeUntracked]
+                ) else {
+                    throw KVCacheError.allocationFailed
+                }
+                keyBuffers[layer] = MetalBufferHandle(keyBuffer)
+                valueBuffers[layer] = MetalBufferHandle(valueBuffer)
+            } else {
+                // Alias: reuse the source layer's buffer.
+                // Source must have been allocated in a prior iteration since
+                // validation above requires source < layer to hold when
+                // source != layer (source owns itself, so source's row was
+                // processed first when source < layer). Defensive fallback:
+                guard let sourceKey = keyBuffers[source],
+                      let sourceValue = valueBuffers[source] else {
+                    throw KVCacheError.unsupportedStorage
+                }
+                keyBuffers[layer] = sourceKey
+                valueBuffers[layer] = sourceValue
+            }
+        }
+
+        self.keyBuffers = keyBuffers.compactMap { $0 }
+        self.valueBuffers = valueBuffers.compactMap { $0 }
+        guard self.keyBuffers.count == numLayers,
+              self.valueBuffers.count == numLayers else {
+            throw KVCacheError.allocationFailed
+        }
+    }
+
+    private static func dominantHeadDim(_ headDimByLayer: [Int]) -> Int {
+        var counts: [Int: Int] = [:]
+        for dim in headDimByLayer {
+            counts[dim, default: 0] += 1
+        }
+        // Return the head_dim with the most occurrences; ties broken by
+        // the first element order for determinism.
+        var best = headDimByLayer[0]
+        var bestCount = counts[best] ?? 0
+        for dim in headDimByLayer where (counts[dim] ?? 0) > bestCount {
+            best = dim
+            bestCount = counts[dim] ?? 0
+        }
+        return best
     }
 
     public func append(layer: Int, keys: [Float], values: [Float]) throws {
@@ -341,7 +496,7 @@ public final class KVCache: Sendable {
             currentLen: UInt32(min(state.totalWritten, maxSeqLen)),
             writePos: UInt32(state.writePos),
             numKVHeads: UInt32(numKVHeads),
-            headDim: UInt32(headDim),
+            headDim: UInt32(headDimByLayer[layer]),
             precision: precision.rawValue
         )
     }
