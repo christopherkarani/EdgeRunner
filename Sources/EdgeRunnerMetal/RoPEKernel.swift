@@ -161,6 +161,9 @@ public final class RoPEKernel: Sendable {
         startPos: Int, theta: Float, scalingFactor: Float = 1,
         partialRotaryFactor: Float = 1.0
     ) throws {
+        precondition(partialRotaryFactor >= 0 && partialRotaryFactor <= 1,
+                     "partialRotaryFactor must be in [0, 1]")
+
         var params = ERRoPEParams(
             seqLen: UInt32(seqLen),
             numHeads: UInt32(numHeads),

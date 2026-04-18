@@ -173,4 +173,89 @@ struct RoPEDualTableTests {
             #expect(result[i] == input[i], "channel \(i) changed despite being beyond partial-rotary boundary")
         }
     }
+
+    // MARK: - NeoX layout pRoPE
+
+    /// Dispatches the NeoX f32 RoPE kernel (`rope_neox_f32`) directly — the public
+    /// `execute()` / `applyToQK()` APIs wrap `pipelineF32` (interleaved layout), so this
+    /// test is the only coverage for the NeoX pass-through guard. The NeoX kernel is
+    /// the real hot path used by Gemma 4 global-attention layers (partial=0.25).
+    ///
+    /// NeoX pair layout: (i, i + halfDim). With headDim=512, halfDim=256, partial=0.25
+    /// → rotatedPairs = floor(256 * 0.25) = 64. Rotated channels are
+    /// {0..63} ∪ {256..319}; pass-through channels are {64..255} ∪ {320..511}.
+    @Test("NeoX pRoPE (partial=0.25): rotated pairs = (i, i+halfDim) for i<64; all other channels pass through")
+    func neoxPRoPEPassThrough() async throws {
+        let seqLen = 1
+        let numHeads = 1
+        let headDim = 512
+        let halfDim = headDim / 2
+        let partialRotaryFactor: Float = 0.25
+        let rotatedPairs = Int(Float(halfDim) * partialRotaryFactor)
+        #expect(rotatedPairs == 64, "Sanity: 256 * 0.25 should yield 64 NeoX rotated pairs")
+
+        // Q and K: all ones, nonzero startPos so rotated channels differ from 1.0.
+        let count = seqLen * numHeads * headDim
+        let q = [Float](repeating: 1.0, count: count)
+
+        let kernel = try RoPEKernel(device: device)
+        var params = ERRoPEParams(
+            seqLen: UInt32(seqLen),
+            numHeads: UInt32(numHeads),
+            headDim: UInt32(headDim),
+            startPos: 10,
+            theta: 1_000_000,
+            scalingFactor: 1,
+            partialRotaryFactor: partialRotaryFactor
+        )
+
+        let inBuf = device.makeBuffer(bytes: q,
+                                      length: count * MemoryLayout<Float>.stride,
+                                      options: .storageModeShared)!
+        let outBuf = device.makeBuffer(length: count * MemoryLayout<Float>.stride,
+                                       options: .storageModeShared)!
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer(),
+              let enc = cmdBuf.makeComputeCommandEncoder() else {
+            throw TestError.noMetal
+        }
+        enc.setComputePipelineState(kernel.pipelineNeoX)
+        enc.setBuffer(inBuf, offset: 0, index: 0)
+        enc.setBuffer(outBuf, offset: 0, index: 1)
+        enc.setBytes(&params, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
+        let tgSize = MTLSize(
+            width: min(halfDim, kernel.pipelineNeoX.maxTotalThreadsPerThreadgroup),
+            height: 1,
+            depth: 1
+        )
+        enc.dispatchThreads(
+            MTLSize(width: halfDim, height: numHeads, depth: seqLen),
+            threadsPerThreadgroup: tgSize
+        )
+        enc.endEncoding()
+        cmdBuf.commit()
+        await cmdBuf.completed()
+        if let error = cmdBuf.error { throw error }
+
+        let ptr = outBuf.contents().bindMemory(to: Float.self, capacity: count)
+        let qOut = Array(UnsafeBufferPointer(start: ptr, count: count))
+
+        // Pass-through regions: channels [rotatedPairs, halfDim) and [halfDim+rotatedPairs, headDim).
+        for i in rotatedPairs..<halfDim {
+            #expect(qOut[i] == 1.0,
+                    "NeoX Q channel \(i) should be untouched (pass-through; partial=\(partialRotaryFactor))")
+        }
+        for i in (halfDim + rotatedPairs)..<headDim {
+            #expect(qOut[i] == 1.0,
+                    "NeoX Q channel \(i) should be untouched (pass-through upper half)")
+        }
+
+        // At least one rotated channel in the first `rotatedPairs` or its NeoX partner must differ
+        // from 1.0. At startPos=10 with theta=1e6, at least some pairs will have nonzero rotation.
+        let anyRotated = (0..<rotatedPairs).contains { i in
+            qOut[i] != 1.0 || qOut[i + halfDim] != 1.0
+        }
+        #expect(anyRotated,
+                "Expected rotation on at least one NeoX pair (i, i+halfDim) for i<\(rotatedPairs)")
+    }
 }
