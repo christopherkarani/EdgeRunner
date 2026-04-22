@@ -231,6 +231,7 @@ llama-cli -m model.gguf -p "The capital of France is" -n 10
 | `EDGERUNNER_DECODE_DISABLE_FUSED_FINAL_NORM_LM_HEAD=1` | Disable fused final layer |
 | `EDGERUNNER_RUN_QUALITY_COMPARISON=1` | Run quality comparison tests |
 | `EDGERUNNER_RUN_4B_RECOVERY_CHECK=1` | Run 4B model correctness check |
+| `EDGERUNNER_SKIP_ANE=1` | Drop the `ANEInteropIO` / `EspressoEdgeRunner` targets from the SwiftPM manifest. Use this when the build host cannot supply `IOSurface/IOSurface.h` (cloud CI, sandboxed Linux, partial macOS SDK images) so that unrelated targets — including `PublishableBenchmark` — can build. Must be set in the environment that runs `swift build` / `swift test`. |
 
 ## Getting Help
 
@@ -287,3 +288,12 @@ Running on Intel Mac or in simulator. EdgeRunner requires Apple Silicon.
 ### Simulator
 - Not supported (no Metal GPU)
 - Use "My Mac (Mac Catalyst)" or physical device
+
+### Cloud / CI environments
+If `swift build` or `swift test` fails with `IOSurface/IOSurface.h: No such file or directory`, the host SDK doesn't expose the IOSurface framework headers. Only the experimental ANE / Espresso path needs them — the canonical `PublishableBenchmark/fullBenchmark` does not. Skip those targets at package-resolution time:
+
+```bash
+EDGERUNNER_SKIP_ANE=1 swift test -c release --filter "PublishableBenchmark/fullBenchmark"
+```
+
+Setting the variable drops `ANEInteropIO`, `EspressoEdgeRunner`, the `EspressoEdgeRunnerTests` target, and the `EspressoEdgeRunner` library product from the manifest. The rest of the module graph is unchanged.
