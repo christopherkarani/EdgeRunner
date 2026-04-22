@@ -1,4 +1,6 @@
 #include "ane_interop_io.h"
+
+#if __has_include(<IOSurface/IOSurface.h>)
 #include <string.h>
 
 void er_ane_interop_io_read_fp16(
@@ -82,3 +84,35 @@ void er_ane_interop_io_write_fp16(
 
     IOSurfaceUnlock(surface, 0, NULL);
 }
+
+#else
+
+void er_ane_interop_io_read_fp16(
+    void *surface,
+    int32_t channelOffset,
+    int32_t width,
+    int32_t height,
+    uint16_t *outBuffer
+) {
+    (void)surface;
+    (void)channelOffset;
+    (void)width;
+    (void)height;
+    (void)outBuffer;
+}
+
+void er_ane_interop_io_write_fp16(
+    void *surface,
+    int32_t channelOffset,
+    int32_t width,
+    int32_t height,
+    const uint16_t *inBuffer
+) {
+    (void)surface;
+    (void)channelOffset;
+    (void)width;
+    (void)height;
+    (void)inBuffer;
+}
+
+#endif
