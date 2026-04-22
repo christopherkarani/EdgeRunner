@@ -29,13 +29,19 @@ Sources/
     Graph/                 # ComputeGraph + FusionEngine + TensorOp
     Generation/            # SpeculativeDecoder
     StructuredGeneration/  # JSON schema / grammar-constrained decoding
+    AutoTuner.swift        # Runtime kernel/shape autotuning helper
   EdgeRunner/              # Public façade + high-level API
-    Models/                # LlamaLanguageModel (primary), GPT2*
-    Transformer/           # Generic transformer block scaffolding
-    Module/                # nn-module-style wrappers (Linear, Sequential, TensorBox)
-    Backends/              # Backend factory, local backend, Foundation Models backend
+    EdgeRunnerFacade.swift # `EdgeRunner` actor entry point
+    EdgeRunnerLanguageModel.swift # Protocol every model backend conforms to
+    ModelLoader.swift      # Dispatches GGUF/SafeTensors loading
+    ModelConfiguration.swift / SamplingConfiguration.swift
+    Conversation.swift     # Multi-turn chat session state
+    Models/                # LlamaLanguageModel (primary), GPT2* (Embedding, Attention, Block, FFN, Config, Model)
+    Transformer/           # Generic transformer block scaffolding (MultiHeadAttention, FeedForward, TransformerBlock/Config)
+    Module/                # nn-module-style wrappers (Linear, Sequential, TensorBox, EdgeRunnerModule)
+    Backends/              # BackendFactory, EdgeRunnerLocalBackend, FoundationModelsBackend
     Streaming/             # TokenStream + GenerationSession
-    ToolCalling/           # Tool protocol, parser, executor, tool choice
+    ToolCalling/           # EdgeRunnerTool, ToolCallParser, ToolChoice, ToolExecutor
     Chat/                  # ChatMessage, ChatViewModelState, ModelInfo
     Metrics/               # Perplexity
     Documentation.docc/    # DocC catalog
@@ -84,7 +90,7 @@ EdgeRunner             (Public façade: EdgeRunner actor, LlamaLanguageModel, st
 
 | Type | File | Purpose |
 |---|---|---|
-| `EdgeRunner` (actor) | `Sources/EdgeRunner/EdgeRunnerFacade.swift` | High-level public API — `init(modelPath:)`, `stream(_:)`, `generate(_:)` |
+| `EdgeRunner` (actor) | `Sources/EdgeRunner/EdgeRunnerFacade.swift` | High-level public API — `init(modelPath:)` / `init(from url:)`, `stream(_:)`, `generate(_:)` |
 | `EdgeRunnerLanguageModel` (protocol) | `Sources/EdgeRunner/EdgeRunnerLanguageModel.swift` | Contract for model implementations |
 | `LlamaLanguageModel` | `Sources/EdgeRunner/Models/LlamaLanguageModel.swift` | **Primary inference engine** — hot path for all optimization work |
 | `ModelLoader` | `Sources/EdgeRunner/ModelLoader.swift` | Dispatches GGUF/SafeTensors loading |
@@ -181,7 +187,7 @@ vocabSize: 151936       ropeFreqBase: 1e6     rmsNormEpsilon: 1e-6
 6. **Log perf experiments** in `benchmarks/experiment_log.md` using the format in `AGENTS.md` (Hypothesis / Change / Result / Status).
 
 ### For this branch
-- Development branch: `claude/add-claude-documentation-Ov2iK`
+- Development branch: `claude/add-claude-documentation-FQnkX`
 - Develop, commit, and push only to this branch unless the user explicitly says otherwise.
 - Do not create a PR unless explicitly asked.
 
