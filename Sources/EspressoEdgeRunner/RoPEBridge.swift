@@ -1,6 +1,8 @@
 import Metal
-import IOSurface
 import EdgeRunnerMetal
+
+#if canImport(IOSurface)
+import IOSurface
 import ANEInteropIO
 
 /// Protocol for reading/writing fp16 data to/from IOSurfaces, enabling testability.
@@ -21,7 +23,10 @@ public struct DefaultANEIOSurfaceIO: ANEIOSurfaceIO, Sendable {
     }
 
     public func writeFP16(surface: IOSurfaceRef, channelOffset: Int32, width: Int32, height: Int32, data: [UInt16]) {
-        guard !data.isEmpty else { return }
+        guard width > 0, height > 0 else { return }
+        let expectedElementCount = Int(width) * Int(height)
+        guard data.count == expectedElementCount else { return }
+
         data.withUnsafeBufferPointer { ptr in
             guard let base = ptr.baseAddress else { return }
             er_ane_interop_io_write_fp16(surface, channelOffset, width, height, base)
@@ -59,9 +64,28 @@ public struct RoPEBridge: Sendable {
         theta: Float,
         scalingFactor: Float = 1
     ) async throws {
+        guard width > 0, height > 0 else {
+            throw EspressoError.invalidTensorShape("width and height must be positive")
+        }
+
+        let expectedQCount = seqLen * numHeads * headDim
+        let expectedKCount = seqLen * numKVHeads * headDim
+        let surfaceElementCount = Int(width) * Int(height)
+        guard surfaceElementCount == expectedQCount, surfaceElementCount == expectedKCount else {
+            throw EspressoError.invalidTensorShape(
+                "Expected Q/K size \(expectedQCount)/\(expectedKCount), got IOSurface element count \(surfaceElementCount)"
+            )
+        }
+
         // 1. Read Q and K from IOSurfaces
         let qFP16 = io.readFP16(surface: qSurface, channelOffset: channelOffset, width: width, height: height)
         let kFP16 = io.readFP16(surface: kSurface, channelOffset: channelOffset, width: width, height: height)
+
+        guard qFP16.count == expectedQCount, kFP16.count == expectedKCount else {
+            throw EspressoError.invalidTensorShape(
+                "Read sizes \(qFP16.count)/\(kFP16.count) do not match expected \(expectedQCount)/\(expectedKCount)"
+            )
+        }
 
         // 2. Convert fp16 -> Float
         let qFloats = qFP16.map { Float(Float16(bitPattern: $0)) }
@@ -90,3 +114,5 @@ public struct RoPEBridge: Sendable {
         io.writeFP16(surface: kSurface, channelOffset: channelOffset, width: width, height: height, data: kOut)
     }
 }
+
+#endif

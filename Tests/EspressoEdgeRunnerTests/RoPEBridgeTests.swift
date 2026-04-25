@@ -1,3 +1,4 @@
+#if canImport(IOSurface)
 import Testing
 import Metal
 import IOSurface
@@ -200,3 +201,5 @@ struct RoPEBridgeTests {
         io.writeFP16(surface: surfaceRef, channelOffset: 0, width: 0, height: 0, data: [])
     }
 }
+
+#endif
