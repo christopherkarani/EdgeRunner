@@ -17,7 +17,7 @@ private struct PLEInputsParams {
 ///
 /// For each `(batchSeq, layer)` slice computes
 /// `per_layer_inputs[bs, ℓ, p] = (RMSNorm(proj[bs, ℓ, p]) + pleRows[bs, ℓ, p]) * scaleMix`
-/// where `RMSNorm` is along the last dim (P) using Gemma's `(1 + w)` weight trick.
+/// where `RMSNorm` is along the last dim (P) using Gemma 4's direct affine weight.
 ///
 /// - `proj` is the already-1/√H-scaled output of the PLE projection GEMV with shape `[BS, L·P]`.
 /// - `normWeight` is `per_layer_proj_norm.weight`, shape `[P]`.
@@ -33,6 +33,76 @@ public struct PLEInputsKernel: Sendable {
         self.pipeline = try registry.pipeline(for: "ple_inputs_build")
     }
 
+    /// Encode PLE input construction into an existing command buffer.
+    ///
+    /// The caller owns buffer allocation, command-buffer commit, and synchronization.
+    public func encode(
+        commandBuffer: MTLCommandBuffer,
+        projectionBuffer: MTLBuffer,
+        normWeightBuffer: MTLBuffer,
+        pleRowsBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        hiddenSize: Int,
+        perLayerDim: Int,
+        numLayers: Int,
+        batchSeq: Int,
+        rmsEps: Float = 1e-6
+    ) throws {
+        guard hiddenSize > 0, perLayerDim > 0, numLayers > 0, batchSeq >= 0 else {
+            throw PLEInputsError.invalidShape(
+                "hiddenSize, perLayerDim, and numLayers must be positive; batchSeq must be non-negative"
+            )
+        }
+
+        let outputCount = batchSeq * numLayers * perLayerDim
+        guard projectionBuffer.length >= outputCount * MemoryLayout<Float>.stride else {
+            throw PLEInputsError.invalidShape("projectionBuffer is too small for \(outputCount) Float values")
+        }
+        guard normWeightBuffer.length >= perLayerDim * MemoryLayout<Float>.stride else {
+            throw PLEInputsError.invalidShape("normWeightBuffer is too small for \(perLayerDim) Float values")
+        }
+        guard pleRowsBuffer.length >= outputCount * MemoryLayout<Float>.stride else {
+            throw PLEInputsError.invalidShape("pleRowsBuffer is too small for \(outputCount) Float values")
+        }
+        guard outputBuffer.length >= outputCount * MemoryLayout<Float>.stride else {
+            throw PLEInputsError.invalidShape("outputBuffer is too small for \(outputCount) Float values")
+        }
+        guard outputCount > 0 else {
+            return
+        }
+
+        let scaleMix = 1.0 / Float(2.0).squareRoot()
+        var params = PLEInputsParams(
+            hidden: UInt32(hiddenSize),
+            perLayerDim: UInt32(perLayerDim),
+            numLayers: UInt32(numLayers),
+            batchSeq: UInt32(batchSeq),
+            rmsEps: rmsEps,
+            scaleMix: scaleMix
+        )
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw PLEInputsError.encodingFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(projectionBuffer, offset: 0, index: 0)
+        encoder.setBuffer(normWeightBuffer, offset: 0, index: 1)
+        encoder.setBuffer(pleRowsBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
+        encoder.setBytes(&params, length: MemoryLayout<PLEInputsParams>.stride, index: 4)
+
+        let gridSize = MTLSize(
+            width: perLayerDim,
+            height: batchSeq * numLayers,
+            depth: 1
+        )
+        let tgWidth = min(perLayerDim, pipeline.maxTotalThreadsPerThreadgroup)
+        let threadgroupSize = MTLSize(width: tgWidth, height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
+
     /// Test-only convenience — synchronous, creates its own command queue.
     ///
     /// The integration path should use an `encode(...)` variant that takes
@@ -40,7 +110,7 @@ public struct PLEInputsKernel: Sendable {
     ///
     /// - Parameters:
     ///   - proj: Already-scaled projection buffer, shape `[BS, L·P]` laid out row-major.
-    ///   - normWeight: Per-P RMSNorm weight (applied as `(1 + w)`), shape `[P]`.
+    ///   - normWeight: Per-P RMSNorm weight, shape `[P]`.
     ///   - pleRows: Gathered PLE rows (already `√P`-scaled), shape `[BS, L, P]`.
     ///   - hiddenSize: Retained for API documentation / future validation; not consumed by the kernel.
     ///   - perLayerDim: P — per-layer embedding dim.
@@ -110,37 +180,22 @@ public struct PLEInputsKernel: Sendable {
             throw PLEInputsError.encodingFailed
         }
 
-        let scaleMix = 1.0 / Float(2.0).squareRoot()
-        var params = PLEInputsParams(
-            hidden: UInt32(hiddenSize),
-            perLayerDim: UInt32(perLayerDim),
-            numLayers: UInt32(numLayers),
-            batchSeq: UInt32(batchSeq),
-            rmsEps: rmsEps,
-            scaleMix: scaleMix
-        )
-
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw PLEInputsError.encodingFailed
         }
 
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(projBuffer, offset: 0, index: 0)
-        encoder.setBuffer(normBuffer, offset: 0, index: 1)
-        encoder.setBuffer(pleBuffer, offset: 0, index: 2)
-        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
-        encoder.setBytes(&params, length: MemoryLayout<PLEInputsParams>.stride, index: 4)
-
-        let gridSize = MTLSize(
-            width: perLayerDim,
-            height: batchSeq * numLayers,
-            depth: 1
+        try encode(
+            commandBuffer: commandBuffer,
+            projectionBuffer: projBuffer,
+            normWeightBuffer: normBuffer,
+            pleRowsBuffer: pleBuffer,
+            outputBuffer: outputBuffer,
+            hiddenSize: hiddenSize,
+            perLayerDim: perLayerDim,
+            numLayers: numLayers,
+            batchSeq: batchSeq,
+            rmsEps: rmsEps
         )
-        let tgWidth = min(perLayerDim, pipeline.maxTotalThreadsPerThreadgroup)
-        let threadgroupSize = MTLSize(width: tgWidth, height: 1, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
-        encoder.endEncoding()
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()

@@ -124,3 +124,22 @@ kernel void convert_f16_to_f32(
         output[tid] = float(input[tid]);
     }
 }
+
+struct ERCaptureF32SliceParams {
+    uint sourceOffsetElements;
+    uint destinationOffsetElements;
+    uint elementCount;
+};
+
+// Copies a contiguous float32 slice from one shared buffer into another.
+kernel void capture_f32_slice(
+    device const float* source [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant ERCaptureF32SliceParams& params [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid < params.elementCount) {
+        destination[params.destinationOffsetElements + tid] =
+            source[params.sourceOffsetElements + tid];
+    }
+}

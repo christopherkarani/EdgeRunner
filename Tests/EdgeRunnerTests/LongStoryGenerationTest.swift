@@ -46,8 +46,6 @@ struct LongStoryGenerationTest {
             let tokenEnd = clock.now
             let tokenDuration = tokenStart.duration(to: tokenEnd)
             let tokenSeconds = Double(tokenDuration.components.seconds) + Double(tokenDuration.components.attoseconds) * 1e-18
-            let tokensPerSec = 1.0 / tokenSeconds
-            let msPerToken = tokenSeconds * 1000
 
             generatedTokens.append(result.token)
             tokenIDs.append(result.token)

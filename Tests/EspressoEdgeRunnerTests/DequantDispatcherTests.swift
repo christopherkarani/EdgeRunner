@@ -60,6 +60,30 @@ struct DequantDispatcherTests {
         }
     }
 
+    @Test("BF16 conversion round-trips through dispatcher")
+    func bf16Conversion() async throws {
+        let device = try makeDevice()
+        let values: [Float] = [1.0, 0.5, -1.0, 3.25]
+        let bf16Bits = values.map { UInt16($0.bitPattern >> 16) }
+
+        let byteCount = bf16Bits.count * MemoryLayout<UInt16>.size
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt16.self)
+        for (i, bits) in bf16Bits.enumerated() {
+            ptr[i] = bits
+        }
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .bfloat16, shape: [4], name: "bf16_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        for (i, value) in result.enumerated() {
+            #expect(abs(value - values[i]) < 1e-2, "Mismatch at \(i): \(value) vs \(values[i])")
+        }
+    }
+
     @Test("Q4_0 dispatch produces correct count via Metal kernel")
     func q4_0Dispatch() async throws {
         let device = try makeDevice()
@@ -139,6 +163,23 @@ struct DequantDispatcherTests {
         let tensor = TensorStorage(
             buffer: buffer, byteOffset: 0,
             dataType: .q3_K, shape: [superBlockCount * 256], name: "q3_k_test"
+        )
+
+        let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+        #expect(result.count == superBlockCount * 256)
+    }
+
+    @Test("Q4_K dispatch produces correct count via Metal kernel")
+    func q4_kDispatch() async throws {
+        let device = try makeDevice()
+        let superBlockCount = 2
+        let byteCount = superBlockCount * 144
+        let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared)!
+        memset(buffer.contents(), 0, byteCount)
+
+        let tensor = TensorStorage(
+            buffer: buffer, byteOffset: 0,
+            dataType: .q4_K, shape: [superBlockCount * 256], name: "q4_k_test"
         )
 
         let result = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
@@ -244,6 +285,42 @@ struct DequantDispatcherTests {
             }
         } catch {
             Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Mobile quant buffer bounds are checked")
+    func mobileQuantBufferBoundsAreChecked() async throws {
+        let device = try makeDevice()
+        let cases: [(TensorDataType, Int, Int)] = [
+            (.q2_K, 256, 84),
+            (.q3_K, 256, 110),
+            (.q4_K, 256, 144),
+            (.q5_K, 256, 176),
+            (.q6_K, 256, 210),
+            (.q8_0, 32, 34),
+            (.bfloat16, 4, 8),
+        ]
+
+        for (dataType, elementCount, byteCount) in cases {
+            let buffer = device.makeBuffer(length: max(1, byteCount - 1), options: .storageModeShared)!
+            let tensor = TensorStorage(
+                buffer: buffer,
+                byteOffset: 0,
+                dataType: dataType,
+                shape: [elementCount],
+                name: "bounds_\(dataType)"
+            )
+
+            do {
+                _ = try await DequantDispatcher.dequantize(tensor: tensor, device: device)
+                Issue.record("Expected bufferOutOfBounds for \(dataType)")
+            } catch let error as EspressoError {
+                if case .bufferOutOfBounds = error {
+                    // Expected
+                } else {
+                    Issue.record("Wrong error type for \(dataType): \(error)")
+                }
+            }
         }
     }
 }

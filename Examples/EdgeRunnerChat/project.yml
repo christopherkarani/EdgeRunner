@@ -1,0 +1,51 @@
+name: EdgeRunnerChat
+
+options:
+  createIntermediateGroups: true
+
+packages:
+  EdgeRunnerChatAppCore:
+    path: ../EdgeRunnerChatApp
+
+targets:
+  EdgeRunnerChat:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: .
+        includes:
+          - EdgeRunnerChatApp.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chriskarani.EdgeRunnerChat
+        PRODUCT_NAME: EdgeRunnerChat
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: 6.2
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+        INFOPLIST_KEY_CFBundleDisplayName: EdgeRunner Chat
+        INFOPLIST_KEY_LSRequiresIPhoneOS: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleDefault
+        INFOPLIST_KEY_UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - package: EdgeRunnerChatAppCore
+        product: EdgeRunnerChatAppCore
+
+schemes:
+  EdgeRunnerChat:
+    build:
+      targets:
+        EdgeRunnerChat: all

@@ -14,7 +14,10 @@ public struct Gemma4BlockWeights: Sendable {
     public let attnK: TensorStorage?
     public let attnV: TensorStorage?
     public let attnO: TensorStorage
+    public let attnQNorm: TensorStorage
+    public let attnKNorm: TensorStorage
     public let postAttentionNorm: TensorStorage
+    public let ffnNorm: TensorStorage
     public let ffnGate: TensorStorage
     public let ffnUp: TensorStorage
     public let ffnDown: TensorStorage
@@ -22,6 +25,7 @@ public struct Gemma4BlockWeights: Sendable {
     public let perLayerInputGate: TensorStorage
     public let perLayerProjection: TensorStorage
     public let postPerLayerInputNorm: TensorStorage
+    public let layerOutputScale: TensorStorage
 }
 
 public enum Gemma4LoadError: Error, Sendable, Equatable {
@@ -48,6 +52,7 @@ public struct Gemma4Weights: Sendable {
     public let perLayerTokenEmbed: TensorStorage
     public let perLayerModelProjection: TensorStorage
     public let perLayerProjectionNorm: TensorStorage
+    public let ropeFreqs: TensorStorage?
     public let blocks: [Gemma4BlockWeights]
 
     public init(
@@ -72,6 +77,7 @@ public struct Gemma4Weights: Sendable {
             name: "per_layer_proj_norm.weight",
             from: weightMap
         )
+        self.ropeFreqs = weightMap["rope_freqs.weight"]
 
         var blocks: [Gemma4BlockWeights] = []
         blocks.reserveCapacity(config.numHiddenLayers)
@@ -91,10 +97,13 @@ public struct Gemma4Weights: Sendable {
                 attnK: attnK,
                 attnV: attnV,
                 attnO: try Self.require("\(prefix).attn_output.weight", from: weightMap),
+                attnQNorm: try Self.require("\(prefix).attn_q_norm.weight", from: weightMap),
+                attnKNorm: try Self.require("\(prefix).attn_k_norm.weight", from: weightMap),
                 postAttentionNorm: try Self.require(
                     "\(prefix).post_attention_norm.weight",
                     from: weightMap
                 ),
+                ffnNorm: try Self.require("\(prefix).ffn_norm.weight", from: weightMap),
                 ffnGate: try Self.require("\(prefix).ffn_gate.weight", from: weightMap),
                 ffnUp: try Self.require("\(prefix).ffn_up.weight", from: weightMap),
                 ffnDown: try Self.require("\(prefix).ffn_down.weight", from: weightMap),
@@ -113,6 +122,10 @@ public struct Gemma4Weights: Sendable {
                 postPerLayerInputNorm: try Self.require(
                     "\(prefix).post_norm.weight",
                     from: weightMap
+                ),
+                layerOutputScale: try Self.require(
+                    "\(prefix).layer_output_scale.weight",
+                    from: weightMap
                 )
             )
             blocks.append(block)
@@ -123,7 +136,7 @@ public struct Gemma4Weights: Sendable {
     // MARK: - Private
 
     private static let allowedPLEQuants: Set<TensorDataType> = [
-        .q8_0, .q5_0, .q5_1, .q4_0, .q4_1, .float16, .float32, .bfloat16
+        .q8_0, .q6_K, .q5_0, .q5_1, .q4_0, .q4_1, .float16, .float32, .bfloat16
     ]
 
     private static func require(

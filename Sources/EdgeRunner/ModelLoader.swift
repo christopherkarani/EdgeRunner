@@ -43,13 +43,17 @@ public enum ModelLoader: Sendable {
             return try await BonsaiLanguageModel.load(from: url, configuration: configuration)
         }
 
+        if Gemma4LanguageModel.supports(modelConfig: modelConfig) {
+            return try await Gemma4LanguageModel.load(from: url, configuration: configuration)
+        }
+
         if llamaCompatibleArchitectures.contains(architecture) {
             return try await LlamaLanguageModel.load(from: url, configuration: configuration)
         }
 
         throw GenerationError.modelLoadFailed(
             reason: "Unsupported model architecture: '\(architecture)'. "
-                + "Supported: \(llamaCompatibleArchitectures.sorted().joined(separator: ", "))"
+                + "Supported: \((llamaCompatibleArchitectures.union([Gemma4LanguageModel.modelIdentifier])).sorted().joined(separator: ", "))"
         )
     }
 }

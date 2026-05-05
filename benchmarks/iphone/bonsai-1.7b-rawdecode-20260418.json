@@ -1,0 +1,13 @@
+{
+  "assistantResponse" : " What is the difference between quantum computing and classical computing? What are the advantages of quantum computing? What are the disadvantages of quantum computing? What are the future prospects of quantum computing? What are the challenges in developing quantum computing? What are the potential applications of quantum computing? What are the current limitations of quantum computing? What are the future directions of quantum computing? What are the potential future applications of quantum computing? What are the current limitations of quantum computing? What are the future directions of quantum computing? What are the potential future applications of quantum computing? What are the current limitations of quantum computing? What are the future directions of quantum computing?",
+  "contextWindowSize" : 4096,
+  "decodeTokensPerSecond" : 23.215065901425586,
+  "endToEndTokensPerSecond" : 22.733859705696933,
+  "generatedTokenCount" : 128,
+  "generationDurationSeconds" : 5.630368167,
+  "maxTokens" : 128,
+  "mode" : "raw_decode",
+  "modelPath" : "\/var\/mobile\/Containers\/Data\/Application\/676AAC24-1B4E-445C-9ADB-3CF812BAF4A1\/Documents\/Bonsai-1.7B.gguf",
+  "prompt" : "Explain quantum computing in simple terms.",
+  "timeToFirstTokenSeconds" : 0.159782792
+}

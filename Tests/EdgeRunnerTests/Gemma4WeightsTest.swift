@@ -28,6 +28,10 @@ struct Gemma4WeightsTests {
         #expect(weights.blocks.count == 42)
         let block0 = weights.blocks[0]
         #expect(block0.attnK != nil && block0.attnV != nil)
+        #expect(block0.attnQNorm.shape == [config.headDim])
+        #expect(block0.attnKNorm.shape == [config.headDim])
+        #expect(block0.ffnNorm.shape == [config.hiddenSize])
+        #expect(block0.layerOutputScale.shape == [1])
 
         let block24 = weights.blocks[24]
         #expect(block24.attnK == nil && block24.attnV == nil)
@@ -100,7 +104,7 @@ struct Gemma4WeightsTests {
         weightMap["per_layer_token_embd.weight"] = try Gemma4WeightsTests.makeTensorStorage(
             device: device,
             dataType: .q4_K,
-            shape: [config.perLayerVocabSize, config.perLayerDim],
+            shape: [config.perLayerDim * config.numHiddenLayers, config.perLayerVocabSize],
             name: "per_layer_token_embd.weight"
         )
 
@@ -111,6 +115,34 @@ struct Gemma4WeightsTests {
                 device: device
             )
         }
+    }
+
+    @Test("Accepts current public Q6_K PLE token embedding")
+    func acceptsQ6KPLETokenEmbedding() throws {
+        let config = try Gemma4ModelConfig(
+            metadata: Gemma4ModelConfigTests.makeReferenceMetadata()
+        )
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        var weightMap = try Gemma4WeightsTests.makeStubWeightMap(
+            config: config,
+            device: device
+        )
+        weightMap["per_layer_token_embd.weight"] = try Gemma4WeightsTests.makeTensorStorage(
+            device: device,
+            dataType: .q6_K,
+            shape: [config.perLayerDim * config.numHiddenLayers, config.perLayerVocabSize],
+            name: "per_layer_token_embd.weight"
+        )
+
+        let weights = try Gemma4Weights(
+            weightMap: weightMap,
+            config: config,
+            device: device
+        )
+        #expect(weights.perLayerTokenEmbed.dataType == .q6_K)
     }
 
     @Test("Rejects weight map missing layer attention weights")
@@ -160,12 +192,11 @@ struct Gemma4WeightsTests {
             shape: [config.hiddenSize],
             name: "output_norm.weight"
         )
-        // per_layer_token_embd must be Q8_0 (or another allowed quant) — use Q8_0 so
-        // the default stub passes the PLE quant gate.
+        // GGUF stores the PLE row width as perLayerDim * numHiddenLayers.
         map["per_layer_token_embd.weight"] = try makeTensorStorage(
             device: device,
             dataType: .q8_0,
-            shape: [config.perLayerVocabSize, config.perLayerDim],
+            shape: [config.perLayerDim * config.numHiddenLayers, config.perLayerVocabSize],
             name: "per_layer_token_embd.weight"
         )
         map["per_layer_model_proj.weight"] = try makeTensorStorage(
@@ -195,6 +226,18 @@ struct Gemma4WeightsTests {
                 shape: [config.numAttentionHeads * config.headDim, config.hiddenSize],
                 name: "\(prefix).attn_q.weight"
             )
+            map["\(prefix).attn_q_norm.weight"] = try makeTensorStorage(
+                device: device,
+                dataType: .float32,
+                shape: [config.headDim],
+                name: "\(prefix).attn_q_norm.weight"
+            )
+            map["\(prefix).attn_k_norm.weight"] = try makeTensorStorage(
+                device: device,
+                dataType: .float32,
+                shape: [config.headDim],
+                name: "\(prefix).attn_k_norm.weight"
+            )
             if config.kvSourceLayer(for: layer) == layer {
                 map["\(prefix).attn_k.weight"] = try makeTensorStorage(
                     device: device,
@@ -220,6 +263,12 @@ struct Gemma4WeightsTests {
                 dataType: .float32,
                 shape: [config.hiddenSize],
                 name: "\(prefix).post_attention_norm.weight"
+            )
+            map["\(prefix).ffn_norm.weight"] = try makeTensorStorage(
+                device: device,
+                dataType: .float32,
+                shape: [config.hiddenSize],
+                name: "\(prefix).ffn_norm.weight"
             )
             map["\(prefix).ffn_gate.weight"] = try makeTensorStorage(
                 device: device,
@@ -262,6 +311,12 @@ struct Gemma4WeightsTests {
                 dataType: .float32,
                 shape: [config.hiddenSize],
                 name: "\(prefix).post_norm.weight"
+            )
+            map["\(prefix).layer_output_scale.weight"] = try makeTensorStorage(
+                device: device,
+                dataType: .float32,
+                shape: [1],
+                name: "\(prefix).layer_output_scale.weight"
             )
         }
 

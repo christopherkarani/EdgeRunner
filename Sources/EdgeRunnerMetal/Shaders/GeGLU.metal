@@ -19,8 +19,15 @@ kernel void gelu_tanh_mul_f32(
         return;
     }
     float g = gate[gid];
-    const float c = 0.7978845608028654f;
-    float inner = c * (g + 0.044715f * g * g * g);
-    float gelu = g * 0.5f * (1.0f + tanh(inner));
+    float gelu;
+    if (g > 10.0f) {
+        gelu = g;
+    } else if (g < -10.0f) {
+        gelu = 0.0f;
+    } else {
+        const float c = 0.7978845608028654f;
+        float inner = c * (g + 0.044715f * g * g * g);
+        gelu = g * 0.5f * (1.0f + tanh(inner));
+    }
     out[gid] = gelu * up[gid];
 }

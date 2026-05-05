@@ -1,0 +1,13 @@
+{
+  "assistantResponse" : "Quantum computing is a type of computer that uses **quantum bits (qubits)** instead of traditional bits, which are 0s and 1s. Unlike classical computers, which use bits to store information, quantum computers use **qubits** to store information in a special way that allows them to process information in a very different way.\n\nKey ideas:\n- **Superposition**: A qubit can be in a state of 0, 1, or both at the same time (superposition), which helps quantum computers solve problems faster.\n- **Entanglement**: Two or more qubits can be connected so that their states are linked. Changing one instantly affects the other, no matter the distance.\n- **Multiple states at once**: This allows quantum computers to explore a vast number of possibilities at once, making them more powerful for certain types of tasks.\n\nUnlike classical computers, quantum computers are not designed to be used for everyday tasks. They are specialized for tasks that are highly complex or require solving problems in a non-classical way, such as optimization, cryptography, and drug discovery.",
+  "contextWindowSize" : 4096,
+  "decodeTokensPerSecond" : 15.805728864852602,
+  "endToEndTokensPerSecond" : 13.315998200008012,
+  "generatedTokenCount" : 221,
+  "generationDurationSeconds" : 16.596577791657182,
+  "maxTokens" : 1000,
+  "mode" : "streamed_chat",
+  "modelPath" : "\/var\/mobile\/Containers\/Data\/Application\/676AAC24-1B4E-445C-9ADB-3CF812BAF4A1\/Documents\/Bonsai-1.7B.gguf",
+  "prompt" : "Explain quantum computing in simple terms.",
+  "timeToFirstTokenSeconds" : 2.612404041661648
+}

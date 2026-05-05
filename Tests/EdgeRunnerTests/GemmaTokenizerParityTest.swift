@@ -8,6 +8,7 @@ import Foundation
 struct GemmaTokenizerParityTest {
 
     static let modelPath = "/tmp/edgerunner-models/gemma-3-1b-it-Q4_K_M.gguf"
+    static let gemma4ModelPath = "/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf"
 
     /// Reference IDs from:
     /// AutoTokenizer.from_pretrained('google/gemma-3-1b-it', use_fast=False).encode(text, add_special_tokens=False)
@@ -36,6 +37,13 @@ struct GemmaTokenizerParityTest {
 
     private func loadTokenizer() throws -> any Tokenizer {
         let url = URL(fileURLWithPath: Self.modelPath)
+        let loader = try GGUFLoader(url: url)
+        let metadata = try loader.modelConfig.tokenizerMetadata()
+        return try TokenizerFactory.create(from: metadata)
+    }
+
+    private func loadGemma4Tokenizer() throws -> any Tokenizer {
+        let url = URL(fileURLWithPath: Self.gemma4ModelPath)
         let loader = try GGUFLoader(url: url)
         let metadata = try loader.modelConfig.tokenizerMetadata()
         return try TokenizerFactory.create(from: metadata)
@@ -95,5 +103,49 @@ struct GemmaTokenizerParityTest {
             let decoded = tokenizer.decode(ids)
             #expect(decoded == text, "Round-trip failed for: \(text.debugDescription)")
         }
+    }
+
+    @Test func gemma4NormalTokensDecodeToVisibleText() throws {
+        guard FileManager.default.fileExists(atPath: Self.gemma4ModelPath) else {
+            print("SKIP: Model not found at \(Self.gemma4ModelPath)")
+            return
+        }
+
+        let tokenizer = try loadGemma4Tokenizer()
+        #expect(tokenizer is Gemma4BPETokenizer)
+        let cases: [(Int, String)] = [
+            (38_786, "Would"),
+            (128_654, " dishonest"),
+            (230_178, "Mayo")
+        ]
+
+        for (tokenID, expectedText) in cases {
+            #expect(tokenizer.decode([tokenID], skipSpecialTokens: true) == expectedText)
+        }
+    }
+
+    @Test func gemma4PromptTokensMatchLlamaCppReference() throws {
+        guard FileManager.default.fileExists(atPath: Self.gemma4ModelPath) else {
+            print("SKIP: Model not found at \(Self.gemma4ModelPath)")
+            return
+        }
+
+        let tokenizer = try loadGemma4Tokenizer()
+        let prompt = try Gemma4ChatTemplate.renderThrowing(
+            messages: [
+                Gemma4ChatMessage(
+                    role: .user,
+                    content: "Write one short sentence about fast local inference."
+                )
+            ],
+            addGenerationPrompt: true
+        )
+        let expected = [
+            2, 105, 9731, 107, 98, 107, 106, 107, 105, 2364, 107, 6974,
+            886, 2822, 13315, 1003, 4592, 2263, 34711, 236761, 106, 107,
+            105, 4368, 107,
+        ]
+
+        #expect(tokenizer.encode(prompt, addBOS: tokenizer.shouldAddBOS) == expected)
     }
 }

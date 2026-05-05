@@ -64,3 +64,15 @@
 - A source-backed `planar3 / f16 + deferred-prefill` path can fix first-token smoke and move guided divergence much deeper, but that does not prove rollout safety. If unguided quality still diverges at the first decode step, the remaining blocker is decode-time key fidelity, not prompt-time compounding.
 - Real-activation replay helpers must follow the live value cache type, not just the value preset. For `turbo-K / dense-V`, forcing a compressed-value replay path hides the real failure shape instead of isolating it.
 - If `exact_k_decoded_v_mse` collapses to zero under dense values while `decoded_k_exact_v_mse` stays large and CPU/GPU decode still match to `1e-6`, stop tuning prompt-time lifecycle. That is direct evidence that decode-time key fidelity is the blocker.
+## 2026-04-25: Gemma Optimization Strategy Correction
+
+- When the user asks for a throughput breakthrough, do not keep optimizing the current baseline with small local patches after evidence shows the baseline is architecturally wrong.
+- For Gemma 3n/Gemma 4-style E4B, prioritize a Gemma-only GPU-resident decode runtime: PLE caching, persistent KV/cache state, full layer scratch buffers, and command-buffer fusion.
+- Keep Qwen/Llama/Bonsai lanes isolated by adding Gemma-specific runtime types and tests rather than changing shared hot paths unless the shared change is separately gated.
+- Use web/primary-source research before designing large architecture changes for unfamiliar model families.
+- Quant tests must not compare Metal only to a local CPU helper unless that helper is proven against upstream raw layout. Q4_K/Q6_K passed self-referential tests while disagreeing with llama.cpp and producing Gemma junk output.
+- If a faster diagnostic path produces repeated whitespace or a single repeated token, do not leave it as the app default. Promote the coherent path first, then optimize it.
+- A coherent Gemma output at single-digit tok/s is progress on correctness only. Do not describe it as a performance breakthrough until the GPU-resident layer runtime removes Swift array round-trips and command-buffer fragmentation.
+- A synthetic Metal kernel parity test is not enough to promote a Gemma optimization. The fast decode-GQA kernel matched small CPU tests but crashed the real Gemma Q4_K_M run, so every new kernel needs a real-model benchmark gate before default use.
+- Do not keep a GPU-resident-looking Gemma change just because it removes a Swift readback. The post-FFN RMSNorm/residual buffer handoff was mathematically correct but slower in the median gate, so measured median throughput decides promotion.
+- Do not run Gemma median benchmark A/B variants in parallel. Concurrent 5GB model loads and Metal workloads can fault both processes, so Gemma performance comparisons must be sequential.

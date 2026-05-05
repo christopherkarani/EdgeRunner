@@ -107,10 +107,10 @@ kernel void dequant_q8_0_gemv(
         ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
     }
 
-    // Main loop: each thread handles 1 full block (32 elements) per iteration
+    // Main loop: each thread handles 1 full block (32 elements) per iteration.
     for (short ib = tiisg; ib < nb; ib += 32) {
         device const float* xb = x + ib * 32;
-        // Cache x in registers (reused across LOCAL_NR rows)
+        // Cache x in registers (reused across LOCAL_NR rows).
         float xl[32];
         for (short i = 0; i < 32; i++) xl[i] = xb[i];
 
@@ -455,17 +455,17 @@ kernel void dequant_q8_0_fused_gate_up_silu(
             device const uchar* blockG = axGate[r] + ib * q8_0BlockBytes;
             float scaleG = float(as_type<half>(*(device const ushort*)blockG));
             device const char* qsG = (device const char*)(blockG + 2);
-            float sqG = 0.f;
-            for (short i = 0; i < 32; i++) sqG += float(qsG[i]) * xl[i];
-            sumGate[r] += sqG * scaleG;
+            float sumG = 0.f;
+            for (short i = 0; i < 32; i++) sumG += float(qsG[i]) * xl[i];
+            sumGate[r] += sumG * scaleG;
 
             // Up
             device const uchar* blockU = axUp[r] + ib * q8_0BlockBytes;
             float scaleU = float(as_type<half>(*(device const ushort*)blockU));
             device const char* qsU = (device const char*)(blockU + 2);
-            float sqU = 0.f;
-            for (short i = 0; i < 32; i++) sqU += float(qsU[i]) * xl[i];
-            sumUp[r] += sqU * scaleU;
+            float sumU = 0.f;
+            for (short i = 0; i < 32; i++) sumU += float(qsU[i]) * xl[i];
+            sumUp[r] += sumU * scaleU;
         }
     }
 

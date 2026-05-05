@@ -1,3 +1,966 @@
+# Current Mobile GGUF Quant Support Plan
+
+# Current Gemma 250 tok/s Optimization Plan
+
+- [ ] Push Gemma 4 E4B from functional baseline toward high-throughput decode
+  - [x] Establish honest baseline and identify algorithmic waste
+  - [x] Remove repeated full-prompt PLE prelude work from decode
+  - [x] Re-measure Gemma release harness
+  - [x] Port the next Llama-style optimization: cached raw buffer reuse and batched decode projections
+  - [x] Re-run Qwen gates after shared runtime changes
+  - [x] Build stable multi-run Gemma benchmark reporting median tok/s and TTFT
+  - [x] Add Gemma-private decode state and heterogeneous GPU KV cache foundations
+  - [x] Add Gemma-specific GPU decode kernels for one-plus RMSNorm, scalar scale, and Q6_K token gather
+  - [ ] Move Gemma decode hidden state and layer scratch buffers fully GPU-resident
+  - [x] Integrate persistent heterogeneous Gemma KV cache with real sliding/global attention
+  - [x] Fuse final norm, tied LM head, softcap, and greedy argmax without full CPU logit readback for greedy Q6_K LM head
+
+## Active Plan: Gemma Buffer-Native Layer Runner
+
+- [x] Replace the cache-backed Gemma layer loop with a GPU-resident scratch-buffer runner
+  - [x] Add TDD coverage for the missing buffer-native primitives: RMSNorm plus residual add, and F32-to-F16 KV cache store
+  - [x] Add Gemma-only Metal encode helpers without changing Qwen/Llama/Bonsai lanes
+  - [x] Encode the cache-backed decoder layer stack through `Gemma4Scratch` and one command sequence per token
+  - [x] Keep the existing Swift-array layer path as a fallback until the real-model gate proves the new path
+  - [x] Run focused tests, Gemma coherent-token gate, Gemma median benchmark, and Qwen publishable hash gate
+
+### Active Spec
+
+- Success criteria:
+  - generated Gemma token IDs stay `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+  - Gemma median decode materially improves beyond the current `10.557 tok/s`
+  - Qwen publishable hash stays `0afae14a84cf0df8`
+- Constraints:
+  - no benchmark semantic changes
+  - no shared model runtime changes
+  - rollback if the buffer-native path is wrong or slower in sequential median gates
+
+### Active Review
+
+- Added a Gemma-only buffer-native greedy decode path over `Gemma4Scratch`.
+- Added and tested missing primitives:
+  - residual RMSNorm add
+  - F32 to F16 KV store with cache offsets
+  - Q4_K dual/triple GEMV encoders
+  - buffer-native single-token PLE prelude
+- Correctness gates stayed coherent:
+  - Gemma generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+  - Qwen publishable hash stayed `0afae14a84cf0df8`
+- Best measured Gemma median in this pass:
+  - `21.806 tok/s`
+  - median TTFT about `0.94s`
+- Latest default Gemma median after leaving unstable experiments opt-in:
+  - `18.859 tok/s`
+  - best run `19.028 tok/s`
+- Current honest blocker:
+  - the remaining gap to `200 tok/s` is Q4_K matvec kernel quality and total Gemma E4B math volume, not CPU-side prelude or array round-trips.
+  - two-row Q4_K, fused-GeGLU, and buffer-native PLE prelude variants are opt-in only because they did not produce a stable default win.
+
+## Active Plan: Gemma FFN K-Quant GEMV Optimization
+
+- [ ] Improve the remaining Gemma FFN bottleneck without changing Qwen/Llama/Bonsai lanes
+  - [x] Identify the new top bucket after fast GQA and FFN command-buffer fusion: `layer_ffn_fused_gate_up_down`
+  - [x] Add/extend focused K-quant GEMV microbenchmarks for Gemma FFN shapes
+  - [x] Implement one targeted Q4_K/Q6_K GEMV kernel improvement
+  - [ ] Keep only if Gemma Q4_K_M median improves and coherent token IDs stay stable
+  - [ ] Re-run Qwen quick and publishable gates after any shared Metal kernel change
+
+### Active Spec
+
+- Success criteria:
+  - Gemma Q4_K_M default median decode improves beyond the current `9.671 tok/s`
+  - generated token IDs stay `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+  - Qwen publishable hash stays `0afae14a84cf0df8`
+- Constraints:
+  - do not modify benchmark semantics
+  - shared K-quant Metal changes must retain existing Q4_K/Q6_K parity tests
+  - roll back any kernel change that wins microbenchmarks but loses Gemma median
+
+### Active Review
+
+- Tried 128-thread Q4_K/Q6_K GEMV variants to reduce per-row threadgroup width in the FFN path.
+- Focused parity passed for Q4_K, Q6_K, and mixed encoded command buffers.
+- First Gemma median looked promising (`10.225 tok/s`), but repeat/default runs were inconsistent and one sequential 128-thread full median faulted with signal 5.
+- Metal validation smoke later passed but only reached `7.632 tok/s`.
+- Decision: rolled back the 128-thread kernels from the production diff. They are not rollout-safe.
+- Latest verification after rollback:
+  - K-quant parity and fast-GQA real-capacity tests pass.
+  - Gemma Q4_K_M median benchmark passes coherently, but latest median under repeated Metal load is `6.974 tok/s`.
+  - Qwen publishable hash remains `0afae14a84cf0df8`.
+
+## Active Plan: Gemma4Scratch GPU-Resident Layer Runner Slice
+
+- [x] Build the first production-safe scratch-buffer foundation for a GPU-resident Gemma layer runner
+  - [x] Add `Gemma4Scratch` with persistent hidden, projection, attention, FFN, and PLE buffers sized from `Gemma4ModelConfig`
+  - [x] Add tests proving buffer sizes, hidden-buffer swapping, and CPU copy/read helpers
+  - [x] Add caller-owned RMSNorm encode parity coverage so scratch buffers can feed existing kernels
+  - [x] Keep default generation behavior unchanged in this slice
+  - [x] Rerun focused scratch/RMSNorm tests plus Gemma/Qwen gates
+
+### Active Spec
+
+- Success criteria:
+  - scratch buffers allocate once per model config and can be reused across layer steps
+  - all dimensions cover both Gemma local and global head shapes
+  - no default runtime path changes until the scratch runner is wired behind a gate
+  - existing Gemma coherent token IDs and Qwen hash remain the correctness gates
+- Constraints:
+  - no benchmark semantics changes
+  - no shared Llama/Qwen hot-path change for this slice
+  - do not keep scratch APIs that are too narrow for the next full-layer command-buffer runner
+
+### Active Review
+
+- Added the first `Gemma4Scratch` allocation owner with reusable hidden, attention, FFN, and PLE buffers sized from `Gemma4ModelConfig`.
+- Added focused tests for scratch sizing, active-hidden buffer swapping, hidden copy/read helpers, and invalid hidden shapes.
+- Added Metal coverage that `Gemma4DecodeKernels.encodeRMSNorm` can write into caller-owned buffers inside an existing command buffer, which is required for the next single-command-buffer layer runner slice.
+- Focused verification passed:
+  - `swift test --filter 'Gemma4Scratch|Gemma4DecodeKernelTests/gemmaRMSNormEncodesIntoExistingCommandBuffer'`
+- Gemma release gate passed on `gemma-4-E4B-it-Q4_K_M.gguf`:
+  - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+  - TTFT `13.059135s`, decode `9.762 tok/s`
+- Qwen publishable gate passed:
+  - median decode `257.4 tok/s`
+  - token hash `0afae14a84cf0df8`
+
+## Active Plan: Scratch-Backed Gemma PLE Side Channel
+
+- [x] Wire `Gemma4Scratch` into the first real Gemma layer operation without touching other model lanes
+  - [x] Add focused scratch coverage for PLE input buffer reuse
+  - [x] Add a persistent Gemma-only scratch owner to `Gemma4LanguageModel`
+  - [x] Route cache-backed PLE side-channel through scratch hidden/PLE buffers
+  - [x] Keep the shortcut fallback path and shared Qwen/Llama/Bonsai paths unchanged
+  - [x] Rerun focused scratch/Gemma tests plus Gemma/Qwen release gates
+
+### Active Spec
+
+- Success criteria:
+  - PLE side-channel no longer allocates hidden, PLE input, gate, activated, or projection buffers on the cache-backed Gemma path
+  - generated Gemma token IDs remain unchanged
+  - Qwen publishable hash remains `0afae14a84cf0df8`
+- Constraints:
+  - do not wire Q/K/V, RoPE, FFN, or prelude into scratch in this slice
+  - avoid scratch buffer swapping for now; mutate `currentHidden` in place and read it back
+  - protect reusable scratch from concurrent generation access
+  - no shared hot-path changes
+
+### Active Review
+
+- Added `Gemma4Scratch.copyPLEInput` and shape coverage so the PLE side-channel can reuse scratch storage instead of per-layer allocation.
+- Added a persistent Gemma-only scratch owner in `Gemma4LanguageModel`.
+- Routed the cache-backed Gemma PLE side-channel through scratch hidden, PLE input, gate, activated, and projection buffers.
+- Added an async gate around scratch-backed PLE execution so overlapping generation calls cannot reuse the same scratch buffers while a command buffer is in flight.
+- Kept the shortcut fallback path and shared Qwen/Llama/Bonsai paths unchanged.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'Gemma4Scratch|Gemma4DecodeKernelTests|Gemma4GPUKVCacheTests|Gemma4DecodeStateTests|Gemma4OpsTests|ModelLoaderTests'`
+  - `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `3.691983s`, decode `10.034 tok/s`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - Qwen median decode `259.9 tok/s`
+    - token hash `0afae14a84cf0df8`
+
+## Active Plan: Scratch-Backed Gemma Fused FFN
+
+- [x] Reuse `Gemma4Scratch` for the fused Gemma FFN gate/up/GeGLU/down helper
+  - [x] Add focused scratch coverage for FFN input buffer reuse
+  - [x] Route cache-backed fused FFN through scratch input/gate/up/activated/down buffers
+  - [x] Keep shortcut fallback and shared model lanes unchanged
+  - [x] Rerun focused scratch/Gemma tests plus Gemma/Qwen release gates
+
+### Active Spec
+
+- Success criteria:
+  - cache-backed Gemma FFN no longer allocates input/gate/up/activated/down buffers per layer
+  - generated Gemma token IDs remain unchanged
+  - Qwen publishable hash remains `0afae14a84cf0df8`
+- Constraints:
+  - do not change GeGLU math or projection dispatch semantics
+  - keep scratch buffer access serialized while command buffers are in flight
+  - no shared Llama/Qwen/Bonsai hot-path changes
+
+### Active Review
+
+- Added `Gemma4Scratch.copyFFNInput` and shape coverage so the fused FFN command-buffer helper can reuse persistent input storage.
+- Routed the cache-backed Gemma fused FFN through scratch input, gate, up, activated, and down buffers.
+- Preserved the existing shortcut fallback and all shared model lanes.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'Gemma4Scratch|Gemma4DecodeKernelTests|Gemma4GPUKVCacheTests|Gemma4DecodeStateTests|Gemma4OpsTests|ModelLoaderTests'`
+  - `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `5.558448s`, decode `7.592 tok/s` with finite validation enabled
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `6.342530s`, decode `10.307 tok/s`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - Qwen median decode `261.2 tok/s`
+    - token hash `0afae14a84cf0df8`
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+    - Gemma median decode `10.336 tok/s`
+    - best decode `10.441 tok/s`
+    - median TTFT `2.208316s`
+- Caveat:
+  - the finite-validation run was slower, so future performance decisions should continue using the median Gemma harness, not a single short run.
+
+## Active Plan: Buffer-Resident Gemma PLE Inputs
+
+- [x] Keep PLE per-layer inputs GPU-resident through the decoder layer stack
+  - [x] Add focused coverage for offset-based PLE gate input buffers
+  - [x] Extend `PreludeState` to retain the produced `perLayerInputsBuffer`
+  - [x] Route cache-backed layer PLE slices by buffer offset instead of Swift array slicing
+  - [x] Keep shortcut fallback able to materialize PLE inputs lazily
+  - [x] Rerun focused PLE/Gemma tests plus Gemma median and Qwen publishable gates
+
+### Active Spec
+
+- Success criteria:
+  - default cache-backed Gemma path does not read the full `numLayers * perLayerDim` PLE input buffer back to Swift each token
+  - per-layer PLE side-channel receives its slice by `MTLBuffer` offset
+  - generated Gemma token IDs remain unchanged
+  - Qwen publishable hash remains `0afae14a84cf0df8`
+- Constraints:
+  - no changes outside Gemma-specific runtime and PLE gate API
+  - shortcut fallback can be slower but must remain correct
+  - rollback on token mismatch, finite-validation failure, or median throughput regression
+
+### Active Review
+
+- Added offset support to `PLEGateKernel.encode`, with coverage proving a PLE slice can be read from inside a larger buffer.
+- Kept `PreludeState` PLE inputs as the produced `MTLBuffer` on the default cache-backed path.
+- Routed cache-backed layer PLE side-channel calls by byte offset into the per-layer-input buffer, avoiding full-buffer Swift materialization and per-layer Swift slicing.
+- Kept the shortcut fallback correct by lazily materializing PLE slices only if the shortcut path is used.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'PLEGateKernelTests|PLEInputsKernelTests|PLEGatherKernelTests|PLESideChannelKernelTests|Gemma4Scratch|Gemma4DecodeKernelTests|Gemma4GPUKVCacheTests|Gemma4DecodeStateTests|Gemma4OpsTests|ModelLoaderTests'`
+  - `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `12.832236s`, decode `10.107 tok/s`
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+    - Gemma median decode `10.202 tok/s`
+    - best decode `10.255 tok/s`
+    - median TTFT `2.245419s`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - Qwen median decode `255.9 tok/s`
+    - token hash `0afae14a84cf0df8`
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - profile still shows `layer_ffn_fused_gate_up_down` first and `ple_row_gather` second
+
+## Active Plan: Blocked Q6_K PLE Row Gather
+
+- [x] Replace the default Q6_K PLE gather dispatch with a block-oriented kernel
+  - [x] Add/retain parity coverage through existing Q6_K PLE gather tests
+  - [x] Implement a Q6_K PLE gather kernel that dispatches one threadgroup per 256-value block
+  - [x] Route `encodeQ6K` through the blocked kernel only
+  - [x] Rerun PLE tests, Gemma median, profile, and Qwen publishable gates
+
+### Active Spec
+
+- Success criteria:
+  - Q6_K PLE gather output remains bit-equivalent within existing tolerance
+  - Gemma token IDs remain unchanged
+  - Gemma median does not regress from the current `10.202 tok/s`
+  - Qwen publishable hash remains `0afae14a84cf0df8`
+- Constraints:
+  - Q8_0 PLE gather path remains unchanged
+  - no benchmark semantic changes
+  - rollback if the blocked kernel is slower in the real Gemma gate
+
+### Active Review
+
+- Added `ple_gather_q6_k_blocked`, dispatching one 256-thread threadgroup per Q6_K block.
+- Routed only Q6_K PLE gather through the blocked kernel; Q8_0 remains unchanged.
+- Fixed the Metal signature to use vector threadgroup/thread-position attributes consistently.
+- Verification passed:
+  - `swift test --filter PLEGatherKernelTests`
+  - `swift test --filter 'PLEGateKernelTests|PLEInputsKernelTests|PLEGatherKernelTests|PLESideChannelKernelTests|Gemma4Scratch|Gemma4DecodeKernelTests|Gemma4GPUKVCacheTests|Gemma4DecodeStateTests|Gemma4OpsTests|ModelLoaderTests'`
+  - `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `14.061053s`, decode `10.198 tok/s`
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+    - Gemma median decode `10.270 tok/s`
+    - best decode `10.315 tok/s`
+    - median TTFT `2.221813s`
+- Result:
+  - modestly better than the prior `10.202 tok/s` buffer-resident PLE-input median, but still below the earlier `10.336 tok/s` scratch-FFN median; keep as a small isolated kernel cleanup.
+
+## Active Plan: Bounded Gemma Prelude Cache
+
+- [x] Cache completed single-token Gemma prelude outputs by token ID
+  - [x] Add a bounded runtime cache for token hidden state plus per-layer-input buffer
+  - [x] Reuse cached prelude state before PLE row gather/token embedding/projection work
+  - [x] Keep cache size bounded to avoid long-generation memory growth
+  - [x] Rerun Gemma finite, median/profile, and Qwen publishable gates
+
+### Active Spec
+
+- Success criteria:
+  - repeated token IDs skip PLE row gather and PLE input rebuild
+  - cache is Gemma-only and bounded
+  - generated Gemma token IDs remain unchanged
+  - Qwen publishable hash remains `0afae14a84cf0df8`
+- Constraints:
+  - no cache for mutable layer outputs or KV state
+  - do not change prompt/decode semantics
+  - rollback if median performance regresses
+
+### Active Review
+
+- Added a bounded 128-entry `PreludeState` LRU inside the Gemma runtime cache.
+- Cached only token-local prelude data: token hidden vector and read-only per-layer-input buffer.
+- Repeated token IDs now skip PLE row gather, token embedding gather, model projection, and PLE input build.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'PLEGateKernelTests|PLEInputsKernelTests|PLEGatherKernelTests|PLESideChannelKernelTests|Gemma4Scratch|Gemma4DecodeKernelTests|Gemma4GPUKVCacheTests|Gemma4DecodeStateTests|Gemma4OpsTests|ModelLoaderTests'`
+  - `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+    - TTFT `20.301714s`, decode `9.618 tok/s` with finite validation
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+    - Gemma median decode `10.557 tok/s`
+    - best decode `10.595 tok/s`
+    - median TTFT `2.899122s`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - Qwen token hash stayed `0afae14a84cf0df8`
+    - Qwen median decode was noisy at `220.8 tok/s`; two runs dropped to ~158 tok/s after repeated heavy Gemma/Metal runs.
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - PLE row gather calls dropped from `33x` to `23x` at the 8-token profile checkpoint.
+- Result:
+  - keep for decode throughput and reduced repeated PLE work, but TTFT did not improve in the measured median run.
+
+# Current Gemma 4 Correctness Breakthrough Plan
+
+- [x] Restore Gemma 4 tokenization parity before more throughput work
+  - [x] Re-check upstream llama.cpp / MLX / Transformers sources for Gemma 4 tokenizer and model-contract assumptions
+  - [x] Add failing tokenizer parity coverage for Gemma 4 GGUF prompt handling
+  - [x] Implement Gemma 4 as GGUF BPE with Gemma-specific pretokenization instead of SentencePiece
+  - [x] Re-run focused tokenizer and Gemma tests
+  - [x] Re-run the downloaded Gemma Q4_K_M benchmark and compare output against llama.cpp
+  - [x] Record the next blocker or the first coherent EdgeRunner Gemma output
+
+- [x] Fix upstream K-quant raw-layout parity for Gemma Q4_K_M
+  - [x] Add/retarget tests so Q4_K and Q6_K decode against llama.cpp byte ordering, not EdgeRunner's old local reference
+  - [x] Correct Q4_K CPU fallback scale/min unpacking and low/high nibble ordering
+  - [x] Correct Q4_K Metal dequant and fused GEMV ordering
+  - [x] Correct Q6_K CPU fallback segment ordering
+  - [x] Correct Q6_K Metal dequant, fused GEMV, PLE gather, and Gemma token-embedding gather
+  - [x] Re-run focused K-quant, tokenizer, Gemma, Qwen gates, and the downloaded Gemma benchmark
+
+### Gemma 4 K-Quant Correctness Review
+
+- Root cause of the 2.4 tok/s iPhone failure was correctness first: EdgeRunner's Q4_K/Q6_K paths used local raw-byte ordering that disagreed with llama.cpp's GGUF layout.
+- Fixed Q4_K scale/min unpacking and low/high nibble grouping in CPU fallback and Metal dequant/GEMV.
+- Fixed Q6_K 128-value segment ordering in CPU fallback, Metal dequant/GEMV, PLE gather, and Gemma token embedding gather.
+- Promoted real cache-backed Gemma attention to the default path; the old shortcut can be forced only with `EDGERUNNER_GEMMA4_SHORTCUT_ATTENTION=1` and is known to repeat whitespace.
+- Added a Gemma greedy path that avoids materializing the full Q6_K tied-LM-head logits array for normal greedy decode.
+- Current Mac release result on `gemma-4-E4B-it-Q4_K_M.gguf`:
+  - generated text: `thought\nThinking Process:\n1.  **Analyze the Request:** The`
+  - generated tokens: `16`
+  - TTFT: `9.432904s`
+  - decode: `5.784 tok/s`
+- App-like greedy median harness after the greedy path:
+  - runs: `5`
+  - median TTFT: `3.725078s`
+  - median decode: `5.572 tok/s`
+  - best decode: `5.590 tok/s`
+- Qwen regression gates after the shared quant fix:
+  - quick smoke: `250.4605 tok/s`, expected prefix preserved
+  - publishable benchmark: median `225.9 tok/s`, hash `0afae14a84cf0df8`
+- iPhone reinstall was blocked by local signing state:
+  - device visible as `Chris's iPhone`
+  - Xcode build fails because no development-team account/provisioning profile is available for `com.chriskarani.EdgeRunnerChat`
+- Remaining performance blocker:
+  - Gemma is now coherent but still far below llama.cpp because layer state is still bounced through Swift arrays and many command buffers. The next breakthrough needs a GPU-resident Gemma layer runner that fuses attention, FFN, PLE side-channel, and LM-head/argmax over persistent buffers.
+
+### Gemma 4 GPU-Resident Runner Progress
+
+- Added optional profiling behind `EDGERUNNER_GEMMA4_PROFILE=1`.
+- Profiling result on the release median harness confirms the largest measured stage buckets are:
+  - `layer_ffn_gate_up_geglu`
+  - `layer_attention`
+  - `layer_ffn_down`
+  - `layer_o_projection`
+  - `layer_ple_side_channel`
+- The first token is still expensive because prompt prefill runs token-by-token through the full 42-layer stack rather than batched graph/GEMM prefill.
+- Runtime finite-value sweeps are now opt-in with `EDGERUNNER_GEMMA4_VALIDATE_FINITE=1`, so release decode does not scan every intermediate Swift array by default.
+- Added an experimental fast decode-GQA kernel that computes attention scores once per head and reuses them across value dimensions, instead of recomputing QK for every output dimension.
+  - Synthetic local/global Gemma head-dim tests pass.
+  - Added real-capacity coverage for 512-token sliding buffers and 4096-token global buffers, including wrapped starts.
+  - Added cache-backed buffer-size guards so future shape mistakes fail before a Metal device fault.
+  - Real Gemma Q4_K_M release benchmark now passes coherently with fast GQA active, so fast GQA is the default; `EDGERUNNER_GEMMA4_FAST_GQA=0` is the fallback.
+- Fused Gemma FFN gate projection, up projection, GeGLU, and down projection into one command-buffer sequence so the GeGLU activation no longer round-trips through Swift.
+- Tried a follow-on GPU-buffer post-FFN RMSNorm/residual handoff into PLE, but rolled it back because the median regressed (`8.280 tok/s`).
+- Current stable default Gemma Q4_K_M median harness after this pass:
+  - median TTFT: `2.731036s`
+  - median decode: `9.671 tok/s`
+  - best decode: `9.917 tok/s`
+  - output token IDs remained `[100, 45518, 107, 120474, 12364, 236787, 107, 236770, 236761, 138, 1018, 115863, 506, 16499, 53121, 669]`
+- Latest repeated benchmark after heavy Metal A/B testing measured lower but still coherent:
+  - Gemma median TTFT: `3.270442s`
+  - Gemma median decode: `6.974 tok/s`
+  - interpretation: performance is noise/thermal sensitive enough that any new win needs repeatable sequential medians, not a single high run.
+- Current Qwen gates after this pass:
+  - quick smoke: latest `224.6507 tok/s`, expected prefix preserved
+  - publishable benchmark: latest median `204.7 tok/s`, hash `0afae14a84cf0df8`
+- Next concrete kernel task:
+  - attack the remaining FFN bottleneck inside the Q4_K/Q6_K GEMV kernels or replace the layer runner with persistent GPU scratch buffers, because command-buffer fusion alone is now mostly exhausted.
+
+### Gemma 4 Architecture Research Notes
+
+- Official Gemma 4 E4B config confirms this is a separate text architecture, not a Llama/Qwen drop-in:
+  - 42 decoder layers
+  - hidden size 2560
+  - 8 attention heads, 2 KV heads
+  - 256-dim per-layer input embeddings
+  - 512-token sliding window
+  - alternating sliding/full attention with the final layer full attention
+  - 18 KV-shared layers
+  - tied token embeddings
+  - final logit softcap 30.0
+- Official Gemma 4 model card confirms E4B is mobile/edge targeted, uses PLE for on-device parameter efficiency, and stores large PLE tables that are cheap lookups rather than normal dense per-token compute.
+- Hugging Face Gemma 4 config documents the PLE tensor layout as one packed table shaped like `[vocab_size_per_layer_input, num_hidden_layers * hidden_size_per_layer_input]`.
+- Hugging Face Gemma 4 config documents `num_kv_shared_layers` as consecutive decoder layers sharing key-value projections, so EdgeRunner needs a layer-aware KV source map instead of one cache entry per layer by default.
+- llama.cpp's Gemma 3n/Gemma-family builder shows the reference graph shape EdgeRunner should converge toward:
+  - get PLE rows for input tokens
+  - project main embeddings through `per_layer_model_proj`
+  - normalize and combine projected PLE with table PLE
+  - keep per-layer PLE available as layer-local side input
+  - run AltUp/LAuReL/attention/FFN/PLE correction in the decoder graph
+  - for KV-shared layers, compute Q only and reuse earlier K/V
+
+### Researched Gemma Runtime Spec
+
+- Build a Gemma-only runtime lane rather than widening the Llama/Qwen path:
+  - `Gemma4DecodeState`: token prefix, cached position, PLE cache window, sliding/global KV cache ownership, and validity/reset logic.
+  - `Gemma4Scratch`: long-lived Metal buffers for hidden state, AltUp stack, norms, Q/K/V, attention output, FFN intermediates, PLE side-channel, logits, and argmax.
+  - `Gemma4LayerPlan`: layer-local metadata for sliding vs full attention, RoPE family, KV owner layer, head dimensions, and shared-KV behavior.
+- First architecture slice success criteria:
+  - existing Gemma benchmark still generates the same number of tokens or better
+  - all current Gemma focused tests pass
+  - Qwen quick and publishable correctness gates keep their pinned prefix/hash
+  - no shared hot path changes unless covered by existing cross-lane tests
+- Second architecture slice success criteria:
+  - prompt prefill writes real K/V for all KV-owner layers
+  - decode processes only one new token and attends over cache
+  - sliding layers cap attention to the configured 512-token window
+  - KV-shared layers skip K/V projection and read from their owner cache
+- Third architecture slice success criteria:
+  - final norm, tied LM head, softcap, and greedy argmax stay GPU-resident for greedy decode
+  - CPU reads only the selected next token during greedy benchmarking
+
+### Gemma 250 tok/s Optimization Spec
+
+- Target:
+  - aspirational target: `250 tok/s`
+  - current measured release baseline: `3.267 tok/s`, TTFT `10.862705s`
+- Success criteria for this pass:
+  - measurable Gemma tok/s improvement without losing generation
+  - no regression in Qwen deterministic prefix/hash gates
+  - no full-model Float32 materialization
+- Constraints:
+  - keep changes production-grade and incremental
+  - do not modify benchmark semantics
+  - preserve unrelated dirty worktree changes
+- Reality check:
+  - `250 tok/s` for a 4B-class Q4/Q6 model is not a credible near-term target on this current unfused baseline. The near-term path is to remove repeated prompt work, add decode-state caching, then fuse/encode the layer graph.
+
+### Gemma 250 tok/s Optimization Review
+
+- Removed repeated full-prompt PLE prelude work from the current token-only Gemma baseline; RoPE still uses the real sequence position.
+- Added a Gemma runtime cache for raw tensor `MTLBuffer` views, decoded norm vectors, and norm weight buffers.
+- Added reusable K-quant GEMV encode hooks for `Q4_K` and `Q6_K`, plus coverage proving Q4_K/Q6_K dispatches can share one command buffer.
+- Batched Gemma attention Q/K/V projections and FFN gate/up projections when they share the same input.
+- Added caller-owned `GeGLUKernel.encode` and wired Gemma FFN gate/up projection plus GeGLU into one command buffer, so only the activated FFN vector is read back before the down projection.
+- Replaced per-head temporary array normalization with a direct loop over each head to preserve the same Gemma RMSNorm math with less allocation.
+- Added a reusable Gemma median benchmark with one warmup run, five measured runs, per-run generated-token counts, median decode tok/s, best/min decode tok/s, and median TTFT.
+- Added `PLEGateKernel` and moved the PLE gate GELU multiply into the GPU side-channel command.
+- Rewrote `ple_side_channel_finalize` to reduce RMS once per token with a 256-thread group instead of once per hidden element.
+- Optimized Q4_K/Q6_K GEMV shaders by staging per-block scale metadata in threadgroup memory instead of reloading it from every thread.
+- Added a mathematically equivalent current-baseline single-token GQA shortcut: because Gemma currently invokes attention with `seqLen == 1`, attention output is the normalized V head expanded across each query group.
+- Web/source research checkpoint:
+  - Official Gemma 4 E4B config confirms 42 layers, hidden size 2560, 8 attention heads, 2 KV heads, 256/512 local/global head dims, 512-token sliding window, alternating sliding/full attention, 18 KV-shared layers, tied embeddings, and final logit softcap 30.0.
+  - Official Gemma 4 model card confirms E2B/E4B are mobile/edge targets and use Per-Layer Embeddings for on-device efficiency.
+  - Hugging Face Gemma 4 config documents packed PLE shape and KV-sharing semantics.
+  - llama.cpp Gemma-family graph confirms the target flow: gather packed PLE rows, project model embeddings into PLE space, keep PLE as a layer-local side input, and make KV-shared layers compute Q while reusing earlier K/V.
+- Added `Gemma4DecodeState` to classify full prefill, prefix reuse, and single-token decode without changing the public model API.
+- Added `Gemma4GPUKVCache`, a Gemma-private F16 KV cache that allocates sliding layers as 512-token rings, global layers as full-context buffers, and aliases KV-shared layers to their source buffers.
+- Added `Gemma4DecodeKernels` plus `Gemma4Decode.metal`:
+  - Gemma `(1 + weight)` RMSNorm
+  - in-place scalar multiply for `layer_output_scale`
+  - Q6_K token embedding gather/dequant for the downloaded Gemma artifact's `token_embd.weight`
+- Added an opt-in cache-backed Gemma attention lane behind `EDGERUNNER_GEMMA4_REAL_ATTENTION=1`:
+  - full-prefill / prefix-reuse / single-token decode mode routing
+  - Q/K/V projection for owner layers, Q-only projection for KV-shared layers
+  - Gemma one-plus Q/K head RMSNorm
+  - NeoX pRoPE with local/global theta selection
+  - F16 K/V writes into the Gemma-private sliding/global cache
+  - source-layer cache reads for KV-shared layers
+  - windowed F16 KV GQA over the cache buffers
+- Added a public `RoPEKernel.applyToQKNeoX` wrapper so Gemma can use NeoX-layout pRoPE without changing existing interleaved RoPE callers.
+- Wired Gemma layer output scaling into the existing PLE side-channel command buffer.
+- Routed Q6_K token embedding lookup through the Gemma GPU gather kernel; non-Q6 formats keep the existing CPU fallback until their GPU gather kernels are added.
+- Tried a GPU LM-head-plus-softcap path, but reverted it because repeated measurements regressed relative to the GeGLU/batched-projection slice.
+- Tried GPU attention-buffer reuse and attention/FFN residual RMSNorm fusion, but reverted both because median throughput did not beat the simpler path.
+- Best Gemma Q4_K_M release harness result in this pass:
+  - baseline: `3.267 tok/s`, TTFT `10.862705s`
+  - current median benchmark: `10.895 tok/s`, median TTFT `0.089117s`
+  - current best measured run: `11.138 tok/s`
+- After the Gemma-private state/cache/kernel foundation:
+  - run 1: median `7.384 tok/s`, best `11.624 tok/s`, median TTFT `0.119048s`
+  - run 2: median `10.191 tok/s`, best `11.889 tok/s`, median TTFT `0.086215s`
+  - interpretation: generation still works, but this slice is infrastructure rather than a throughput breakthrough. The Q6_K gather has not yet become a stable median win because the current runtime still reads back CPU arrays between major stages.
+- Gemma Q4_K_M re-download attempt:
+  - target: `unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf`
+  - expected file size: `4.98 GB`
+  - result: blocked by local disk pressure; `/tmp` had ~157 MB free after cleaning the incomplete Hugging Face shard.
+  - no new Gemma tok/s claim was made from this pass.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'GeGLUKernelTests|GEMVTests/encodedKQuantGemvsShareOneCommandBuffer'`
+  - `swift test --filter 'GEMVTests|GeGLUKernelTests|Gemma4WeightsTests'`
+  - `swift test --filter 'Gemma4Ops|Gemma4WeightsTests'`
+  - `swift test --filter 'PLESideChannelKernelTests|PLEGateKernelTests|GEMVTests/gemvQ4KWeightsMatchCPUReference|GEMVTests/gemvQ6KWeightsMatchCPUReference|GEMVTests/encodedKQuantGemvsShareOneCommandBuffer|Gemma4Ops|Gemma4WeightsTests'`
+  - `swift test --filter 'Gemma4GPUKVCache|Gemma4DecodeState|Gemma4DecodeKernel|Gemma4Ops|Gemma4Weights|Gemma4Config'`
+  - `swift test --filter 'Gemma4GPUKVCache|Gemma4DecodeKernel|Gemma4DecodeState|Gemma4Ops|Gemma4Weights|Gemma4Config|RoPE dual'`
+  - `swift test --filter 'RoPETests|RoPEDualTable'`
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - `git diff --check`
+- Qwen regression gates stayed deterministic:
+  - quick gate prefix: `[1, 1479, 35, 5371, 1]`
+  - quick gate after cache-backed Gemma attention lane: `[1, 1479, 35, 5371, 1]`, `262.8466 tok/s`
+  - publishable token hash: `0afae14a84cf0df8`
+  - publishable token hash after shared Metal changes: `0afae14a84cf0df8`
+  - publishable after cache-backed Gemma attention lane: `251.2 tok/s`, hash `0afae14a84cf0df8`
+- Remaining blocker for `250 tok/s`:
+  - Gemma now has a staged cache-backed attention lane, but it still uses CPU arrays and readbacks between major layer stages and has no production GPU-resident layer scratch-buffer pipeline. The next real jump requires moving layer state, FFN, PLE side-channel, final norm, tied LM head, softcap, and argmax into a persistent GPU-resident decode runner with far fewer command buffers.
+
+# Current Gemma Decoder Forward Fix Plan
+
+- [x] Fix the current Gemma 4 downloaded GGUF blocker: decoder-layer forward missing
+  - [x] Inspect exact downloaded Gemma tensor shapes/types and layer math contract
+  - [x] Add focused tests for the next decoder runtime primitive before implementation
+  - [x] Implement the smallest production decoder-forward slice that avoids full Float32 model materialization
+  - [x] Run the downloaded Gemma Q4_K_M harness and record the next blocker or generation metrics
+  - [x] Re-run Qwen correctness gates after shared kernel/runtime changes
+
+### Gemma Decoder Forward Fix Spec
+
+- Current blocker:
+  - downloaded Gemma Q4_K_M reaches `Gemma 4 PLE prelude completed; decoder layer forward is not implemented yet`
+- Success criteria:
+  - advance the real downloaded GGUF past the decoder-layer-forward blocker
+  - preserve mobile memory behavior by using raw quant/BF16 buffers where possible
+  - do not regress Qwen pinned prefix/hash gates
+- Constraints:
+  - no benchmark harness expectation changes
+
+# Gemma iPhone Deployment Space Plan
+
+- [x] Free enough local staging space for a ~5 GB Gemma Q4_K_M install.
+  - [x] Clear reproducible CoreDevice app-install delta caches.
+  - [x] Clear reproducible Hugging Face cache entries; keep `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`.
+  - [x] Re-check local free space.
+- [x] Verify the existing Gemma Q4_K_M GGUF at `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`.
+- [x] Run the Gemma downloaded-model benchmark from the existing GGUF.
+- [ ] Put the model on the paired iPhone after the app-side model copy/install path has enough staging space.
+  - [x] Freed local staging space by clearing reproducible caches.
+  - [x] Built and installed `EdgeRunnerChat` on `Chris’s iPhone`.
+  - [x] Copied `gemma-4-E4B-it-Q4_K_M.gguf` into the app Documents container.
+  - [x] Verified the on-device app container lists `Documents/gemma-4-E4B-it-Q4_K_M.gguf` at `4.97 GB`.
+  - [x] Fixed whole-file GGUF `mmap` on iOS by loading metadata from a prefix and mapping tensor regions on demand.
+  - [x] Rerun the in-app benchmark after the corrected copy completed.
+  - [ ] Fix degenerate Gemma iPhone output before treating tok/s as meaningful.
+  - [ ] Replace the current CPU/readback-heavy Gemma decode lane with a Gemma-private GPU-resident decode slice inspired by llama.cpp/MLX.
+  - no full-model Float32 materialization for Gemma 4 E4B
+  - keep unrelated dirty worktree changes intact
+
+### Gemma iPhone Benchmark Review
+
+- Device: `Chris’s iPhone` / iPhone 15 Pro Max.
+- Model copied into app container: `Documents/gemma-4-E4B-it-Q4_K_M.gguf`, `4.97 GB`.
+- Initial in-app failure after the first copy attempt: `invalidFormat("Tensor per_layer_token_embd.weight exceeds GGUF data section bounds")`; root cause was an incomplete/misplaced file copy.
+- Second in-app failure: `mmapFailed(errno: 12)`; root cause was mapping the full ~5 GB GGUF at load time.
+- Loader fix: `GGUFLoader.prepare` now parses the header from a bounded file prefix, and tensor buffers are backed by page-aligned file-region mappings instead of a whole-file mapping.
+- Current fixed-loader iPhone result:
+  - generated tokens: `64`
+  - TTFT: `7.225641s`
+  - decode: `2.408 tok/s`
+  - end-to-end: `1.917 tok/s`
+  - output: 64 NUL characters, so the result is a runtime correctness failure, not a publishable benchmark.
+
+### Gemma Decoder Forward Fix Review
+
+- Added fused raw Q4_K and Q6_K GEMV Metal kernels, plus Swift `GEMVKernel` APIs, so Gemma decoder projections can consume mobile GGUF quant tensors without expanding full matrices to Float32.
+- Added GEMV tests comparing Q4_K/Q6_K fused kernels against CPU references.
+- Bound the real Gemma decoder tensors that were missing from `Gemma4Weights`: `attn_q_norm`, `attn_k_norm`, `ffn_norm`, and `layer_output_scale`.
+- Replaced the Gemma decoder-layer stop with a functional baseline path:
+  - PLE prelude
+  - 42 decoder layers for the current token
+  - Gemma `(1 + weight)` RMSNorms
+  - Q/K/V attention projection, Q/K/V head norms, RoPE, GQA, attention output projection
+  - GeGLU FFN and PLE side-channel
+  - layer output scale, final output norm, tied LM head, and final logit softcap
+- Current limitation:
+  - this is a functional baseline, not the optimized mobile decode path. It computes current-token layer work and uses the configured shared-KV source map, but it does not yet implement a proper multi-token prefill/decode KV-cache state machine.
+- Downloaded Gemma Q4_K_M release harness now passes:
+  - generated tokens: `16`
+  - TTFT: `10.862705s`
+  - decode: `3.267 tok/s`
+- Regression verification passed:
+  - `swift build`
+  - `swift test --filter 'GEMVTests|Gemma4WeightsTests'`
+  - `swift test --filter 'FusedKernelTests|DequantQ8_0Tests'`
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+- Qwen publishable gate remains deterministic:
+  - token hash: `0afae14a84cf0df8`
+  - median decode: `221.4 tok/s`
+  - median TTFT: `4.5 ms`
+
+# Current Gemma Forward Bootstrap Plan
+
+- [x] Replace the top-level Gemma missing-forward-pass stop with a real bootstrap slice
+  - [x] Add BF16 GEMV coverage for Gemma `per_layer_model_proj.weight`
+  - [x] Implement BF16 GEMV in the shared Metal GEMV helper
+  - [x] Add a Gemma bootstrap path that builds token embeddings, gathers PLE rows, projects hidden state into PLE space, and builds PLE inputs
+  - [x] Update the downloaded Gemma harness to advance to the next precise blocker after bootstrap
+  - [x] Run focused Metal/Gemma tests plus the downloaded Gemma harness
+
+### Gemma Forward Bootstrap Spec
+
+- Scope:
+  - bootstrap only: token embedding lookup plus PLE input construction
+  - stop before attention, KV sharing, GeGLU FFN integration, final norm, LM head, and softcap
+- Success criteria:
+  - BF16 GEMV matches Float32 reference for small matrices
+  - the downloaded Gemma Q4_K_M file no longer fails with the generic missing-forward-pass error
+  - the new blocker names the next unimplemented runtime component precisely
+- Constraints:
+  - avoid materializing multi-GB tensors into Float32
+  - preserve existing Qwen benchmark semantics and current dirty worktree changes
+  - keep Bonsai/Q1 behavior untouched
+
+### Gemma Forward Bootstrap Review
+
+- Added `gemv_bf16_f32` and Swift `GEMVKernel` BF16-weight APIs so Gemma can multiply `per_layer_model_proj.weight` without expanding the full BF16 tensor to Float32.
+- Added BF16 GEMV correctness coverage against a Float32 CPU reference.
+- `Gemma4LanguageModel` now retains Metal runtime objects and runs a real bootstrap slice in `logits(for:)`:
+  - validates token IDs against token and PLE vocab sizes
+  - fills/scales token embeddings, including K-quant row lookup support
+  - gathers Q6_K/Q8_0 PLE token rows
+  - projects hidden states through BF16/F32 `per_layer_model_proj.weight`
+  - builds `[tokens, layers, perLayerDim]` PLE inputs
+- Downloaded Gemma Q4_K_M now advances past the generic missing-forward-pass stop and reaches the next precise blocker:
+  - `Gemma 4 PLE prelude completed; decoder layer forward is not implemented yet`
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'GEMVTests|PLEGatherKernelTests|PLEInputsKernelTests'`
+  - `swift test --filter 'Gemma4Ops|Gemma4Weights|ModelLoaderTests'`
+  - `swift test --filter 'FusedKernelTests|DequantQ8_0Tests'`
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+- Current publishable Qwen laptop measurement after the shared GEMV change:
+  - median decode: `231.8 tok/s`
+  - median TTFT: `4.2 ms`
+  - token hash: `0afae14a84cf0df8`
+
+# Current Qwen Decode Correctness Regression Plan
+
+- [x] Restore the pinned Qwen Q8 decode correctness gate before claiming rollout safety
+  - [x] Reproduce the current failure and record exact generated prefix
+  - [x] Run decode variants to isolate whether the regression is in prefill, decode, GQA, final norm/LM head, or benchmark configuration
+  - [x] Inspect changed Qwen hot-path files and identify the smallest correctness fix
+  - [x] Add or retarget focused coverage so this prefix drift cannot recur silently
+  - [x] Rerun `QwenBenchmark/decodeBenchmark`
+  - [x] Rerun the Qwen quant acceptance harness
+  - [x] Rerun Gemma Q4_K_M downloaded harness after the Qwen gate is green
+
+### Qwen Decode Correctness Regression Spec
+
+- Current failure:
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'`
+  - expected greedy prefix: `[1, 1479, 35]`
+  - actual greedy prefix: `[1, 1435, 353]`
+  - pinned model SHA-256 still matches `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`
+- Success criteria:
+  - pinned Qwen smoke benchmark passes its prefix guard
+  - no benchmark artifact is rewritten from a failing run
+  - mobile quant acceptance still loads/generates for all six selected quant files
+- Constraints:
+  - preserve unrelated dirty worktree changes
+  - do not change benchmark correctness expectations to match the regression
+  - fix runtime behavior, not the guard
+
+### Qwen Decode Correctness Regression Review
+
+- Root cause:
+  - `Dequant_Q8_0.metal` had been changed to vectorize Q8 payload reads with `uint`/`char4` loads from `block + 2`.
+  - Q8_0 blocks are 34 bytes, so `block + 2` is not 4-byte aligned across rows/blocks. The shader did not crash, but produced wrong GEMV math.
+- Fix:
+  - restored alignment-safe signed byte reads in the Q8 GEMV, batched GEMV, fused QKV, fused final norm + LM head, fused Gate+Up+SwiGLU, and f16-accumulation Q8 kernels.
+- Verification passed:
+  - `swift test --filter 'FusedKernelTests|DequantQ8_0Tests'`
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'`
+    - generated prefix restored to `[1, 1479, 35]`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - median decode: `218.1 tok/s`
+    - median TTFT: `4.1 ms`
+    - token hash: `0afae14a84cf0df8`
+  - `EDGERUNNER_QWEN_* swift test -c release --filter 'QwenQuantAcceptanceTest/selectedMobileQuantsGenerateText'`
+  - Gemma Q4_K_M still gets past Q6_K PLE loading and reaches the missing-forward-pass blocker.
+- Remaining quality debt:
+  - mobile K-quant files now load and generate, but low-bit Qwen outputs remain fragment-heavy under the current short harness prompt. Format support is proven; text quality still needs a separate acceptance prompt/quality pass.
+
+## Current Mobile GGUF Quant Support Plan
+
+- [x] Build a mobile-first GGUF quant capability baseline before continuing broad Gemma work
+  - [x] Add a capability matrix covering GGUF parse, byte-size calculation, dequant parity, raw/fused path availability, and end-to-end generation
+  - [x] Add failing-first coverage for `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `F16`, and `BF16`
+  - [x] Add explicit named rejection coverage for deferred unsupported upstream types: `IQ*`, `TQ*`, `MXFP4`, `NVFP4`, and upstream `Q1_*`
+  - [x] Normalize Llama/Qwen quant dispatch so selected K-quants cannot fall into stale or accidental unsupported paths
+  - [x] Add a reusable Qwen quant end-to-end harness with prompt, minimum-token, and basic coherence checks
+  - [x] Download or reuse Qwen3 0.6B `Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`, and `Q8_0` GGUF artifacts for acceptance
+  - [x] Add `Q6_K` PLE gather support for Gemma `per_layer_token_embd.weight`
+  - [x] Rerun the downloaded Gemma Q4_K_M harness and record the next concrete blocker
+
+### Mobile GGUF Quant Support Spec
+
+- Scope:
+  - first wave includes K-quants only: `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, plus `F16/BF16` loader compatibility
+  - first wave explicitly excludes `Q1` and `IQ*` quality work
+  - end-to-end acceptance uses Qwen3 0.6B GGUF variants, not Gemma, because Qwen already has an implemented generation path
+- Success criteria:
+  - every selected quant has parse/byte-size/dequant or availability coverage
+  - every selected Qwen quant artifact loads and generates non-empty text through EdgeRunner
+  - Q2_K may be lower quality, but must not crash, produce empty text, or repeat one junk token only
+  - Gemma Q4_K_M advances past the known `unsupportedPLEQuant("q6_K")` blocker after Q6_K PLE gather is implemented
+- Constraints:
+  - preserve unrelated dirty worktree edits
+  - do not change app-facing APIs
+  - do not modify benchmark harness semantics
+  - keep Bonsai/Q1 behavior untouched in this wave
+
+### Mobile GGUF Quant Support Review
+
+- Added [docs/mobile-gguf-quant-support.md](/Users/chriskarani/CodingProjects/EdgeRunner/docs/mobile-gguf-quant-support.md) to track first-wave parse, byte-size, dequant, raw/fused, and end-to-end status.
+- Added current upstream GGUF names for deferred unsupported formats: `IQ*`, `TQ1_0`, `TQ2_0`, `MXFP4`, and `NVFP4`.
+- Preserved the existing Bonsai `Q1_0_G128` raw type-41 path for this wave to avoid changing Bonsai behavior.
+- Added BF16 conversion in the Llama and Espresso dequant paths.
+- Added GGUF byte-size and truncated-payload tests for `F16`, `BF16`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, and `Q8_0`.
+- Added Q4_K dispatcher coverage and mobile quant buffer-bounds coverage in Espresso.
+- Added row-level K-quant embedding lookup support for Llama/Qwen token embeddings stored as `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, or `Q6_K`.
+- Added `ple_gather_q6_k` plus Swift encode/run APIs for Gemma PLE token embeddings.
+- Confirmed the downloaded Gemma Q4_K_M tensor shape for `per_layer_token_embd.weight` is `[10752, 262144]`, matching `42 * 256` row width.
+- Downloaded Qwen3 0.6B quant artifacts:
+  - TensorBlock: `Q2_K`, `Q3_K_M`
+  - Bartowski: `Q4_K_M`, `Q5_K_M`, `Q6_K`, `Q8_0`
+- Verification passed:
+  - `swift test --filter 'GGUFTensorTableTests|PLEGatherKernelTests|Gemma4WeightsTests|DequantDispatcherTests|QwenQuantAcceptanceTest'`
+  - `swift test --filter 'GGUFTensorTableTests|PLEGatherKernelTests|Gemma4WeightsTests|DequantDispatcherTests'`
+  - `EDGERUNNER_QWEN_* swift test -c release --filter 'QwenQuantAcceptanceTest/selectedMobileQuantsGenerateText'`
+- Gemma Q4_K_M result:
+  - previous blocker `unsupportedPLEQuant("q6_K")` is cleared
+  - current blocker is now the explicit missing Gemma forward pass error after weights/tokenizer load
+- Regression caveat:
+  - `swift test -c release --filter 'QwenBenchmark/decodeBenchmark'` currently fails the pinned greedy-prefix guard with `[1, 1435, 353]` instead of `[1, 1479, 35]` even though the pinned file SHA-256 matches `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031`
+  - this needs a separate Qwen decode-correctness regression pass before the broader branch can be called rollout-safe
+
+# Current Gemma 4 E4B iPhone Bring-Up Plan
+
+- [x] Investigate `unsupportedDataType(30)` from the downloaded Gemma 4 Q4_K_M GGUF
+  - [x] Map raw GGUF tensor type `30` to the upstream GGML type name
+  - [x] Count affected tensors in the downloaded file
+  - [x] Decide whether to add support or produce a precise rejection
+  - [x] Add focused test coverage for the loader behavior
+  - [x] Run verification and record the result
+
+- [x] Download Gemma 4 E4B GGUF from Hugging Face into the local model cache
+- [x] Run an EdgeRunner laptop measurement attempt against the downloaded GGUF
+- [x] Record the actual tok/s or the first concrete EdgeRunner runtime blocker
+
+- [x] Handle focused Gemma-ready GQA prerequisites only
+  - [x] Add failing-first GQA tests for additive row-major attention masks
+  - [x] Add failing-first GQA tests for `headDim` 256 and 512 while preserving the existing 128-dim path
+  - [x] Implement the narrowest `GQAKernel` API and Metal shader support for additive masks
+  - [x] Add a wide-head fallback path that supports 256/512 without changing the optimized 128-dim dispatch
+  - [x] Run targeted GQA verification and record results
+
+- [x] Implement focused PLE runtime kernel issues only
+  - [x] Add failing focused tests for `PLEGatherKernel` command-buffer encode
+  - [x] Add failing focused tests for `PLEInputsKernel` command-buffer encode
+  - [x] Add failing focused tests for PLE side-channel finalize
+  - [x] Implement surgical PLE kernel/API changes
+  - [x] Run focused `PLE*` Metal tests
+
+### Focused PLE Runtime Kernel Review
+
+- Added caller-owned command-buffer encode APIs for `PLEGatherKernel` and `PLEInputsKernel`.
+- Added `PLESideChannelKernel` plus `ple_side_channel_finalize`, computing `hidden += RMSNorm(projection, 1 + postNormWeight)`.
+- Added focused Metal tests for gather encode, inputs encode, side-channel run/encode parity, and side-channel shape validation.
+- Verification passed:
+  - `swift test --filter PLE`
+  - `swift build`
+
+- [x] Add PLE runtime encode APIs for command-buffer integration
+- [x] Add PLE side-channel finalize kernel/API and tests
+- [x] Add explicit Gemma `(1 + weight)` RMSNorm helper and tests
+- [x] Add FFN-only Gemma decoder slice with GeGLU and tests
+- [x] Add Gemma-ready GQA additive mask + headDim 256/512 support and tests
+- [ ] Replace the `Gemma4LanguageModel.logits` missing-forward-pass error with the first integrated forward slice
+- [x] Confirm the exact Gemma 4 E4B text-only GGUF artifact and local compatibility assumptions
+- [x] Run targeted Gemma 4 config/weights/tokenizer/kernel tests to expose the first concrete blocker
+- [x] Make the smallest production-grade runtime/loader fixes required for Gemma 4 E4B to reach the dedicated backend
+- [x] Verify locally with tests and record the first concrete forward-pass blocker
+- [ ] Build, install, and launch the iOS chat/benchmark app on the connected iPhone
+- [ ] Capture TTFT and decode tok/s from the phone, then record bottleneck evidence and next optimization step
+
+### Gemma-ready GQA Prerequisites Spec
+
+- Ownership is limited to `Sources/EdgeRunnerMetal/GQAKernel.swift`, `Sources/EdgeRunnerMetal/Shaders/GQA.metal`, and `Tests/EdgeRunnerMetalTests/GQA*`.
+- Additive mask contract: row-major `[seqLen, effectiveKVSeqLen]` `Float` values added to attention scores before softmax.
+- `headDim` support target: existing 128-dim path continues to work; 256 and 512 run correctly for float GQA.
+- Constraints:
+  - preserve unrelated dirty worktree edits
+  - do not modify benchmark harnesses or package dependencies
+  - keep changes surgical and production-grade
+
+### Gemma-ready GQA Prerequisites Review
+
+- Added `GQAKernel.execute(... additiveMask:)` and `encode(... additiveMaskBuffer:)` for row-major additive attention masks.
+- Preserved the existing optimized unmasked `headDim <= 128` tiled path.
+- Added scalar fallback Metal kernels for additive-mask dispatches and unmasked `headDim` 256/512 support.
+- Added GQA tests for finite additive bias, `-.infinity` masking, effective `kvSeqLen` + `qOffset` mask indexing, and `headDim` 128/256/512 CPU parity.
+- Verification passed:
+  - `swift build`
+  - `swift test --filter GQATests`
+  - `swift test -c release --filter GQATests`
+
+### Gemma 4 E4B iPhone Bring-Up Spec
+
+- Target model: `google/gemma-4-E4B-it` text generation path
+- Candidate GGUF source: a concrete `gemma-4-E4B-it-*` GGUF artifact, preferring a mobile-feasible quant before Q8_0
+- Target device: connected iPhone, using the existing `Examples/EdgeRunnerChat` app/automation path
+- Success criteria:
+  - EdgeRunner recognizes Gemma 4 E4B metadata and rejects unsupported artifacts with actionable errors
+  - a Gemma 4 E4B GGUF loads and produces deterministic text generation locally or reports the first concrete unsupported runtime feature
+  - the iPhone run produces measured TTFT and decode tok/s from a real on-device launch
+- Constraints:
+  - preserve existing dirty worktree changes
+  - keep benchmark semantics unchanged unless a Gemma-specific benchmark path is added
+  - text-only first; multimodal audio/image/video processors are out of scope for this pass
+
+### Gemma 4 E4B iPhone Bring-Up Review
+
+- Confirmed current public artifact choices:
+  - `ggml-org/gemma-4-E4B-it-GGUF:Q4_K_M` is the preferred phone-feasible target at about 5.34 GB
+  - `ggml-org/gemma-4-E4B-it-GGUF:Q8_0` is about 8.03 GB and is a quality/control artifact, not the first iPhone throughput target
+- Added `Gemma4LanguageModel` as the public EdgeRunner backend boundary. It:
+  - recognizes `general.architecture == "gemma4"`
+  - parses Gemma 4 E4B config from public `ModelConfig` metadata
+  - binds existing `Gemma4Weights`
+  - loads the GGUF tokenizer when available
+  - applies the tokenizer chat template, falling back to the local Gemma 4 renderer
+  - fails generation with a precise missing-forward-pass error instead of falling through as an unknown architecture
+- Updated `ModelLoader` to route `gemma4` GGUF files to the dedicated Gemma backend before the llama-compatible fallback.
+- Fixed the pre-existing `.gitignore` `Edgerunner` rule by anchoring it to `/Edgerunner`, so new files under `Sources/EdgeRunner/...` are no longer ignored on the case-insensitive macOS filesystem.
+- Wired iOS launch-time autobenchmark support in `Examples/EdgeRunnerChat/EdgeRunnerChatApp.swift`:
+  - normal launch still opens `ChatWindow(runtime:)`
+  - `EDGERUNNER_AUTOBENCH_*` environment values trigger one launch-time run
+  - result JSON writes to the app Documents directory through `BenchmarkAutomationWriter`
+- Verification passed:
+  - `swift test --filter 'Gemma4|ModelLoader'`
+  - `cd Examples/EdgeRunnerChatApp && swift test`
+  - `xcodebuild -project Examples/EdgeRunnerChat/EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+- Current blocker to a real iPhone tok/s number:
+  - the Gemma 4 forward pass is not integrated yet. The next implementation slice is PLE input construction, then PLE side-channel finalization, then GeGLU FFN, then Gemma-ready GQA with additive mask + headDim 256/512 support.
+
+### Pending Issues Fix Pass Review
+
+- Closed the pending runtime prerequisite issues that can be verified without a full Gemma 4 forward pass:
+  - Gemma `(1 + weight)` RMSNorm reference helper
+  - Gemma GeGLU FFN residual slice reference helper
+  - PLE gather/input encode APIs for caller-owned command buffers
+  - PLE side-channel finalize kernel/API
+  - GQA additive masks plus wide `headDim` 256/512 fallback
+- Verification passed:
+  - `swift build`
+  - `swift test --filter 'GQA|PLE|Gemma4Ops|Gemma4|ModelLoader'`
+  - `cd Examples/EdgeRunnerChatApp && swift test`
+  - `xcodebuild -project Examples/EdgeRunnerChat/EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - `git diff --check`
+- Remaining intentional blocker:
+  - `Gemma4LanguageModel.logits` still reports the missing integrated forward pass. No real Gemma 4 iPhone TTFT/tok/s can be captured until that forward path is wired end-to-end.
+
+### Gemma 4 E4B Laptop Measurement Attempt Review
+
+- Downloaded `ggml-org/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf` to `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`.
+- Verified local artifact:
+  - size: 5.0 GB
+  - SHA-256: `90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f`
+- Added an opt-in downloaded-Gemma benchmark harness guarded by `EDGERUNNER_GEMMA4_BENCHMARK_MODEL`.
+- Measurement attempt:
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test --filter runDownloadedGGUFThroughEdgeRunner`
+  - Result: no tok/s; EdgeRunner stops during GGUF loading with `unsupportedDataType(30)`.
+- Fallback attempted:
+  - Started Q8_0 download as a compatibility-control artifact, but the transfer projected about an hour at the observed direct-download rate after the Hugging Face CLI transfer stalled.
+  - Stopped the Q8_0 fallback to avoid spending another long transfer on an artifact that still cannot generate until the Gemma 4 forward path is integrated.
+- Verification passed:
+  - `swift test --filter runDownloadedGGUFThroughEdgeRunner` without the env var
+  - `git diff --check`
+
+### Gemma 4 Q4_K_M Load Failure Investigation Review
+
+- Root cause of the original `unsupportedDataType(30)`:
+  - Upstream GGML defines raw tensor type `30` as `GGML_TYPE_BF16`.
+  - The downloaded Q4_K_M file has exactly one BF16 tensor: `per_layer_model_proj.weight [2560, 10752]`.
+  - EdgeRunner already had `TensorDataType.bfloat16`, but `GGUFTensorType` did not include BF16 and the 16...28 enum range was stale relative to current GGML.
+- Fixes applied:
+  - Added GGUF BF16 parsing and byte-size handling.
+  - Realigned GGUF raw tensor types 16...28 with current GGML ordering.
+  - Updated Gemma 4 config parsing for the current public GGUF metadata aliases:
+    - `gemma4.attention.key_length_swa`
+    - `gemma4.embedding_length_per_layer_input`
+    - `gemma4.attention.sliding_window_pattern`
+    - vocab fallback from `tokenizer.ggml.tokens`
+- Real downloaded-file result after those fixes:
+  - EdgeRunner now gets past BF16 and metadata parsing.
+  - The current blocker is `unsupportedPLEQuant("q6_K")`.
+  - The downloaded Q4_K_M file stores `per_layer_token_embd.weight` as Q6_K, while the only PLE gather kernel is `ple_gather_q8_0`.
+- Verification passed:
+  - `swift test --filter GGUFTensorTableTests`
+  - `swift test --filter Gemma4ModelConfig`
+  - `swift test --filter 'Gemma4ModelConfig|GGUFTensorTableTests|Gemma4Weights|runDownloadedGGUFThroughEdgeRunner'`
+  - `swift build`
+
+# Current Bonsai 1.7B iPhone Run Plan
+
+- [ ] Inspect the installed app container on the connected iPhone 15 Pro Max and confirm whether the last `streamed_chat` benchmark wrote a JSON result
+- [ ] If no valid result exists, relaunch the benchmark against `Bonsai-1.7B.gguf` with the intended streamed-chat configuration and capture a fresh artifact
+- [ ] Report the measured tok/s and TTFT from the phone run, then record the immediate bottleneck evidence for the next optimization pass
+
+### Bonsai 1.7B iPhone Run Review
+
+- Fixed the runtime kernel lookup failure by making [KernelRegistry.swift](/Users/chriskarani/CodingProjects/EdgeRunner/Sources/EdgeRunnerMetal/KernelRegistry.swift) fall back to a source-compiled Metal library when a requested function is missing from the primary bundle metallib
+- Verified the kernel path locally with:
+  - `swift build`
+  - `swift test --filter "ElementwiseKernelTests"`
+- Rebuilt and reinstalled the iPhone app successfully
+- Current blocker to the fresh on-device result is device lock state during launch:
+  - `Unable to launch com.chriskarani.EdgeRunnerChat because the device was not, or could not be, unlocked`
+
+# Current Bonsai 8B iPhone Retry Plan
+
+- [ ] Confirm the connected iPhone is unlocked and `Bonsai-8B-Q1_0.gguf` remains present in the app sandbox
+- [ ] Launch the 8B on-device benchmark with a fresh result filename
+- [ ] Pull the result artifact and report either measured throughput or the first concrete runtime blocker
+
+### Bonsai 8B iPhone Retry Review
+
+- Pending fresh launch on the repaired app baseline
+
 # Current Bonsai 8B iPhone Benchmark Plan
 
 - [ ] Confirm the exact Bonsai 8B GGUF artifact and local compatibility assumptions for EdgeRunner
@@ -169,6 +1132,33 @@
 
 - [x] Reuse the existing shared chat runtime/UI instead of forking another inference flow
 - [x] Make the shared example package usable from iOS as well as macOS
+
+# Current iOS Benchmark Startup Wiring Plan
+
+- [x] Inspect the existing iOS app entry point and shared benchmark automation surface
+- [x] Confirm normal UI launch is currently unconditional and benchmark configuration/writer/runtime support already exist in `EdgeRunnerChatAppCore`
+- [x] Add the narrowest launch-time hook in `Examples/EdgeRunnerChat/EdgeRunnerChatApp.swift` that:
+  - preserves `ChatWindow(runtime:)` as the normal first screen
+  - creates `BenchmarkAutomationConfiguration` only from `EDGERUNNER_AUTOBENCH_*` environment values
+  - runs `ChatRuntime.runAutomatedBenchmark` once per launch when configuration resolves
+  - writes the JSON result through `BenchmarkAutomationWriter`
+- [x] Run the existing example package tests and an iOS app build
+- [x] Record verification results and any blocker in this section
+
+### iOS Benchmark Startup Wiring Assumptions
+
+- Existing core automation APIs are the source of truth; this task should not change benchmark semantics.
+- The iOS app should use the app Documents directory for model filename resolution and JSON result output.
+- Tests under `Examples/EdgeRunnerChatApp/Tests` already cover configuration parsing, JSON writing, and runtime benchmark execution, so the missing verification is the iOS app build.
+
+### iOS Benchmark Startup Wiring Review
+
+- Added launch-time automation wiring in `Examples/EdgeRunnerChat/EdgeRunnerChatApp.swift`.
+- Normal UI remains `ChatWindow(runtime:)`; without a resolvable autobench configuration, launch returns without running benchmark work.
+- With a resolvable `EDGERUNNER_AUTOBENCH_MODEL_PATH` or `EDGERUNNER_AUTOBENCH_MODEL_FILENAME`, the app resolves Documents, runs `ChatRuntime.runAutomatedBenchmark`, and writes the JSON result with `BenchmarkAutomationWriter`.
+- Verification passed:
+  - `swift test` from `Examples/EdgeRunnerChatApp`
+  - `xcodebuild -project Examples/EdgeRunnerChat/EdgeRunnerChat.xcodeproj -scheme EdgeRunnerChat -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`
 - [x] Generate a real iOS Xcode project under `Examples/EdgeRunnerChat`
 - [x] Replace the unfinished placeholder app flow with the shared EdgeRunner-backed chat UI
 - [x] Verify the iOS app builds from Xcode command line

@@ -39,12 +39,12 @@ struct PLEInputsKernelTests {
         )
         #expect(out.count == expected.count)
         for i in 0..<out.count {
-            #expect(abs(out[i] - expected[i]) < 1e-3, "mismatch at \(i): got \(out[i]) expected \(expected[i])")
+            #expect(abs(out[i] - expected[i]) < 1e-3, "mismatch at \(i)")
         }
     }
 
-    @Test("Non-zero normWeight: (1 + w) trick applied")
-    func normWeightAppliedWithOnePlusTrick() throws {
+    @Test("Non-zero normWeight: direct Gemma 4 weight applied")
+    func normWeightAppliedDirectly() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("Metal device unavailable")
             return
@@ -66,9 +66,9 @@ struct PLEInputsKernelTests {
             rmsEps: 1e-6
         )
         let scaleMix = Float(1.0) / Float(2.0).squareRoot()
-        // Expected: (1/rms * (1+w) + 0) * scaleMix
+        // Expected: (1/rms * w + 0) * scaleMix
         // rms for all-1s -> sqrt(1 + 1e-6) ~ 1
-        let expectedMultipliers: [Float] = [1.5, 0.5, 2.0, 1.0]
+        let expectedMultipliers: [Float] = [0.5, -0.5, 1.0, 0.0]
         for p in 0..<P {
             let expected = expectedMultipliers[p] * scaleMix
             #expect(abs(out[p] - expected) < 1e-3)
@@ -113,6 +113,66 @@ struct PLEInputsKernelTests {
         }
     }
 
+    @Test("Encodes per-layer input build into caller-owned command buffer")
+    func encodesIntoCommandBuffer() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let commandQueue = device.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer()
+        else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+
+        let H = 8
+        let L = 2
+        let P = 4
+        let BS = 3
+        let proj = (0..<(BS * L * P)).map { Float($0) * 0.03 - 0.25 }
+        let normW: [Float] = [0.1, -0.2, 0.0, 0.3]
+        let pleRows = (0..<(BS * L * P)).map { Float($0 % 7) * 0.05 - 0.15 }
+        let outputCount = BS * L * P
+
+        guard let projBuffer = device.makeBuffer(bytes: proj, length: proj.count * MemoryLayout<Float>.stride),
+              let normBuffer = device.makeBuffer(bytes: normW, length: normW.count * MemoryLayout<Float>.stride),
+              let pleBuffer = device.makeBuffer(bytes: pleRows, length: pleRows.count * MemoryLayout<Float>.stride),
+              let outputBuffer = device.makeBuffer(length: outputCount * MemoryLayout<Float>.stride)
+        else {
+            Issue.record("Metal buffer allocation failed")
+            return
+        }
+
+        let kernel = try PLEInputsKernel(device: device)
+        try kernel.encode(
+            commandBuffer: commandBuffer,
+            projectionBuffer: projBuffer,
+            normWeightBuffer: normBuffer,
+            pleRowsBuffer: pleBuffer,
+            outputBuffer: outputBuffer,
+            hiddenSize: H,
+            perLayerDim: P,
+            numLayers: L,
+            batchSeq: BS,
+            rmsEps: 1e-6
+        )
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let output = Array(
+            UnsafeBufferPointer(
+                start: outputBuffer.contents().bindMemory(to: Float.self, capacity: outputCount),
+                count: outputCount
+            )
+        )
+        let expected = Self.referenceForward(proj: proj, norm: normW, pleRows: pleRows, L: L, P: P, BS: BS)
+        for i in 0..<outputCount {
+            #expect(abs(output[i] - expected[i]) < 1e-3, "mismatch at \(i)")
+        }
+    }
+
     static func referenceForward(
         proj: [Float],
         norm: [Float],
@@ -133,7 +193,7 @@ struct PLEInputsKernelTests {
                 }
                 let rms = sqrt(sumSq / Float(P) + rmsEps)
                 for p in 0..<P {
-                    let w = Float(1) + norm[p]
+                    let w = norm[p]
                     let idx = b * L * P + ell * P + p
                     let normed = proj[idx] / rms * w
                     out[idx] = (normed + pleRows[idx]) * scaleMix

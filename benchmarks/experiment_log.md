@@ -919,3 +919,81 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 - **Why Q8 still wins:** Q1 native path uses 13 dispatches/layer (separate RMSNorm + 7 individual GEMVs) vs Q8 fused path at 5 dispatches/layer (fused RMSNorm+QKV, mega-kernel GQA). Even though Q1 reads 7.5x less data, the dispatch overhead and pipeline stalls prevent achieving the microbenchmark's 52 GB/s effective bandwidth.
 - **Status:** KEPT (v2 kernel available via `EDGERUNNER_Q1_USE_V2_KERNEL=1`, not default)
 - **Future opportunity:** Fusing Q1 v2 into fused QKV/GateUp kernels could close the dispatch gap. At 52 GB/s with 5 dispatches/layer, projected: ~157 tok/s.
+
+### Gemma Experiment 52: Fast Windowed GQA Default — KEPT
+- **Hypothesis:** Gemma decode attention recomputed QK once per output dimension. Computing scores once per head and reusing them across value dimensions should reduce the attention bucket without changing cache semantics.
+- **Change:** Added `gemma4_decode_gqa_f16kv_windowed_fast`, real-capacity tests for 512-token sliding and 4096-token global caches, and cache-backed buffer-size guards. Promoted fast GQA to default with `EDGERUNNER_GEMMA4_FAST_GQA=0` as the fallback.
+- **Result:** Gemma Q4_K_M median `5.652` → `9.120 tok/s` after default promotion; coherent token IDs preserved. Qwen publishable hash preserved.
+- **Status:** KEPT
+
+### Gemma Experiment 53: Fused FFN Gate/Up/GeGLU/Down Command Buffer — KEPT
+- **Hypothesis:** The FFN path still round-tripped the GeGLU activation through Swift before the down projection. Encoding gate projection, up projection, GeGLU, and down projection in one command-buffer sequence should reduce synchronization and intermediate host traffic.
+- **Change:** Added a Gemma FFN fused helper that keeps the activated intermediate in an `MTLBuffer` and feeds it directly to the down projection.
+- **Result:** Gemma Q4_K_M median `9.120` → `9.671 tok/s`; best run `9.917 tok/s`; median TTFT `2.731036s`. Qwen publishable hash `0afae14a84cf0df8` preserved.
+- **Status:** KEPT
+
+### Gemma Experiment 54: GPU Post-FFN RMSNorm/Residual Handoff — ROLLED BACK
+- **Hypothesis:** Keeping the FFN down output in a GPU buffer through post-FFN RMSNorm/residual and PLE side-channel input would avoid another Swift array readback.
+- **Change:** Prototyped a Gemma RMSNorm+residual Metal kernel and routed the FFN tail into PLE with a GPU buffer.
+- **Result:** Token IDs stayed coherent, but median regressed to `8.280 tok/s`.
+- **Status:** ROLLED BACK
+
+### Gemma Experiment 55: 128-Thread Q4_K/Q6_K GEMV Rows — ROLLED BACK
+- **Hypothesis:** The Gemma FFN K-quant GEMV kernels may be over-threaded at 256 threads per row. A 128-thread variant would do two values per thread per 256-value block, reducing threadgroup width and possibly improving occupancy.
+- **Change:** Added opt-in Q4_K/Q6_K 128-thread GEMV kernels and routed them behind `EDGERUNNER_KGEMV_THREADS=128`.
+- **Result:** Focused Q4_K/Q6_K parity passed. First Gemma median reached `10.225 tok/s`, but repeat/default results were inconsistent, one full median faulted with signal 5, and a Metal-validation smoke only reached `7.632 tok/s`.
+- **Status:** ROLLED BACK
+
+### Gemma Experiment 56: Persistent Scratch Buffer Foundation — KEPT
+- **Hypothesis:** The next safe architectural step toward a single-command-buffer Gemma runner is a persistent scratch owner that can keep hidden state, attention projections, FFN intermediates, and PLE side-channel buffers GPU-resident without changing the default runtime path yet.
+- **Change:** Added `Gemma4Scratch` with reusable buffers sized from `Gemma4ModelConfig`, focused scratch allocation/swap/copy tests, and caller-owned RMSNorm encode parity coverage.
+- **Result:** Focused scratch/RMSNorm tests passed. Gemma Q4_K_M release gate stayed coherent with expected token IDs and measured `9.762 tok/s`; Qwen publishable stayed deterministic at `257.4 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 57: Scratch-Backed PLE Side Channel — KEPT
+- **Hypothesis:** Reusing the persistent scratch buffers for Gemma PLE side-channel hidden/input/gate/activation/projection buffers removes per-layer Metal buffer allocations and is the smallest safe step toward a GPU-resident layer runner.
+- **Change:** Added PLE input copy support to `Gemma4Scratch`, added a persistent Gemma-only scratch owner, and routed the cache-backed PLE side-channel through scratch buffers under an async gate.
+- **Result:** Focused Gemma/model tests passed. Gemma Q4_K_M release gate with finite validation stayed coherent with expected token IDs and measured `10.034 tok/s`; Qwen publishable stayed deterministic at `259.9 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 58: Scratch-Backed Fused FFN Buffers — KEPT
+- **Hypothesis:** Reusing persistent scratch buffers for fused FFN input/gate/up/activation/down removes more per-layer Metal buffer allocation from the largest remaining stage without changing projection or GeGLU math.
+- **Change:** Added FFN input copy support to `Gemma4Scratch` and routed the cache-backed fused FFN helper through scratch buffers under the same async scratch gate.
+- **Result:** Focused Gemma/model tests passed. Gemma Q4_K_M stayed coherent with expected token IDs; finite-validation run measured `7.592 tok/s`, plain release gate measured `10.307 tok/s`, and the median harness measured `10.336 tok/s` median / `10.441 tok/s` best with median TTFT `2.208316s`. Qwen publishable stayed deterministic at `261.2 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 59: Buffer-Resident PLE Inputs — KEPT
+- **Hypothesis:** The PLE inputs are already produced in an `MTLBuffer`; carrying that buffer through the layer stack and passing layer slices by offset should remove a full GPU-to-Swift readback and per-layer Swift slicing.
+- **Change:** Added PLE gate buffer-offset support, kept `PreludeState` PLE inputs buffer-resident on the cache-backed path, and routed layer PLE side-channel calls by byte offset.
+- **Result:** Focused PLE/Gemma/model tests passed. Gemma token IDs stayed coherent. Median harness measured `10.202 tok/s` median / `10.255 tok/s` best with median TTFT `2.245419s`; Qwen publishable hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT as architecture cleanup; not a measured throughput win.
+
+### Gemma Experiment 60: Blocked Q6_K PLE Gather — KEPT
+- **Hypothesis:** The Q6_K PLE gather dispatch spends avoidable work on per-element block arithmetic. Dispatching one threadgroup per 256-value Q6_K block should reduce that overhead without changing output.
+- **Change:** Added `ple_gather_q6_k_blocked` and routed `PLEGatherKernel.encodeQ6K` through it. Q8_0 PLE gather remains unchanged.
+- **Result:** PLE/Gemma focused tests passed and token IDs stayed coherent. Gemma median measured `10.270 tok/s` median / `10.315 tok/s` best with median TTFT `2.221813s`; this is a small improvement over Experiment 59 but not above the previous best.
+- **Status:** KEPT as isolated kernel cleanup.
+
+### Gemma Experiment 61: Bounded Single-Token Prelude Cache — KEPT
+- **Hypothesis:** Gemma prelude output is token-local, so repeated token IDs can reuse hidden state and per-layer PLE inputs instead of repeating token embedding gather, PLE row gather, PLE model projection, and PLE input build.
+- **Change:** Added a bounded 128-entry LRU cache for `PreludeState` keyed by token ID. The cache stores only immutable token-local prelude data, not KV or decoder layer state.
+- **Result:** Focused PLE/Gemma/model tests passed and token IDs stayed coherent. Gemma median measured `10.557 tok/s` median / `10.595 tok/s` best, but median TTFT worsened to `2.899122s`. Profile showed PLE row gather calls dropped from `33x` to `23x` by the 8-token checkpoint. Qwen hash stayed `0afae14a84cf0df8`; Qwen throughput was noisy after repeated heavy Metal runs.
+- **Status:** KEPT for decode throughput and reduced repeated PLE work; TTFT still needs a separate fix.
+
+### Gemma Experiment 62: Buffer-Native Layer Runner — KEPT
+- **Hypothesis:** The cache-backed Gemma layer loop was still bouncing hidden state and intermediate tensors through Swift arrays. Encoding the full 42-layer token pass over persistent `Gemma4Scratch` buffers should remove most CPU/GPU synchronization.
+- **Change:** Added Gemma buffer-native decoder-layer encoding: RMSNorm, Q/K/V projection, Q/K RoPE, F16 KV store, GQA, O projection, residual RMSNorm add, FFN, PLE side-channel, final norm, and Q6_K LM head now run from scratch buffers on the greedy cache-backed path.
+- **Result:** Focused tests passed and Gemma token IDs stayed coherent. Gemma median improved from `10.557 tok/s` to `18.409 tok/s`, then to `18.517 tok/s` after restoring hazard tracking for scratch buffers. Qwen hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 63: Q4_K Q/K/V and FFN Gate/Up Fusion — KEPT
+- **Hypothesis:** After the buffer-native runner, the hot path is dominated by Q4_K matvec dispatches. Fusing compatible projections should reduce dispatch overhead and repeated input-vector reads without changing math.
+- **Change:** Added Q4_K triple GEMV for Q/K/V owner layers, Q4_K dual GEMV for FFN gate/up, and kept Q4_K fused-GeGLU plus two-row variants opt-in only after mixed benchmark results.
+- **Result:** Focused Q4_K parity tests passed. Gemma coherent-token gates passed. Best stable median reached `21.806 tok/s`; a safer latest median after leaving experimental two-row/fused-GeGLU kernels opt-in measured `18.675 tok/s` under current thermal/noise conditions. Qwen publishable hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT for Q4_K triple/dual projection fusion; two-row and fused-GeGLU remain opt-in experiments, not defaults.
+
+### Gemma Experiment 64: Buffer-Native PLE Prelude — OPT-IN
+- **Hypothesis:** PLE prelude still materialized token embeddings and per-layer projection through Swift arrays. Encoding Q6_K token embedding, PLE row gather, PLE projection, and PLE input build into buffers should remove the remaining non-layer decode bucket.
+- **Change:** Added buffer-backed `PreludeState`, buffer-native Q6_K token embedding gather, PLE projection, and PLE row/input construction for single-token cache-backed Gemma decode behind `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1`.
+- **Result:** Focused PLE/Gemma tests and coherent-token gates passed. Profile shows PLE token embedding/projection/row gather effectively disappear from measured host-side profile, but median throughput impact was small/noisy and not stable enough to promote as default.
+- **Status:** OPT-IN; default remains the more stable prelude path.

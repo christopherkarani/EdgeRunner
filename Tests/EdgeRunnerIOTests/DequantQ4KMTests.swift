@@ -50,11 +50,11 @@ private func packQ4KBlock(values: [Float]) -> [UInt8] {
 
     for subBlock in 0..<4 {
         block[4 + subBlock] = (quantisedScales[subBlock] & 0x3F)
-            | ((quantisedScales[subBlock + 4] & 0x03) << 6)
+            | (((quantisedScales[subBlock + 4] >> 4) & 0x03) << 6)
         block[8 + subBlock] = (quantisedMins[subBlock] & 0x3F)
-            | ((quantisedMins[subBlock + 4] & 0x03) << 6)
-        block[12 + subBlock] = ((quantisedScales[subBlock + 4] >> 2) & 0x0F)
-            | (((quantisedMins[subBlock + 4] >> 2) & 0x0F) << 4)
+            | (((quantisedMins[subBlock + 4] >> 4) & 0x03) << 6)
+        block[12 + subBlock] = (quantisedScales[subBlock + 4] & 0x0F)
+            | ((quantisedMins[subBlock + 4] & 0x0F) << 4)
     }
 
     for subBlock in 0..<8 {
@@ -69,8 +69,8 @@ private func packQ4KBlock(values: [Float]) -> [UInt8] {
                 quantised = 0
             }
 
-            let byteIndex = 16 + (subBlock * 16 + index / 2)
-            if index.isMultiple(of: 2) {
+            let byteIndex = 16 + (subBlock / 2) * 32 + index
+            if subBlock.isMultiple(of: 2) {
                 block[byteIndex] = (block[byteIndex] & 0xF0) | UInt8(quantised & 0x0F)
             } else {
                 block[byteIndex] = (block[byteIndex] & 0x0F) | UInt8((quantised & 0x0F) << 4)
@@ -93,11 +93,11 @@ private func dequantQ4KBlock(blockData: [UInt8]) -> [Float] {
     var mins = [UInt8](repeating: 0, count: 8)
     for subBlock in 0..<4 {
         scales[subBlock] = blockData[4 + subBlock] & 0x3F
-        scales[subBlock + 4] = ((blockData[4 + subBlock] >> 6) & 0x03)
-            | ((blockData[12 + subBlock] & 0x0F) << 2)
+        scales[subBlock + 4] = (blockData[12 + subBlock] & 0x0F)
+            | ((blockData[4 + subBlock] >> 6) << 4)
         mins[subBlock] = blockData[8 + subBlock] & 0x3F
-        mins[subBlock + 4] = ((blockData[8 + subBlock] >> 6) & 0x03)
-            | (((blockData[12 + subBlock] >> 4) & 0x0F) << 2)
+        mins[subBlock + 4] = ((blockData[12 + subBlock] >> 4) & 0x0F)
+            | ((blockData[8 + subBlock] >> 6) << 4)
     }
 
     var result = [Float](repeating: 0, count: q4KWeightsPerBlock)
@@ -105,9 +105,9 @@ private func dequantQ4KBlock(blockData: [UInt8]) -> [Float] {
         let scale = d * Float(scales[subBlock])
         let minValue = dmin * Float(mins[subBlock])
         for index in 0..<32 {
-            let byteIndex = 16 + (subBlock * 16 + index / 2)
+            let byteIndex = 16 + (subBlock / 2) * 32 + index
             let nibble: UInt8
-            if index.isMultiple(of: 2) {
+            if subBlock.isMultiple(of: 2) {
                 nibble = blockData[byteIndex] & 0x0F
             } else {
                 nibble = (blockData[byteIndex] >> 4) & 0x0F

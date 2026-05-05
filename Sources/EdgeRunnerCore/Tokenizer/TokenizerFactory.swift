@@ -19,6 +19,8 @@ public enum TokenizerFactory: Sendable {
         switch metadata.model {
         case .gpt2, .llamaBPE:
             return try createBPE(from: metadata)
+        case .gemma4:
+            return try createGemma4BPE(from: metadata)
         case .llama, .sentencePiece:
             return try createSentencePiece(from: metadata)
         default:
@@ -62,6 +64,27 @@ public enum TokenizerFactory: Sendable {
             merges: merges,
             preTokenizer: preTokenizer,
             shouldAddBOS: shouldAddBOS,
+            byteFallbackTable: byteFallbackTable.isEmpty ? nil : byteFallbackTable,
+            chatTemplateEngine: chatTemplateEngine
+        )
+    }
+
+    private static func createGemma4BPE(from metadata: GGUFTokenizerMetadata) throws -> Gemma4BPETokenizer {
+        guard let eosID = metadata.eosTokenID, eosID >= 0, eosID < metadata.tokens.count else {
+            throw TokenizerFactoryError.missingRequiredToken("EOS")
+        }
+
+        let vocabulary = TokenizerVocabulary(tokens: metadata.tokens)
+        let (specialTokens, _) = buildSpecialTokens(from: metadata, eosID: eosID)
+        let byteFallbackTable = buildByteFallbackTable(from: metadata)
+        let chatTemplateEngine = buildChatTemplateEngine(from: metadata)
+        let merges = metadata.merges.map { ($0.left, $0.right) }
+
+        return Gemma4BPETokenizer(
+            vocabulary: vocabulary,
+            specialTokens: specialTokens,
+            merges: merges,
+            shouldAddBOS: metadata.shouldAddBOS ?? true,
             byteFallbackTable: byteFallbackTable.isEmpty ? nil : byteFallbackTable,
             chatTemplateEngine: chatTemplateEngine
         )

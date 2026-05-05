@@ -1,0 +1,13 @@
+{
+  "assistantResponse" : "Okay, let's break this down. Quantum computing uses quantum mechanics, like the behavior of electrons and photons, to perform calculations in ways that are not possible with classical computers. Here's a simple explanation:\n\n**Classical computers use bits (0s and 1s) to store and process information.** Each bit can be either on or off, and they can't be in both at the same time. \n\n**Quantum computers use qubits (quantum bits) which can be in a state of 0, 1, or both at the same time—this is called superposition.** They can also be in multiple states at once, which helps them do complex calculations more quickly. \n\n**They also use entanglement, which is when two or more particles become linked such that the state of one instantly affects the other, regardless of distance.** This allows them to perform certain operations much faster than classical computers.\n\n**In short, quantum computers are like supercomputers that use quantum mechanics to process information in a way that gives them a huge advantage over classical machines.** They can do things that are impossible for classical computers to do, like solving complex problems quickly. \n\nBut keep in mind that it's still a new technology, and it's not yet as powerful as classical computers, but it has the potential to revolutionize many fields.",
+  "contextWindowSize" : 4096,
+  "decodeTokensPerSecond" : 21.985662599772464,
+  "endToEndTokensPerSecond" : 17.042662621039007,
+  "generatedTokenCount" : 275,
+  "generationDurationSeconds" : 16.135976291669067,
+  "maxTokens" : 1000,
+  "mode" : "streamed_chat",
+  "modelPath" : "\/var\/mobile\/Containers\/Data\/Application\/3F66BE78-9C67-40F2-8ACA-DF818ABA72FB\/Documents\/Bonsai-1.7B.gguf",
+  "prompt" : "Explain quantum computing in simple terms.",
+  "timeToFirstTokenSeconds" : 3.6273293333360925
+}

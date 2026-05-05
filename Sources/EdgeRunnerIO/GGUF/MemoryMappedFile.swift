@@ -113,3 +113,85 @@ public final class MemoryMappedFile: @unchecked Sendable {
         return (copiedBuffer, 0)
     }
 }
+
+public final class FileRegionMapper: @unchecked Sendable {
+    public let url: URL
+    public let size: Int
+
+    public init(url: URL) throws {
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw WeightLoaderError.fileNotFound(url)
+        }
+        defer { close(fd) }
+
+        var fileStat = stat()
+        guard fstat(fd, &fileStat) == 0 else {
+            throw WeightLoaderError.mmapFailed(errno: errno)
+        }
+
+        let fileSize = Int(fileStat.st_size)
+        guard fileSize > 0 else {
+            throw WeightLoaderError.invalidFormat("Cannot mmap empty file: \(url.lastPathComponent)")
+        }
+
+        self.url = url
+        self.size = fileSize
+    }
+
+    public func makeMetalBufferRegion(
+        device: MTLDevice,
+        offset: Int,
+        length: Int
+    ) throws -> (buffer: MTLBuffer, offset: Int) {
+        guard offset >= 0, length >= 0, offset + length <= size else {
+            throw WeightLoaderError.invalidFormat(
+                "Mapped region out of bounds: offset=\(offset) length=\(length) size=\(size)"
+            )
+        }
+
+        let pageSize = Int(getpagesize())
+        let pageStart = (offset / pageSize) * pageSize
+        let pageDelta = offset - pageStart
+        let mappedLength = pageDelta + length
+
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw WeightLoaderError.fileNotFound(url)
+        }
+        defer { close(fd) }
+
+        guard let mapped = mmap(
+            nil,
+            mappedLength,
+            PROT_READ,
+            MAP_PRIVATE,
+            fd,
+            off_t(pageStart)
+        ),
+        mapped != UnsafeMutableRawPointer(bitPattern: -1) else {
+            throw WeightLoaderError.mmapFailed(errno: errno)
+        }
+
+        if let buffer = device.makeBuffer(
+            bytesNoCopy: mapped,
+            length: mappedLength,
+            options: .storageModeShared,
+            deallocator: { pointer, byteCount in
+                munmap(pointer, byteCount)
+            }
+        ) {
+            return (buffer, pageDelta)
+        }
+
+        defer { munmap(mapped, mappedLength) }
+        guard let copiedBuffer = device.makeBuffer(
+            bytes: mapped.advanced(by: pageDelta),
+            length: length,
+            options: .storageModeShared
+        ) else {
+            throw WeightLoaderError.allocationFailed(byteCount: length)
+        }
+        return (copiedBuffer, 0)
+    }
+}

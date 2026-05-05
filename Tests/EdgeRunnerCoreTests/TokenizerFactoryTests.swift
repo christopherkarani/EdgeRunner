@@ -146,6 +146,30 @@ struct TokenizerFactoryTests {
         }
     }
 
+    @Test func gemma4ModelCreatesGemma4BPETokenizer() throws {
+        let tokens = ["<unk>", "<eos>", "<bos>", "\u{2581}", "a", "\u{2581}a"]
+        let merges = ["\u{2581} a"]
+        let meta = makeTokenizerMetadata(
+            tokens: tokens,
+            merges: merges,
+            tokenTypes: [2, 3, 3, 1, 1, 1],
+            bosTokenID: 2,
+            eosTokenID: 1,
+            unknownTokenID: 0,
+            shouldAddBOS: true,
+            addSpacePrefix: false,
+            model: "gemma4"
+        )
+        let gguf = try GGUFTokenizerMetadata(metadata: meta)
+        let tokenizer = try TokenizerFactory.create(from: gguf)
+
+        #expect(tokenizer is Gemma4BPETokenizer)
+        #expect(tokenizer.shouldAddBOS == true)
+        #expect(tokenizer.eosTokenID == 1)
+        #expect(tokenizer.bosTokenID == 2)
+        #expect(tokenizer.encode(" a", addBOS: tokenizer.shouldAddBOS) == [2, 5])
+    }
+
     // MARK: - Missing EOS throws missingRequiredToken
 
     @Test func missingEOSThrowsMissingRequiredToken() throws {

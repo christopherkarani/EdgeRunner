@@ -9,6 +9,7 @@ public enum GGUFTokenizerModel: Sendable, Equatable {
     case gpt2
     case llama
     case llamaBPE
+    case gemma4
     case sentencePiece
     case wordPiece
     case unknown(String)
@@ -21,6 +22,8 @@ public enum GGUFTokenizerModel: Sendable, Equatable {
             self = .llama
         case "llama-bpe":
             self = .llamaBPE
+        case "gemma4":
+            self = .gemma4
         case "sentencepiece":
             self = .sentencePiece
         case "wordpiece":
@@ -38,6 +41,8 @@ public enum GGUFTokenizerModel: Sendable, Equatable {
             return "llama"
         case .llamaBPE:
             return "llama-bpe"
+        case .gemma4:
+            return "gemma4"
         case .sentencePiece:
             return "sentencepiece"
         case .wordPiece:
@@ -133,7 +138,16 @@ public struct GGUFTokenizerMetadata: Sendable, Equatable {
             throw GGUFTokenizerMetadataError.missingKey(tokensKey)
         }
 
-        let merges = try Self.parseMerges(stringArrayForKey("tokenizer.ggml.merges") ?? [])
+        let model = GGUFTokenizerModel(rawValue: rawModel)
+        let merges: [GGUFTokenizerMerge]
+        switch model {
+        case .gpt2, .llamaBPE:
+            merges = try Self.parseMerges(stringArrayForKey("tokenizer.ggml.merges") ?? [])
+        case .gemma4:
+            merges = Self.parseGemma4Merges(stringArrayForKey("tokenizer.ggml.merges") ?? [])
+        default:
+            merges = []
+        }
 
         let tokenTypes: [GGUFTokenType]?
         if let rawTokenTypes = intArrayForKey("tokenizer.ggml.token_type") {
@@ -161,7 +175,7 @@ public struct GGUFTokenizerMetadata: Sendable, Equatable {
             scores = nil
         }
 
-        self.model = GGUFTokenizerModel(rawValue: rawModel)
+        self.model = model
         self.preTokenizer = stringValueForKey("tokenizer.ggml.pre")
         self.tokens = tokens
         self.merges = merges
@@ -195,6 +209,23 @@ public struct GGUFTokenizerMetadata: Sendable, Equatable {
                 )
             }
 
+            return GGUFTokenizerMerge(left: left, right: right, rawValue: rawMerge)
+        }
+    }
+
+    private static func parseGemma4Merges(_ rawMerges: [String]) -> [GGUFTokenizerMerge] {
+        rawMerges.compactMap { rawMerge in
+            guard rawMerge.count >= 2 else { return nil }
+            let searchStart = rawMerge.index(after: rawMerge.startIndex)
+            guard let separatorIndex = rawMerge[searchStart...].firstIndex(of: " ") else {
+                return nil
+            }
+
+            let left = String(rawMerge[..<separatorIndex])
+            let rightStart = rawMerge.index(after: separatorIndex)
+            guard rightStart <= rawMerge.endIndex else { return nil }
+            let right = String(rawMerge[rightStart...])
+            guard !left.isEmpty, !right.isEmpty else { return nil }
             return GGUFTokenizerMerge(left: left, right: right, rawValue: rawMerge)
         }
     }

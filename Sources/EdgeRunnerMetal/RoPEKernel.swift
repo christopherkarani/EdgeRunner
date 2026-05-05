@@ -99,6 +99,67 @@ public final class RoPEKernel: Sendable {
         partialRotaryFactor: Float = 1.0,
         commandQueue: MTLCommandQueue
     ) async throws -> ([Float], [Float]) {
+        try await applyToQK(
+            pipeline: pipelineF32,
+            q: q,
+            k: k,
+            seqLen: seqLen,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            headDim: headDim,
+            startPos: startPos,
+            theta: theta,
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor,
+            commandQueue: commandQueue
+        )
+    }
+
+    /// Apply NeoX-layout RoPE to Q and K tensors in a single command buffer.
+    /// Gemma 4 uses NeoX-style split-half rotary layout with proportional pRoPE.
+    public func applyToQKNeoX(
+        q: [Float],
+        k: [Float],
+        seqLen: Int,
+        numHeads: Int,
+        numKVHeads: Int,
+        headDim: Int,
+        startPos: Int,
+        theta: Float,
+        scalingFactor: Float = 1,
+        partialRotaryFactor: Float = 1.0,
+        commandQueue: MTLCommandQueue
+    ) async throws -> ([Float], [Float]) {
+        try await applyToQK(
+            pipeline: pipelineNeoX,
+            q: q,
+            k: k,
+            seqLen: seqLen,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            headDim: headDim,
+            startPos: startPos,
+            theta: theta,
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor,
+            commandQueue: commandQueue
+        )
+    }
+
+    private func applyToQK(
+        pipeline: MTLComputePipelineState,
+        q: [Float],
+        k: [Float],
+        seqLen: Int,
+        numHeads: Int,
+        numKVHeads: Int,
+        headDim: Int,
+        startPos: Int,
+        theta: Float,
+        scalingFactor: Float,
+        partialRotaryFactor: Float,
+        commandQueue: MTLCommandQueue
+    ) async throws -> ([Float], [Float]) {
         precondition(headDim % 2 == 0, "headDim must be even")
         precondition(q.count == seqLen * numHeads * headDim)
         precondition(k.count == seqLen * numKVHeads * headDim)
@@ -119,11 +180,11 @@ public final class RoPEKernel: Sendable {
                                        startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor,
                                        partialRotaryFactor: partialRotaryFactor)
             guard let enc = cmdBuf.makeComputeCommandEncoder() else { throw RoPEError.encodingFailed }
-            enc.setComputePipelineState(pipelineF32)
+            enc.setComputePipelineState(pipeline)
             enc.setBuffer(qInBuf, offset: 0, index: 0)
             enc.setBuffer(qOutBuf, offset: 0, index: 1)
             enc.setBytes(&params, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
-            let tgSize = MTLSize(width: min(halfDim, pipelineF32.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+            let tgSize = MTLSize(width: min(halfDim, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
             enc.dispatchThreads(MTLSize(width: halfDim, height: numHeads, depth: seqLen), threadsPerThreadgroup: tgSize)
             enc.endEncoding()
         }
@@ -134,11 +195,11 @@ public final class RoPEKernel: Sendable {
                                        startPos: UInt32(startPos), theta: theta, scalingFactor: scalingFactor,
                                        partialRotaryFactor: partialRotaryFactor)
             guard let enc = cmdBuf.makeComputeCommandEncoder() else { throw RoPEError.encodingFailed }
-            enc.setComputePipelineState(pipelineF32)
+            enc.setComputePipelineState(pipeline)
             enc.setBuffer(kInBuf, offset: 0, index: 0)
             enc.setBuffer(kOutBuf, offset: 0, index: 1)
             enc.setBytes(&params, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
-            let tgSize = MTLSize(width: min(halfDim, pipelineF32.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+            let tgSize = MTLSize(width: min(halfDim, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
             enc.dispatchThreads(MTLSize(width: halfDim, height: numKVHeads, depth: seqLen), threadsPerThreadgroup: tgSize)
             enc.endEncoding()
         }
@@ -161,6 +222,56 @@ public final class RoPEKernel: Sendable {
         startPos: Int, theta: Float, scalingFactor: Float = 1,
         partialRotaryFactor: Float = 1.0
     ) throws {
+        try encode(
+            pipeline: pipelineF32,
+            commandBuffer: commandBuffer,
+            inputBuffer: inputBuffer,
+            outputBuffer: outputBuffer,
+            seqLen: seqLen,
+            numHeads: numHeads,
+            headDim: headDim,
+            startPos: startPos,
+            theta: theta,
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor
+        )
+    }
+
+    public func encodeNeoX(
+        commandBuffer: MTLCommandBuffer,
+        inputBuffer: MTLBuffer, outputBuffer: MTLBuffer,
+        seqLen: Int, numHeads: Int, headDim: Int,
+        startPos: Int, theta: Float, scalingFactor: Float = 1,
+        partialRotaryFactor: Float = 1.0
+    ) throws {
+        try encode(
+            pipeline: pipelineNeoX,
+            commandBuffer: commandBuffer,
+            inputBuffer: inputBuffer,
+            outputBuffer: outputBuffer,
+            seqLen: seqLen,
+            numHeads: numHeads,
+            headDim: headDim,
+            startPos: startPos,
+            theta: theta,
+            scalingFactor: scalingFactor,
+            partialRotaryFactor: partialRotaryFactor
+        )
+    }
+
+    private func encode(
+        pipeline: MTLComputePipelineState,
+        commandBuffer: MTLCommandBuffer,
+        inputBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        seqLen: Int,
+        numHeads: Int,
+        headDim: Int,
+        startPos: Int,
+        theta: Float,
+        scalingFactor: Float,
+        partialRotaryFactor: Float
+    ) throws {
         precondition(partialRotaryFactor >= 0 && partialRotaryFactor <= 1,
                      "partialRotaryFactor must be in [0, 1]")
 
@@ -178,7 +289,7 @@ public final class RoPEKernel: Sendable {
             throw RoPEError.encodingFailed
         }
 
-        encoder.setComputePipelineState(pipelineF32)
+        encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(inputBuffer, offset: 0, index: 0)
         encoder.setBuffer(outputBuffer, offset: 0, index: 1)
         encoder.setBytes(&params, length: MemoryLayout<ERRoPEParams>.stride, index: 2)
@@ -186,7 +297,7 @@ public final class RoPEKernel: Sendable {
         let halfDim = headDim / 2
         let gridSize = MTLSize(width: halfDim, height: numHeads, depth: seqLen)
         let threadgroupSize = MTLSize(
-            width: min(halfDim, pipelineF32.maxTotalThreadsPerThreadgroup),
+            width: min(halfDim, pipeline.maxTotalThreadsPerThreadgroup),
             height: 1,
             depth: 1
         )

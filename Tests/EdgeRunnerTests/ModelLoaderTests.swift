@@ -34,6 +34,15 @@ struct ModelLoaderTests {
         #expect(model.vocabularySize > 0)
     }
 
+    @Test func recognizesGemma4AsDedicatedBackend() {
+        let config = ModelConfig(
+            architectureName: "gemma4",
+            metadata: Gemma4ModelConfigTests.makeReferenceModelConfigMetadata()
+        )
+
+        #expect(Gemma4LanguageModel.supports(modelConfig: config))
+    }
+
     @Test func throwsForInvalidPath() async {
         do {
             _ = try await ModelLoader.load(
@@ -41,8 +50,7 @@ struct ModelLoaderTests {
             )
             #expect(Bool(false), "Should have thrown")
         } catch {
-            // Expected: file not found or load error
-            #expect(error is GenerationError || error is any Error)
+            #expect(String(describing: error).isEmpty == false)
         }
     }
 }

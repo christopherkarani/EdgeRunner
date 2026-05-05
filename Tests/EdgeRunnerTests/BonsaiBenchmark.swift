@@ -8,7 +8,12 @@ import Metal
 
 @Suite("Bonsai 1.7B Benchmark")
 struct BonsaiBenchmark {
-    static let modelPath = (NSHomeDirectory() as NSString).appendingPathComponent("edgerunner-models/Bonsai-1.7B.gguf")
+    static let modelPath: String = {
+        if let override = ProcessInfo.processInfo.environment["EDGERUNNER_BONSAI_MODEL_PATH"], !override.isEmpty {
+            return (override as NSString).expandingTildeInPath
+        }
+        return (NSHomeDirectory() as NSString).appendingPathComponent("edgerunner-models/Bonsai-1.7B.gguf")
+    }()
 
     @Test("Bonsai 1.7B Q1_0_g128 coherence check")
     func bonsaiCoherenceCheck() async throws {

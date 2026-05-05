@@ -299,7 +299,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         case .disabled:
             self.turboQuantKeyLayouts = []
             self.turboQuantValueLayouts = []
-        case .q8_0:
+        case .q8_0, .turboQuantBalanced, .turboQuantAggressive:
             self.turboQuantKeyLayouts = []
             self.turboQuantValueLayouts = []
         case .turboquantV2:
@@ -335,6 +335,10 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             kvPrecision = .q8_0
         case .turboquantV2:
             kvPrecision = .turboquantV2
+        case .turboQuantBalanced:
+            kvPrecision = .turboQuantBalanced
+        case .turboQuantAggressive:
+            kvPrecision = .turboQuantAggressive
         }
         self.kvCache = try KVCache(
             device: device,
@@ -557,7 +561,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
         let supportedTypes: Set<TensorDataType> = [
             .float32, .float16, .q4_0, .q8_0, .q4_K,
             .q6_K, .q5_K, .q3_K, .q2_K, .q5_0, .q5_1,
-            .q1_0_g128
+            .bfloat16, .q1_0_g128
         ]
 
         var unsupportedTypes = Set<TensorDataType>()
@@ -592,7 +596,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             let examples = unsupportedTensors.joined(separator: ", ")
             throw GenerationError.modelLoadFailed(
                 reason: "Model uses unsupported quantization: \(typeNames). "
-                    + "Supported: Q2_K, Q3_K, Q4_0, Q4_K_M, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, F16, F32. "
+                    + "Supported: Q2_K, Q3_K, Q4_0, Q4_K_M, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, BF16, F16, F32. "
                     + "Examples: \(examples)"
             )
         }
@@ -617,6 +621,8 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                     reason: "TurboQuant v2 currently requires headDim \(TurboQuantV2Contract.supportedDimension), got \(headDim)."
                 )
             }
+        case .turboQuantBalanced, .turboQuantAggressive:
+            break
         case .disabled:
             break
         }
@@ -2393,7 +2399,7 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             if lmHeadRawBuf != nil {
                 lmHeadBuf = nil  // Q8 raw path handles it; no float fallback needed
             } else {
-                lmHeadBuf = nil
+                lmHeadBuf = try await readWeightBuffer(lmHeadName)
             }
             let lmHeadCols = dim
 
@@ -4940,6 +4946,14 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             }
             return f16Array.map { Float($0) }
 
+        case .bfloat16:
+            let byteCount = elementCount * MemoryLayout<UInt16>.stride
+            var bf16Array = [UInt16](repeating: 0, count: elementCount)
+            bf16Array.withUnsafeMutableBytes { rawBuffer in
+                rawBuffer.copyMemory(from: UnsafeRawBufferPointer(start: basePtr, count: byteCount))
+            }
+            return bf16Array.map { Float(bitPattern: UInt32($0) << 16) }
+
         case .q4_0:
             let blockCount = elementCount / 32
             let byteCount = blockCount * 18
@@ -5309,6 +5323,35 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
                 }
             }
 
+        case .q2_K, .q3_K, .q4_K, .q5_K, .q6_K:
+            let weightsPerBlock = 256
+            guard dim % weightsPerBlock == 0 else {
+                throw GenerationError.modelLoadFailed(
+                    reason: "Unsupported embedding row width \(dim) for \(storage.dataType); expected multiple of \(weightsPerBlock)"
+                )
+            }
+
+            let blockByteCount = Self.kQuantBlockByteCount(for: storage.dataType)
+            let blocksPerRow = dim / weightsPerBlock
+            let bytesPerRow = blocksPerRow * blockByteCount
+            let rawPtr = basePtr.bindMemory(
+                to: UInt8.self,
+                capacity: storage.elementCount / weightsPerBlock * blockByteCount
+            )
+
+            for (i, tokenID) in tokenIDs.enumerated() {
+                let clampedID = min(max(tokenID, 0), config.vocabSize - 1)
+                let rowStart = clampedID * bytesPerRow
+                let dstOffset = i * dim
+                try Self.dequantizeKQuantRow(
+                    dataType: storage.dataType,
+                    rawPtr: rawPtr,
+                    rowStart: rowStart,
+                    blockCount: blocksPerRow,
+                    destination: destination + dstOffset
+                )
+            }
+
         case .q1_0_g128:
             let bytesPerBlock = 18
             let elementsPerBlock = 128
@@ -5340,6 +5383,184 @@ public struct LlamaLanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.modelLoadFailed(
                 reason: "Unsupported embedding data type: \(storage.dataType)"
             )
+        }
+    }
+
+    private static func kQuantBlockByteCount(for dataType: TensorDataType) -> Int {
+        switch dataType {
+        case .q2_K: 84
+        case .q3_K: 110
+        case .q4_K: 144
+        case .q5_K: 176
+        case .q6_K: 210
+        default: 0
+        }
+    }
+
+    private static func dequantizeKQuantRow(
+        dataType: TensorDataType,
+        rawPtr: UnsafePointer<UInt8>,
+        rowStart: Int,
+        blockCount: Int,
+        destination: UnsafeMutablePointer<Float>
+    ) throws {
+        let blockByteCount = kQuantBlockByteCount(for: dataType)
+        guard blockByteCount > 0 else {
+            throw GenerationError.modelLoadFailed(reason: "Unsupported K-quant embedding data type: \(dataType)")
+        }
+
+        for blockIndex in 0..<blockCount {
+            let block = rawPtr + rowStart + blockIndex * blockByteCount
+            let dst = destination + blockIndex * 256
+            switch dataType {
+            case .q2_K:
+                dequantizeQ2KBlock(block, into: dst)
+            case .q3_K:
+                dequantizeQ3KBlock(block, into: dst)
+            case .q4_K:
+                dequantizeQ4KBlock(block, into: dst)
+            case .q5_K:
+                dequantizeQ5KBlock(block, into: dst)
+            case .q6_K:
+                dequantizeQ6KBlock(block, into: dst)
+            default:
+                throw GenerationError.modelLoadFailed(reason: "Unsupported K-quant embedding data type: \(dataType)")
+            }
+        }
+    }
+
+    private static func f16(at ptr: UnsafePointer<UInt8>, offset: Int) -> Float {
+        let bits = UInt16(ptr[offset]) | (UInt16(ptr[offset + 1]) << 8)
+        return Float(Float16(bitPattern: bits))
+    }
+
+    private static func dequantizeQ2KBlock(
+        _ block: UnsafePointer<UInt8>,
+        into destination: UnsafeMutablePointer<Float>
+    ) {
+        let d = f16(at: block, offset: 80)
+        let dmin = f16(at: block, offset: 82)
+        for i in 0..<256 {
+            let sub = i / 16
+            let scaleByte = block[sub]
+            let sc = Float(scaleByte & 0x0F)
+            let m = Float(scaleByte >> 4)
+            let qsByte = block[16 + i / 4]
+            let q2 = Float((qsByte >> ((i % 4) * 2)) & 0x03)
+            destination[i] = d * sc * q2 - dmin * m
+        }
+    }
+
+    private static func dequantizeQ3KBlock(
+        _ block: UnsafePointer<UInt8>,
+        into destination: UnsafeMutablePointer<Float>
+    ) {
+        let d = f16(at: block, offset: 108)
+        var scales = [Float](repeating: 0, count: 16)
+        for i in 0..<16 {
+            let lower4 = (block[96 + i / 2] >> ((i % 2) * 4)) & 0x0F
+            let upper2 = (block[96 + 8 + i / 4] >> ((i % 4) * 2)) & 0x03
+            let raw6 = Int(lower4) | (Int(upper2) << 4)
+            scales[i] = d * Float(raw6 - 32)
+        }
+
+        for i in 0..<256 {
+            let lower2 = (block[32 + i / 4] >> ((i % 4) * 2)) & 0x03
+            let highBit = (block[i / 8] >> (i % 8)) & 1
+            let q3 = Int(lower2) | (Int(highBit) << 2)
+            destination[i] = scales[i / 16] * Float(q3 - 4)
+        }
+    }
+
+    private static func unpackKQuantScalesAndMins(
+        _ block: UnsafePointer<UInt8>
+    ) -> (scales: [UInt8], mins: [UInt8]) {
+        var scales = [UInt8](repeating: 0, count: 8)
+        var mins = [UInt8](repeating: 0, count: 8)
+        for subBlock in 0..<4 {
+            scales[subBlock] = block[4 + subBlock] & 0x3F
+            scales[subBlock + 4] = (block[12 + subBlock] & 0x0F)
+                | ((block[4 + subBlock] >> 6) << 4)
+            mins[subBlock] = block[8 + subBlock] & 0x3F
+            mins[subBlock + 4] = ((block[12 + subBlock] >> 4) & 0x0F)
+                | ((block[8 + subBlock] >> 6) << 4)
+        }
+        return (scales, mins)
+    }
+
+    private static func dequantizeQ4KBlock(
+        _ block: UnsafePointer<UInt8>,
+        into destination: UnsafeMutablePointer<Float>
+    ) {
+        let d = f16(at: block, offset: 0)
+        let dmin = f16(at: block, offset: 2)
+        let (scales, mins) = unpackKQuantScalesAndMins(block)
+
+        for subBlock in 0..<8 {
+            let scale = d * Float(scales[subBlock])
+            let minValue = dmin * Float(mins[subBlock])
+            for index in 0..<32 {
+                let byteIndex = 16 + (subBlock / 2) * 32 + index
+                let nibble = subBlock.isMultiple(of: 2)
+                    ? (block[byteIndex] & 0x0F)
+                    : ((block[byteIndex] >> 4) & 0x0F)
+                destination[subBlock * 32 + index] = scale * Float(nibble) - minValue
+            }
+        }
+    }
+
+    private static func dequantizeQ5KBlock(
+        _ block: UnsafePointer<UInt8>,
+        into destination: UnsafeMutablePointer<Float>
+    ) {
+        let d = f16(at: block, offset: 0)
+        let dmin = f16(at: block, offset: 2)
+        let (scales, mins) = unpackKQuantScalesAndMins(block)
+
+        for subBlock in 0..<8 {
+            let scale = d * Float(scales[subBlock])
+            let minValue = dmin * Float(mins[subBlock])
+            for index in 0..<32 {
+                let globalIdx = subBlock * 32 + index
+                let qsByteIndex = 48 + globalIdx / 2
+                let lower4 = globalIdx.isMultiple(of: 2)
+                    ? (block[qsByteIndex] & 0x0F)
+                    : ((block[qsByteIndex] >> 4) & 0x0F)
+                let bit5 = (block[16 + globalIdx / 8] >> (globalIdx % 8)) & 1
+                let q5 = lower4 | (bit5 << 4)
+                destination[globalIdx] = scale * Float(q5) - minValue
+            }
+        }
+    }
+
+    private static func dequantizeQ6KBlock(
+        _ block: UnsafePointer<UInt8>,
+        into destination: UnsafeMutablePointer<Float>
+    ) {
+        let d = f16(at: block, offset: 208)
+        for halfBlock in 0..<2 {
+            let qlBase = halfBlock * 64
+            let qhBase = 128 + halfBlock * 32
+            let scaleBase = 192 + halfBlock * 8
+            let outBase = halfBlock * 128
+            for lane in 0..<32 {
+                let firstScale = lane / 16
+
+                let q1 = Int((block[qlBase + lane] & 0x0F) | (((block[qhBase + lane] >> 0) & 0x03) << 4)) - 32
+                let q2 = Int((block[qlBase + 32 + lane] & 0x0F) | (((block[qhBase + lane] >> 2) & 0x03) << 4)) - 32
+                let q3 = Int((block[qlBase + lane] >> 4) | (((block[qhBase + lane] >> 4) & 0x03) << 4)) - 32
+                let q4 = Int((block[qlBase + 32 + lane] >> 4) | (((block[qhBase + lane] >> 6) & 0x03) << 4)) - 32
+
+                let s1 = Int8(bitPattern: block[scaleBase + firstScale + 0])
+                let s2 = Int8(bitPattern: block[scaleBase + firstScale + 2])
+                let s3 = Int8(bitPattern: block[scaleBase + firstScale + 4])
+                let s4 = Int8(bitPattern: block[scaleBase + firstScale + 6])
+
+                destination[outBase + lane] = d * Float(s1) * Float(q1)
+                destination[outBase + 32 + lane] = d * Float(s2) * Float(q2)
+                destination[outBase + 64 + lane] = d * Float(s3) * Float(q3)
+                destination[outBase + 96 + lane] = d * Float(s4) * Float(q4)
+            }
         }
     }
 

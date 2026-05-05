@@ -36,7 +36,7 @@ public enum Gemma4ChatTemplateError: Error, Equatable {
 ///
 /// Format:
 /// ```text
-/// <bos><|turn>{role}
+/// <|turn>{role}
 /// {content}
 /// <turn|>
 /// ```
@@ -66,10 +66,21 @@ public enum Gemma4ChatTemplate: Sendable {
         messages: [Gemma4ChatMessage],
         addGenerationPrompt: Bool
     ) throws -> String {
-        var output = "<bos>"
-        for message in messages {
+        var output = ""
+        var loopMessages = messages
+
+        output.append("<|turn>system\n<|think|>\n")
+        if let first = messages.first, first.role == .system {
+            output.append(first.content.trimmingCharacters(in: .whitespacesAndNewlines))
+            loopMessages.removeFirst()
+        }
+        output.append("<turn|>\n")
+
+        for message in loopMessages {
             let role = try renderedRole(for: message.role)
-            output.append("<|turn>\(role)\n\(message.content)\n<turn|>\n")
+            output.append("<|turn>\(role)\n")
+            output.append(message.content.trimmingCharacters(in: .whitespacesAndNewlines))
+            output.append("<turn|>\n")
         }
         if addGenerationPrompt {
             output.append("<|turn>model\n")

@@ -47,10 +47,46 @@ public struct GeGLUKernel: Sendable {
             throw GeGLUKernelError.bufferAllocationFailed
         }
 
-        guard
-            let commandBuffer = commandQueue.makeCommandBuffer(),
-            let encoder = commandBuffer.makeComputeCommandEncoder()
-        else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw GeGLUKernelError.encodingFailed
+        }
+
+        try encode(
+            commandBuffer: commandBuffer,
+            gateBuffer: gateBuffer,
+            upBuffer: upBuffer,
+            outputBuffer: outputBuffer,
+            count: count
+        )
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: pointer, count: count))
+    }
+
+    /// Encode GeGLU into an existing command buffer so callers can fuse it
+    /// after gate/up projection dispatches without an intermediate CPU readback.
+    public func encode(
+        commandBuffer: MTLCommandBuffer,
+        gateBuffer: MTLBuffer,
+        upBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        count: Int
+    ) throws {
+        guard count >= 0,
+              gateBuffer.length >= count * MemoryLayout<Float>.stride,
+              upBuffer.length >= count * MemoryLayout<Float>.stride,
+              outputBuffer.length >= count * MemoryLayout<Float>.stride else {
+            throw GeGLUKernelError.bufferAllocationFailed
+        }
+        guard count > 0 else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw GeGLUKernelError.encodingFailed
         }
 
@@ -66,16 +102,6 @@ public struct GeGLUKernel: Sendable {
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
         encoder.endEncoding()
-
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        if let error = commandBuffer.error {
-            throw error
-        }
-
-        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: count)
-        return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 }
 
