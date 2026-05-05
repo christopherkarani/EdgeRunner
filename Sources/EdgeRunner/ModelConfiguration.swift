@@ -7,12 +7,16 @@ import Foundation
 public enum KVCacheCompression: String, Sendable, Equatable, Codable {
     case disabled
     case automatic
+    case q8_0
+    case turboquantV2
     case turboQuantBalanced
     case turboQuantAggressive
 }
 
 enum ResolvedKVCacheCompression: Sendable, Equatable {
     case disabled
+    case q8_0
+    case turboquantV2
     case turboQuantBalanced
     case turboQuantAggressive
 }
@@ -147,6 +151,10 @@ extension ModelConfiguration {
                 return .disabled
             }
             return .turboQuantBalanced
+        case .q8_0:
+            return .q8_0
+        case .turboquantV2:
+            return .turboquantV2
         case .turboQuantBalanced:
             return .turboQuantBalanced
         case .turboQuantAggressive:

@@ -36,7 +36,16 @@ public enum ModelLoader: Sendable {
         configuration: ModelConfiguration = ModelConfiguration()
     ) async throws -> any EdgeRunnerLanguageModel {
         let loader = try GGUFLoader(url: url)
-        let architecture = loader.modelConfig.architectureName.lowercased()
+        let modelConfig = loader.modelConfig
+        let architecture = modelConfig.architectureName.lowercased()
+
+        if BonsaiLanguageModel.supports(modelConfig: modelConfig) {
+            return try await BonsaiLanguageModel.load(from: url, configuration: configuration)
+        }
+
+        if Gemma4LanguageModel.supports(modelConfig: modelConfig) {
+            return try await Gemma4LanguageModel.load(from: url, configuration: configuration)
+        }
 
         if llamaCompatibleArchitectures.contains(architecture) {
             return try await LlamaLanguageModel.load(from: url, configuration: configuration)
@@ -44,7 +53,7 @@ public enum ModelLoader: Sendable {
 
         throw GenerationError.modelLoadFailed(
             reason: "Unsupported model architecture: '\(architecture)'. "
-                + "Supported: \(llamaCompatibleArchitectures.sorted().joined(separator: ", "))"
+                + "Supported: \((llamaCompatibleArchitectures.union([Gemma4LanguageModel.modelIdentifier])).sorted().joined(separator: ", "))"
         )
     }
 }

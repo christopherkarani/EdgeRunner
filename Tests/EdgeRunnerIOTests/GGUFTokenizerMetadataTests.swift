@@ -127,6 +127,22 @@ struct GGUFTokenizerMetadataTests {
         }
     }
 
+    @Test func gemma4ParsesNewlineMergeUsingLlamaCppSeparatorRule() throws {
+        let metadata: [String: GGUFMetadataValue] = [
+            "tokenizer.ggml.model": .string("gemma4"),
+            "tokenizer.ggml.tokens": .array([.string("<pad>"), .string("Would")]),
+            "tokenizer.ggml.scores": .array([.float32(0), .float32(-1)]),
+            "tokenizer.ggml.merges": .array([.string("\n\n \n")]),
+        ]
+
+        let tokenizer = try GGUFTokenizerMetadata(ggufMetadata: metadata)
+
+        #expect(tokenizer.model == .gemma4)
+        #expect(tokenizer.merges == [
+            GGUFTokenizerMerge(left: "\n\n", right: "\n", rawValue: "\n\n \n"),
+        ])
+    }
+
     @Test func unknownTokenizerModelIsPreserved() throws {
         let metadata: [String: GGUFMetadataValue] = [
             "tokenizer.ggml.model": .string("custom-model"),

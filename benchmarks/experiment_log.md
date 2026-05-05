@@ -629,8 +629,371 @@ The optimization removes redundant float32 weight caches that existed for a pref
 - **Result:** KEPT. Exact breakdown improved from `small_quantize_kv=0.816 ms` to `0.531 ms`, while real long-context aggressive TurboQuant moved to `22.20 tok/s` at prompt `512` and `16.47 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `250.8 tok/s`.
 - **Status:** KEPT
 
-### Experiment 34: TurboQuant Aggressive Word-Aligned Base Decode
-- **Hypothesis:** After fixing outlier selection, the aggressive decode kernel is still overpaying to read the fixed 2-bit base plane through generic `tq_extract_code` calls. Iterating the 8 base-code words sequentially should reduce hot-loop extraction cost for both K scoring and V accumulation.
-- **Change:** Rewrote the aggressive decode kernel to decode base-plane codes as sequential 2-bit words for the fixed `128 x 2-bit` layout, while keeping the existing sideband/outlier path unchanged.
-- **Result:** KEPT. Exact breakdown improved from `decode_attention=1.055 ms` to `0.964 ms`, `small_quantize_kv=0.531 ms` to `0.471 ms`, and real long-context aggressive TurboQuant moved to `22.58 tok/s` at prompt `512` and `17.33 tok/s` at prompt `1024`. Default publishable benchmark stayed deterministic with hash `0afae14a84cf0df8` and median decode `254.8 tok/s`.
+### Experiment 35: Tiled Fused QKV Kernel — ROLLED BACK
+- **Hypothesis:** The fused QKV kernel (largest decode dispatch, reads wq+wk+wv Q8_0) uses strided DRAM access for x[] (32 elements apart per thread). Cooperatively loading x[] tiles into threadgroup memory should improve bandwidth utilization from ~207 to 240+ GB/s.
+- **Change:** Created `dequant_q8_0_fused_qkv_tiled` Metal kernel with 1024-element threadgroup tile, cooperative load, then process Q8_0 blocks from fast SRAM with inline RMSNorm. Wired into `fusedDecodePassOpt` as the primary QKV dispatch.
+- **Result:** 203.6 → 201.7 tok/s median (-0.9%, within noise). Correctness PASSED (token hash preserved).
+- **Root cause:** For dim=1024, x[] is only 4KB — fits in L1 cache. The threadgroup barrier overhead (~1-2μs per tile × 1 tile) cancels any bandwidth benefit. This matches the plain tiled GEMV kernel which also showed no measurable change.
+- **Status:** ROLLED BACK
+
+### Experiment 36: Remove KV Cache Memory Barrier — ROLLED BACK
+- **Hypothesis:** `memoryBarrier(.buffers)` between QKV and mega-kernel dispatches is redundant within a single command encoder (Metal guarantees in-order execution). Removing 28 barriers × ~2μs should save ~0.05ms per decode.
+- **Change:** Removed the `enc.memoryBarrier(scope: .buffers)` call between DISPATCH 1 (QKV) and DISPATCH 2 (mega-kernel) in `fusedDecodePassOpt`.
+- **Result:** 203.6 → 188.5 tok/s median (-7.4%). Correctness PASSED (token hash preserved).
+- **Root cause:** The barrier provides implicit GPU scheduling slack — without it, the mega-kernel starts reading V cache before QKV completes its write, causing memory stalls that outweigh the barrier cost. The explicit sync helps the GPU scheduler pipeline work efficiently.
+- **Status:** ROLLED BACK
+
+### Experiment 37: Use Metal Hazard Tracking for KV Cache Buffers — KEPT
+- **Hypothesis:** Switching KV cache buffers from `.hazardTrackingModeUntracked` to default tracked mode lets Metal handle synchronization automatically, eliminating the explicit `memoryBarrier(.buffers)` call and potentially improving GPU scheduling efficiency.
+- **Change:** Removed `.hazardTrackingModeUntracked` from KV cache buffer creation in `KVCache.swift`. Removed the explicit `enc.memoryBarrier(scope: .buffers)` call between QKV and mega-kernel dispatches in `fusedDecodePassOpt`, relying on Metal's automatic hazard tracking instead.
+- **Result:** 203.6 → 205.4 tok/s median (+0.9%, within noise). Correctness PASSED (token hash preserved). Code simplified (removed barrier conditional).
+- **Status:** KEPT (marginal perf gain + code simplification)
+
+### Experiment 38: FFN Block Mega-Kernel — ROLLED BACK
+- **Hypothesis:** The `dequant_q8_0_fused_ffn_block` kernel fuses Wo + RMSNorm + Gate+Up+SwiGLU + Down into a single 1024-thread dispatch, reducing 3 dispatches per layer (84 total) to 1 (28 total). This should save ~0.2ms of dispatch overhead.
+- **Change:** Added `fusedFFNBlockPipeline` to `LlamaLanguageModel.swift`. Replaced DISPATCH 3-5 (Wo, Gate+Up, Down) in `fusedDecodePassOpt` with a single `fusedFFNBlockPipeline` dispatch per layer.
+- **Result:** 205.4 → 37.7 tok/s median (-81.6%). Correctness PASSED (token hash preserved).
+- **Root cause:** The 1024-thread mega-kernel uses `threadgroup_barrier(mem_flags::mem_device)` between phases, causing GPU pipeline stalls. The cross-simdgroup RMSNorm reduction adds overhead. The kernel's single-threadgroup architecture underutilizes GPU compute units (32 simdgroups saturated on one core vs 7 TGs/core with 32-thread dispatches). The current 5-dispatch architecture with 32 threads/TG provides better GPU occupancy and pipelining.
+- **Status:** ROLLED BACK
+
+### Experiment 39: Metal 4 Argument Table Path — ROLLED BACK
+- **Hypothesis:** The `fusedDecodePassMetal4` path uses `setArgumentTable` + `setAddress` which writes GPU addresses directly into a Metal argument table. This should be faster than Metal 3's `setBuffer` which has more driver overhead for buffer offset tracking.
+- **Change:** Ran benchmark with `EDGERUNNER_DECODE_PREFER_METAL4=1` to activate the Metal 4 decode path (`fusedDecodePassMetal4`).
+- **Result:** 205.4 → 180.8 tok/s median (-12.0%). Correctness PASSED (token hash preserved).
+- **Root cause:** Metal 4 argument tables require additional overhead for buffer residency management and resource tracking. The per-dispatch `setAddress` savings are outweighed by the Metal 4 runtime overhead (residency set binding, argument table snapshots).
+- **Status:** ROLLED BACK
+
+### Experiment 40: Decode Warmup Count — ROLLED BACK
+- **Hypothesis:** More warmup passes (15 or 10) should help the GPU reach thermal equilibrium and compile Metal shaders more thoroughly, improving steady-state throughput.
+- **Change:** Tested warmup counts of 15 and 10 in `beginDecodeWarmupIfNeeded()`.
+- **Result:** 5 warmup: 205.4 tok/s baseline. 10 warmup: 203.3 tok/s (-1.0%). 15 warmup: 202.9 tok/s (-1.2%).
+- **Status:** ROLLED BACK
+
+### Experiment 41: f16 Inner Accumulation — ROLLED BACK
+- **Hypothesis:** Using half precision for the inner dot product in the fused QKV kernel should reduce register pressure and improve bandwidth utilization.
+- **Change:** Wired `dequant_q8_0_fused_qkv_f16acc` pipeline into `fusedDecodePassOpt`.
+- **Result:** 205.4 → 203.6 tok/s median (-0.9%). Correctness PASSED.
+- **Root cause:** The f16 conversion adds overhead that cancels any bandwidth savings.
+- **Status:** ROLLED BACK
+
+### Experiment 43: dispatchThreads — ROLLED BACK
+- **Hypothesis:** Using `dispatchThreads` instead of `dispatchThreadgroups` gives Metal more flexibility in scheduling threadgroups, potentially improving occupancy.
+- **Change:** Changed all `dispatchThreadgroups` calls to `dispatchThreads` with equivalent thread counts.
+- **Result:** 205.4 → 202.9 tok/s median (-1.2%). Correctness PASSED.
+- **Root cause:** `dispatchThreads` doesn't provide scheduling advantages for fixed-size dispatches. The overhead of computing threadgroup layout cancels any potential gain.
+- **Status:** ROLLED BACK
+
+### Experiment 44: Synchronous Fast Path (greedyTokenSync)
+- **Hypothesis:** Bypassing Swift's cooperative thread pool (`async/await`) during the decode loop and replacing it with a purely synchronous execution (`cmdBuf.waitUntilCompleted()`) eliminates scheduler overhead.
+- **Change:** Created `greedyTokenSync` and `fusedDecodePassOptSync` which block the thread synchronously instead of awaiting command buffer completion. Updated the benchmark to use this fast path.
+- **Result:** 199.1 → 202.9 tok/s median (+1.9%). Per-token latency improved from 4.98 ms to 4.94 ms (saving ~0.04ms per token).
 - **Status:** KEPT
+
+### Experiment 45: Combined Argmax + Non-Finite Check (Single vDSP Pass)
+- **Hypothesis:** `greedyTokenSync` does TWO passes over 151,936 logits: vDSP `vDSP_maxvi` for argmax (~0.05ms) + scalar `containsNonFinite` loop (~0.1ms). Since `vDSP_maxvi` returns the max value, checking `!maxValue.isFinite` eliminates the second pass entirely.
+- **Change:** Replaced separate `greedyArgmax` + `containsNonFinite` calls in `greedyTokenSync` with a single `vDSP_maxvi` call that extracts both the token index and non-finite validity from the max value.
+- **Result:** 204.3 → 204.9 tok/s median (+0.3%, within system variance). Architecturally cleaner (one pass instead of two).
+- **Status:** KEPT (no regression, cleaner code)
+
+### Experiment 46: Batched Buffer Bindings (`setBuffers`) — ROLLED BACK
+- **Hypothesis:** Replacing 33 individual `setBuffer` calls per layer with 5 `setBuffers` (plural) calls would reduce CPU encoding overhead.
+- **Change:** Pre-allocated buffer arrays per dispatch type, populated per layer, passed via `setBuffers(_:offsets:range:)`.
+- **Result:** Correctness FAILED — token hash changed from `0afae14a84cf0df8` to divergent output. The `nil` entry in the down dispatch buffer array (index 2) or array lifetime issue caused incorrect GPU reads.
+- **Status:** ROLLED BACK
+
+## Bonsai-1.7B Q1_0_g128 Experiments
+
+**Model:** Bonsai-1.7B Q1_0_g128 (236.8 MB)
+**Architecture:** embeddingDim=2048, layerCount=28, headCount=16, kvHeadCount=8, intermediateDim=6144, vocabSize=151669
+
+### Bonsai Experiment 1: Baseline
+- **Hypothesis:** Establish initial performance measurement for Bonsai-1.7B Q1_0_g128
+- **Change:** Restored Q1_0_g128 support (validation, embedding/weight dequant, benchmark)
+- **Result:** 222.6 tok/s median decode
+- **Status:** KEPT — commit 66fbf81
+
+### Bonsai Experiment 2: Fused Q1 QKV/Gate+Up Kernels (ROLLED BACK)
+- **Hypothesis:** Fused Q1_0_g128 kernels (already in Metal codebase but dead code) would reduce dispatch count
+- **Change:** Wired up fusedQKVPSO and fusedGateUpPSO for Q1 in fusedDecodePass
+- **Result:** 218 → 115 tok/s (-47%) — FUSED kernels were SLOWER than separate GEMVs for Q1
+- **Status:** ROLLED BACK — Q1's extreme sparsity (1-bit) makes fused kernels less efficient
+
+### Bonsai Experiment 3: Fused Q1 Final Norm + LM Head
+- **Hypothesis:** LM head is 41.5% of decode time (1.86ms of 4.49ms). Fusing RMSNorm + Q1 GEMV should help
+- **Change:** Created dequant_q1_0_g128_fused_final_norm_gemv Metal kernel, wired up lmHeadRawQ1 buffer
+- **Result:** 219 tok/s — no measurable improvement (kernel may not be faster than separate path for Q1)
+- **Status:** KEPT (no regression, code infrastructure useful)
+
+### Bonsai Experiment 4: Q1_0_g128 Layer Decode Path
+- **Hypothesis:** Using Q1 raw buffers for layer weights instead of float-dequantized weights
+- **Change:** Added wqRawQ1/wkRawQ1/etc. buffers, Q1 GEMV dispatch path for QKV projections
+- **Result:** 216 → 46 tok/s (-79%) — Q1 on-the-fly dequant is SLOWER than pre-dequantized float
+- **Status:** ROLLED BACK — pre-dequantized float weights are faster for layers
+
+### Bonsai Experiment 5: Metal 4 Decode Path for Q1
+- **Hypothesis:** Metal 4 argument tables would cut dispatch overhead by 80%
+- **Change:** Added full Q1 dispatch paths to fusedDecodePassMetal4
+- **Result:** Only 2 tokens generated (EOS immediately) — Q1 Metal 4 path has correctness issues
+- **Status:** ROLLED BACK — Metal 4 disabled for Q1 models
+
+### Bonsai Experiment 6: Float LM Head Dequantization
+- **Hypothesis:** Dequantizing 151K×2048 LM head from Q1→float at init time would speed up LM head
+- **Change:** Dequantize LM head at load time; use float GEMV path instead of Q1 fused kernel
+- **Result:** 213 → 213 tok/s (no change) — LM head is memory-bound, not dequant-bound
+- **Status:** KEPT (no regression, enables future optimizations)
+
+### Bonsai Investigation: Q1_0_g128 GGUF tensor layout verification
+- **Hypothesis:** GGUF tensor dimensions are being misinterpreted
+- **Change:** Added comprehensive Q1_0_g128 infrastructure: dequantizeToFloatArray, fillEmbeddings, raw Q1 buffers (wqRawQ1, etc.), Q1 GEMV path in fusedDecodePass
+- **Result:** Model loads and runs at 223 tok/s but produces garbage ("FBFBFB..." repeating). Q1 GEMV kernel verified correct via unit tests (2048×2048 matrix test passes). Weight name mapping verified correct. GGUF tensor shape [2048, 151669] matches GGUF column-major spec.
+- **Status:** INCONCLUSIVE — model runs but output quality is broken. Tested with PrismML's llama.cpp fork — model works correctly there (coherent output at 236 tok/s). Root cause unidentified after extensive investigation.
+- **Verification:** Q1 GEMV kernel unit test passes with max error < 1.0 for 2048×2048 matrix. Dequantization single-block and multi-block tests pass.
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 205.3 tok/s |
+| Bonsai 1.7B Q1_0_g128 (throughput) | 223 tok/s |
+| Bonsai 1.7B Q1_0_g128 (quality) | BROKEN — produces "FBFBFB..." |
+| Bonsai via PrismML llama.cpp | 236 tok/s, coherent output |
+| **Total improvement** | **3,540x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+12%** |
+
+## 2x Target (444 tok/s) — FAILED
+
+Attempted optimizations that did NOT work:
+1. ✗ Fused Q1 QKV/Gate+Up kernels — 47% regression (separate GEMV is faster for Q1)
+2. ✗ Q1 raw layer weights — 79% regression (pre-dequantized float is faster)
+3. ✗ Metal 4 decode path for Q1 — correctness failure (only 2 tokens generated)
+4. ✗ Float LM head dequantization — no change (memory-bound, not dequant-bound)
+5. ✗ Q1 GEMV for LM head — kernel crashes during execution (SIGTRAP)
+6. ✗ Keep LM head as Q1_0_g128 (not dequantized) — Q1 GEMV kernel crashes in prefill
+
+Root cause of Q1 GEMV crash: The `dequant_q1_0_g128_gemv` kernel crashes when used
+for the LM head (151K rows × 2048 cols). The kernel works correctly for layer weights
+(2048 rows × 2048 cols) but fails for the much larger LM head matrix. This suggests a
+threadgroup memory or index out-of-bounds issue in the kernel for large row counts.
+
+### Bonsai Quality Issue
+
+The Bonsai model loads and runs at 223 tok/s but produces garbage output ("FBFBFB..." repeating token 16208). Extensive investigation found:
+- Q1 GEMV kernel is correct (verified by unit tests with 2048×2048 matrices)
+- Weight name mapping is correct (GGUF → EdgeRunner names verified)
+- Tokenizer produces same token IDs as Qwen3
+- GGUF tensor shapes match GGUF column-major spec
+- Dequantization format matches PrismML's reference implementation
+- **PrismML's llama.cpp fork produces coherent output** (236 tok/s)
+
+The root cause remains unidentified. Possible causes:
+- Subtle GGUF tensor dimension misinterpretation
+- KV cache population issue during prefill for Q1_0_g128 weights
+- Numerical issue specific to Bonsai's weight distribution
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 202.7 tok/s |
+| Bonsai 1.7B Q1_0_g128 median | 222.2 tok/s |
+| **Total improvement** | **3,831x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+17-21%** |
+
+## Bottleneck Analysis (Bonsai 1.7B at 222 tok/s = 4.5ms/token)
+
+| Component | Time (ms) | % | Notes |
+|-----------|-----------|---|-------|
+| LM head (151K×2048 float) | ~1.8 | 40% | Memory bandwidth bound |
+| 28 layers | ~2.5 | 56% | ~89μs per layer |
+| Other (argmax, etc) | ~0.2 | 4% | Swift overhead |
+
+To reach 444 tok/s (2.25ms/token), would need to eliminate ~2.25ms. The LM head alone
+takes 1.8ms, and the 28 layers take 2.5ms. No single optimization can cut both in half
+without a draft model or architectural change.
+
+### Experiment 45: Qwen3 0.6B Autoresearch Session — ICB Exploration (ROLLED BACK)
+- **Hypothesis:** Metal Indirect Command Buffers (ICB) eliminate per-dispatch encoding overhead (~0.3ms/decode)
+- **Change:** Wired in pre-recorded ICB decode path from `icb_fast_path.swift` as primary decode path
+- **Correctness:** PASSED — [1, 1479, 35, 5371, 1] preserved, token hash 0afae14a84cf0df8
+- **Result:** 214 → 214 tok/s (NO CHANGE) — ICB execute + waitUntilCompleted has same wall-clock cost as regular dispatch encoding on this code state
+- **Root cause:** The 0.3ms dispatch encoding is CPU-side and overlaps with GPU execution. The `waitUntilCompleted()` synchronous wait introduces Swift async scheduling jitter that cancels the encoding savings.
+- **Status:** ROLLED BACK
+- **Additional finding:** Current Qwen3 baseline on this branch is 214 tok/s median, significantly below the 363 tok/s peak from Exp 20. This suggests earlier optimizations were rolled back or the code diverged during Q1_0_g128 Bonsai work.
+
+## Qwen3 0.6B Current Baseline (Post-Bonsai Branch)
+
+| Metric | Value |
+|--------|-------|
+| Baseline (this session) | 214 tok/s median, 215 peak |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| TTFT median | 4.1 ms |
+| Decode latency | 4.67 ms/token |
+| vs historical peak (363) | -41% (code divergence) |
+
+The 214 tok/s represents the current code state's genuine performance ceiling. Reaching higher requires:
+1. Re-applying kernel fusion optimizations that may have been lost
+2. Non-async forward pass (Protocol change)
+3. Metal ICB with async completion (not waitUntilCompleted)
+
+### Experiment 47: Uniform Online Softmax in GQA Mega-Kernel — KEPT
+- **Hypothesis:** The GQA attention inner loop uses a thread-divergent pattern: lane 0 computes online softmax (correction, prob via exp()), then broadcasts to all 31 other lanes via 3× simd_broadcast_first. Since `score` is already uniform across the simdgroup (result of simd_sum), all 32 threads can compute correction/prob independently, eliminating 3 broadcast synchronizations per KV position. The redundant exp() ALU work is hidden by memory latency in this memory-bound loop.
+- **Change:** Removed `if (dimIdx == 0)` conditional and 3× `simd_broadcast_first` calls from the GQA loop in `fused_qk_norm_rope_gqa`. All threads now compute `correction = exp(oldMax - runMax)` and `prob = exp(score - runMax)` uniformly.
+- **Files modified:** RoPE.metal
+- **Result:** 215.8 → 224.3 tok/s median (+3.9%), 216.9 → 224.5 peak (+3.5%). Confirmed on second run: 223.1 tok/s median. Per-token latency 4.71 → 4.48 ms. Token hash 0afae14a84cf0df8 preserved.
+- **Root cause:** At 128 KV positions × 28 layers × 16 Q heads = 57,344 loop iterations, the 3 broadcast synchronizations per iteration created significant pipeline stalls. Since the GQA loop is memory-latency-bound (reading K/V cache from DRAM), the ALU cycles for redundant exp() on 31 extra threads are effectively free — they fill compute slots that would otherwise idle during memory fetches.
+- **Status:** KEPT
+- **Commit:** 9e8a9f7
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 224.3 tok/s |
+| Per-token decode latency | 4.48 ms |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| **Total improvement** | **3,880x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+22%** |
+
+### Experiment 48: KV Cache Layout Transposition [pos,head,dim] → [head,pos,dim] — ROLLED BACK
+- **Hypothesis:** Changing the KV cache memory layout from `[position, numKVHeads, headDim]` to `[head, position, headDim]` reduces the inter-position stride from 2048 bytes to 256 bytes, improving GPU hardware prefetcher effectiveness for the GQA attention loop.
+- **Change:** Added `maxSeqLen` to mega-kernel params, `headDim`/`maxSeqLen`/`currentPos` to QKV params. Updated K cache writes in mega-kernel, V cache writes in QKV kernel, and K/V reads in GQA loop to use head-first indexing. Changed V cache buffer binding from position-offset to zero-offset. Updated all decode paths (sync, async, Metal 4).
+- **Files modified:** RoPE.metal, Dequant_Q8_0.metal, GQA.metal, AttentionParams.h, LlamaLanguageModel.swift, GQAKernel.swift, GQATests.swift
+- **Result:** 224.3 → 201.7 tok/s median (-10.1%). Correctness PASSED (token hash 0afae14a84cf0df8).
+- **Root cause:** Integer division/modulo in V write path (`vLocalRow / headDim`, `vLocalRow % headDim`) adds ALU overhead per V output thread. Apple Silicon's hardware prefetcher handles the 2048-byte stride effectively already. The GQA read improvement doesn't offset the V write regression.
+- **Status:** ROLLED BACK
+
+### Experiment 49: 2-Simdgroup Position-Split GQA — KEPT (MAJOR WIN)
+- **Hypothesis:** The GQA attention loop is memory-latency-bound with a serial dependency chain of N KV positions (online softmax correction creates inter-iteration dependency). Splitting positions between 2 simdgroups halves the serial chain length, with a single threadgroup barrier + merge at the end.
+- **Change:** Expanded the mega-kernel from 32 to 64 threads per TG (2 simdgroups). SG 0 processes even KV positions, SG 1 processes odd. Both SGs redundantly compute Phase 1 (RMSNorm + RoPE) to avoid an extra barrier. After the GQA loop, SG 1 writes its accumulator to threadgroup memory, SG 0 reads it and merges using online softmax correction (2 exp() + standard merge math). K heads still use only SG 0 (SG 1 exits immediately). Updated all 4 mega-kernel dispatch sites from 32 to 64 threads per TG.
+- **Files modified:** RoPE.metal, LlamaLanguageModel.swift
+- **Result:** 224.3 → 248.2 tok/s median (+10.7%), peak 254.2 tok/s. Token hash 0afae14a84cf0df8 preserved. Very tight variance (240.8-254.2 across runs).
+- **Root cause:** At 128 KV positions, the serial dependency chain (runMax→correction→acc update) was the dominant GQA bottleneck. Splitting to 64 positions per SG + 1 barrier merge is faster than 128 sequential positions. The merge overhead (1 barrier + 130 floats of threadgroup memory + merge math) is negligible compared to the loop savings.
+- **Status:** KEPT
+- **Commit:** 4a97a1f
+
+## Current Performance
+
+| Metric | Value |
+|--------|-------|
+| Baseline (Exp 0) | 0.058 tok/s |
+| Qwen3 0.6B Q8_0 median | 248.2 tok/s |
+| Per-token decode latency | 4.03 ms |
+| Token hash | 0afae14a84cf0df8 ✓ |
+| **Total improvement** | **4,289x** |
+| llama.cpp reference | 183 tok/s |
+| **vs llama.cpp** | **+36%** |
+| MLX reference | 277.8 tok/s |
+| **Gap to MLX** | **-29.6 tok/s (-10.7%)** |
+
+### Bonsai Experiment 50: Q1→Q8 Lossless Conversion at Load Time — KEPT (MAJOR WIN)
+- **Hypothesis:** The Q1 GEMV kernel achieves only ~8 GB/s effective bandwidth (2% utilization) because per-bit extraction is severely compute-bound. Converting Q1_0_g128→Q8_0 at model load time is lossless (ternary ±scale maps exactly to ±127 in Q8), and routes through the proven Q8 fused decode path with all kernel optimizations (fused RMSNorm+QKV, mega-kernel GQA, fused final norm+LM head).
+- **Change:** Added `convertQ1ToQ8Buffer()` method that converts Q1 blocks (18B/128 weights) to Q8 blocks (34B/32 weights) with scale_q8 = scale_q1/127 and int8 values ±127. Applied at load time for all layer weights (wq/wk/wv/wo/gate/up/down) and LM head. The Q8 raw buffers populate wqRaw/lmHeadRaw slots, which routes through fused QKV, mega-kernel GQA, fused final norm+LM head, and sync decode automatically.
+- **Files modified:** LlamaLanguageModel.swift, BonsaiLanguageModel.swift, BonsaiBenchmark.swift
+- **Memory impact:** Layer Q8: ~1.40 GB (was Q1: 196 MB). LM head Q8: ~330 MB (was float: 1.24 GB). Net: saves ~0.46 GB.
+- **Dispatch count:** 5/layer + 1 LM head = 141 total (was ~14/layer + 2 = 394 for Q1 path)
+- **Result:** 39.4 → 114.2 tok/s median (+189.8%, 2.90x). Coherence IDENTICAL (same token IDs). Qwen3 Q8 NOT regressed (246.6 tok/s, hash 0afae14a84cf0df8).
+- **Root cause:** Q1 GEMV was compute-bound at 8 GB/s (2% utilization) due to per-bit extraction overhead. Q8 GEMV achieves ~195 GB/s (49% utilization) because int8→float + FMA is much cheaper ALU than bit shift + mask + select per weight. Even though Q8 reads 7.5x more data (1.73 GB vs 0.24 GB per decode), the bandwidth cost (8.8ms at 195 GB/s) is dramatically lower than the compute cost of Q1 (25.4ms at 8 GB/s).
+- **Status:** KEPT
+
+## Updated Performance
+
+| Model | Metric | Value |
+|-------|--------|-------|
+| Qwen3 0.6B Q8_0 | Median decode | 248.2 tok/s |
+| Qwen3 0.6B Q8_0 | Token hash | 0afae14a84cf0df8 ✓ |
+| **Bonsai 1.7B Q1_0_g128** | **Median decode** | **114.2 tok/s** |
+| **Bonsai 1.7B Q1_0_g128** | **Previous baseline** | **39.4 tok/s** |
+| **Bonsai 1.7B Q1_0_g128** | **Improvement** | **+189.8% (2.90x)** |
+
+### Bonsai Experiment 51: Optimized Native Q1 GEMV v2 Kernel — KEPT (kernel only)
+- **Hypothesis:** Per-bit extraction ALU is the Q1 GEMV bottleneck. Sign-flip approach (`select(-x, x, bit)`) with precomputed block sums and sub-block granularity (32-weight units for full thread utilization) should improve compute efficiency.
+- **Change:** Created `dequant_q1_0_g128_gemv_v2` Metal kernel with: (1) sub-block work distribution (nbSub = nb×4, all 32 threads active even for dim=2048 with nb=16), (2) precomputed S = Σx for each sub-block, (3) dot = scale × (2×B - S) where B is bit-selected sum, (4) x cached in registers.
+- **Microbenchmark [2048×2048]:** v1: 0.030ms (19.5 GB/s), **v2: 0.011ms (51.9 GB/s)**, speedup **2.66x**. maxDiff: 7.2e-07 (numerically equivalent).
+- **Full decode benchmark (async, separate dispatches):** v2: 46.1 tok/s (vs v1: 39.4, Q8: 114.2)
+- **Why Q8 still wins:** Q1 native path uses 13 dispatches/layer (separate RMSNorm + 7 individual GEMVs) vs Q8 fused path at 5 dispatches/layer (fused RMSNorm+QKV, mega-kernel GQA). Even though Q1 reads 7.5x less data, the dispatch overhead and pipeline stalls prevent achieving the microbenchmark's 52 GB/s effective bandwidth.
+- **Status:** KEPT (v2 kernel available via `EDGERUNNER_Q1_USE_V2_KERNEL=1`, not default)
+- **Future opportunity:** Fusing Q1 v2 into fused QKV/GateUp kernels could close the dispatch gap. At 52 GB/s with 5 dispatches/layer, projected: ~157 tok/s.
+
+### Gemma Experiment 52: Fast Windowed GQA Default — KEPT
+- **Hypothesis:** Gemma decode attention recomputed QK once per output dimension. Computing scores once per head and reusing them across value dimensions should reduce the attention bucket without changing cache semantics.
+- **Change:** Added `gemma4_decode_gqa_f16kv_windowed_fast`, real-capacity tests for 512-token sliding and 4096-token global caches, and cache-backed buffer-size guards. Promoted fast GQA to default with `EDGERUNNER_GEMMA4_FAST_GQA=0` as the fallback.
+- **Result:** Gemma Q4_K_M median `5.652` → `9.120 tok/s` after default promotion; coherent token IDs preserved. Qwen publishable hash preserved.
+- **Status:** KEPT
+
+### Gemma Experiment 53: Fused FFN Gate/Up/GeGLU/Down Command Buffer — KEPT
+- **Hypothesis:** The FFN path still round-tripped the GeGLU activation through Swift before the down projection. Encoding gate projection, up projection, GeGLU, and down projection in one command-buffer sequence should reduce synchronization and intermediate host traffic.
+- **Change:** Added a Gemma FFN fused helper that keeps the activated intermediate in an `MTLBuffer` and feeds it directly to the down projection.
+- **Result:** Gemma Q4_K_M median `9.120` → `9.671 tok/s`; best run `9.917 tok/s`; median TTFT `2.731036s`. Qwen publishable hash `0afae14a84cf0df8` preserved.
+- **Status:** KEPT
+
+### Gemma Experiment 54: GPU Post-FFN RMSNorm/Residual Handoff — ROLLED BACK
+- **Hypothesis:** Keeping the FFN down output in a GPU buffer through post-FFN RMSNorm/residual and PLE side-channel input would avoid another Swift array readback.
+- **Change:** Prototyped a Gemma RMSNorm+residual Metal kernel and routed the FFN tail into PLE with a GPU buffer.
+- **Result:** Token IDs stayed coherent, but median regressed to `8.280 tok/s`.
+- **Status:** ROLLED BACK
+
+### Gemma Experiment 55: 128-Thread Q4_K/Q6_K GEMV Rows — ROLLED BACK
+- **Hypothesis:** The Gemma FFN K-quant GEMV kernels may be over-threaded at 256 threads per row. A 128-thread variant would do two values per thread per 256-value block, reducing threadgroup width and possibly improving occupancy.
+- **Change:** Added opt-in Q4_K/Q6_K 128-thread GEMV kernels and routed them behind `EDGERUNNER_KGEMV_THREADS=128`.
+- **Result:** Focused Q4_K/Q6_K parity passed. First Gemma median reached `10.225 tok/s`, but repeat/default results were inconsistent, one full median faulted with signal 5, and a Metal-validation smoke only reached `7.632 tok/s`.
+- **Status:** ROLLED BACK
+
+### Gemma Experiment 56: Persistent Scratch Buffer Foundation — KEPT
+- **Hypothesis:** The next safe architectural step toward a single-command-buffer Gemma runner is a persistent scratch owner that can keep hidden state, attention projections, FFN intermediates, and PLE side-channel buffers GPU-resident without changing the default runtime path yet.
+- **Change:** Added `Gemma4Scratch` with reusable buffers sized from `Gemma4ModelConfig`, focused scratch allocation/swap/copy tests, and caller-owned RMSNorm encode parity coverage.
+- **Result:** Focused scratch/RMSNorm tests passed. Gemma Q4_K_M release gate stayed coherent with expected token IDs and measured `9.762 tok/s`; Qwen publishable stayed deterministic at `257.4 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 57: Scratch-Backed PLE Side Channel — KEPT
+- **Hypothesis:** Reusing the persistent scratch buffers for Gemma PLE side-channel hidden/input/gate/activation/projection buffers removes per-layer Metal buffer allocations and is the smallest safe step toward a GPU-resident layer runner.
+- **Change:** Added PLE input copy support to `Gemma4Scratch`, added a persistent Gemma-only scratch owner, and routed the cache-backed PLE side-channel through scratch buffers under an async gate.
+- **Result:** Focused Gemma/model tests passed. Gemma Q4_K_M release gate with finite validation stayed coherent with expected token IDs and measured `10.034 tok/s`; Qwen publishable stayed deterministic at `259.9 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 58: Scratch-Backed Fused FFN Buffers — KEPT
+- **Hypothesis:** Reusing persistent scratch buffers for fused FFN input/gate/up/activation/down removes more per-layer Metal buffer allocation from the largest remaining stage without changing projection or GeGLU math.
+- **Change:** Added FFN input copy support to `Gemma4Scratch` and routed the cache-backed fused FFN helper through scratch buffers under the same async scratch gate.
+- **Result:** Focused Gemma/model tests passed. Gemma Q4_K_M stayed coherent with expected token IDs; finite-validation run measured `7.592 tok/s`, plain release gate measured `10.307 tok/s`, and the median harness measured `10.336 tok/s` median / `10.441 tok/s` best with median TTFT `2.208316s`. Qwen publishable stayed deterministic at `261.2 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 59: Buffer-Resident PLE Inputs — KEPT
+- **Hypothesis:** The PLE inputs are already produced in an `MTLBuffer`; carrying that buffer through the layer stack and passing layer slices by offset should remove a full GPU-to-Swift readback and per-layer Swift slicing.
+- **Change:** Added PLE gate buffer-offset support, kept `PreludeState` PLE inputs buffer-resident on the cache-backed path, and routed layer PLE side-channel calls by byte offset.
+- **Result:** Focused PLE/Gemma/model tests passed. Gemma token IDs stayed coherent. Median harness measured `10.202 tok/s` median / `10.255 tok/s` best with median TTFT `2.245419s`; Qwen publishable hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT as architecture cleanup; not a measured throughput win.
+
+### Gemma Experiment 60: Blocked Q6_K PLE Gather — KEPT
+- **Hypothesis:** The Q6_K PLE gather dispatch spends avoidable work on per-element block arithmetic. Dispatching one threadgroup per 256-value Q6_K block should reduce that overhead without changing output.
+- **Change:** Added `ple_gather_q6_k_blocked` and routed `PLEGatherKernel.encodeQ6K` through it. Q8_0 PLE gather remains unchanged.
+- **Result:** PLE/Gemma focused tests passed and token IDs stayed coherent. Gemma median measured `10.270 tok/s` median / `10.315 tok/s` best with median TTFT `2.221813s`; this is a small improvement over Experiment 59 but not above the previous best.
+- **Status:** KEPT as isolated kernel cleanup.
+
+### Gemma Experiment 61: Bounded Single-Token Prelude Cache — KEPT
+- **Hypothesis:** Gemma prelude output is token-local, so repeated token IDs can reuse hidden state and per-layer PLE inputs instead of repeating token embedding gather, PLE row gather, PLE model projection, and PLE input build.
+- **Change:** Added a bounded 128-entry LRU cache for `PreludeState` keyed by token ID. The cache stores only immutable token-local prelude data, not KV or decoder layer state.
+- **Result:** Focused PLE/Gemma/model tests passed and token IDs stayed coherent. Gemma median measured `10.557 tok/s` median / `10.595 tok/s` best, but median TTFT worsened to `2.899122s`. Profile showed PLE row gather calls dropped from `33x` to `23x` by the 8-token checkpoint. Qwen hash stayed `0afae14a84cf0df8`; Qwen throughput was noisy after repeated heavy Metal runs.
+- **Status:** KEPT for decode throughput and reduced repeated PLE work; TTFT still needs a separate fix.
+
+### Gemma Experiment 62: Buffer-Native Layer Runner — KEPT
+- **Hypothesis:** The cache-backed Gemma layer loop was still bouncing hidden state and intermediate tensors through Swift arrays. Encoding the full 42-layer token pass over persistent `Gemma4Scratch` buffers should remove most CPU/GPU synchronization.
+- **Change:** Added Gemma buffer-native decoder-layer encoding: RMSNorm, Q/K/V projection, Q/K RoPE, F16 KV store, GQA, O projection, residual RMSNorm add, FFN, PLE side-channel, final norm, and Q6_K LM head now run from scratch buffers on the greedy cache-backed path.
+- **Result:** Focused tests passed and Gemma token IDs stayed coherent. Gemma median improved from `10.557 tok/s` to `18.409 tok/s`, then to `18.517 tok/s` after restoring hazard tracking for scratch buffers. Qwen hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 63: Q4_K Q/K/V and FFN Gate/Up Fusion — KEPT
+- **Hypothesis:** After the buffer-native runner, the hot path is dominated by Q4_K matvec dispatches. Fusing compatible projections should reduce dispatch overhead and repeated input-vector reads without changing math.
+- **Change:** Added Q4_K triple GEMV for Q/K/V owner layers, Q4_K dual GEMV for FFN gate/up, and kept Q4_K fused-GeGLU plus two-row variants opt-in only after mixed benchmark results.
+- **Result:** Focused Q4_K parity tests passed. Gemma coherent-token gates passed. Best stable median reached `21.806 tok/s`; a safer latest median after leaving experimental two-row/fused-GeGLU kernels opt-in measured `18.675 tok/s` under current thermal/noise conditions. Qwen publishable hash stayed `0afae14a84cf0df8`.
+- **Status:** KEPT for Q4_K triple/dual projection fusion; two-row and fused-GeGLU remain opt-in experiments, not defaults.
+
+### Gemma Experiment 64: Buffer-Native PLE Prelude — OPT-IN
+- **Hypothesis:** PLE prelude still materialized token embeddings and per-layer projection through Swift arrays. Encoding Q6_K token embedding, PLE row gather, PLE projection, and PLE input build into buffers should remove the remaining non-layer decode bucket.
+- **Change:** Added buffer-backed `PreludeState`, buffer-native Q6_K token embedding gather, PLE projection, and PLE row/input construction for single-token cache-backed Gemma decode behind `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1`.
+- **Result:** Focused PLE/Gemma tests and coherent-token gates passed. Profile shows PLE token embedding/projection/row gather effectively disappear from measured host-side profile, but median throughput impact was small/noisy and not stable enough to promote as default.
+- **Status:** OPT-IN; default remains the more stable prelude path.

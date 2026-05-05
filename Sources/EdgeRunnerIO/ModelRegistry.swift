@@ -46,6 +46,7 @@ public final class ModelRegistry: Sendable {
     public static let `default`: ModelRegistry = {
         let registry = ModelRegistry()
         registry.register(LlamaArchitectureFactory())
+        registry.register(Gemma4ArchitectureFactory())
         return registry
     }()
 

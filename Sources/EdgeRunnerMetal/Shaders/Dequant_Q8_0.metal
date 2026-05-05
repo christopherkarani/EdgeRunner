@@ -6,8 +6,47 @@ struct ERDequantQ8_0Params {
     uint outputOffset;
 };
 
+struct ERQuantizeQ8RowsParams {
+    uint rowCount;
+    uint sourceRowStride;
+    uint destinationRowBase;
+    uint blocksPerRow;
+};
+
 constant uint q8_0BlockBytes = 34;
 constant uint q8_0WeightsPerBlock = 32;
+
+kernel void quantize_q8_0_rows(
+    device const float *source [[buffer(0)]],
+    device uchar *destination [[buffer(1)]],
+    constant ERQuantizeQ8RowsParams &params [[buffer(2)]],
+    uint rowIndex [[thread_position_in_grid]]
+) {
+    if (rowIndex >= params.rowCount) return;
+
+    const uint sourceBase = rowIndex * params.sourceRowStride;
+    const uint destinationRow = params.destinationRowBase + rowIndex;
+    device uchar *rowDst = destination + destinationRow * params.blocksPerRow * q8_0BlockBytes;
+
+    for (uint blockIndex = 0; blockIndex < params.blocksPerRow; ++blockIndex) {
+        const uint blockSourceBase = sourceBase + blockIndex * q8_0WeightsPerBlock;
+        device uchar *blockDst = rowDst + blockIndex * q8_0BlockBytes;
+
+        float maxAbs = 0.0f;
+        for (uint lane = 0; lane < q8_0WeightsPerBlock; ++lane) {
+            maxAbs = max(maxAbs, fabs(source[blockSourceBase + lane]));
+        }
+
+        const float scale = maxAbs > 0.0f ? maxAbs / 127.0f : 0.0f;
+        *(device ushort *) blockDst = as_type<ushort>(half(scale));
+
+        for (uint lane = 0; lane < q8_0WeightsPerBlock; ++lane) {
+            const float value = source[blockSourceBase + lane];
+            const int quantized = scale == 0.0f ? 0 : clamp((int) rint(value / scale), -127, 127);
+            blockDst[2 + lane] = as_type<uchar>((char) quantized);
+        }
+    }
+}
 
 kernel void dequant_q8_0(
     device const uchar* input [[buffer(0)]],
@@ -68,10 +107,10 @@ kernel void dequant_q8_0_gemv(
         ax[row] = quantisedW + (r < params.rows ? r : row0) * nb * q8_0BlockBytes;
     }
 
-    // Main loop: each thread handles 1 full block (32 elements) per iteration
+    // Main loop: each thread handles 1 full block (32 elements) per iteration.
     for (short ib = tiisg; ib < nb; ib += 32) {
         device const float* xb = x + ib * 32;
-        // Cache x in registers (reused across LOCAL_NR rows)
+        // Cache x in registers (reused across LOCAL_NR rows).
         float xl[32];
         for (short i = 0; i < 32; i++) xl[i] = xb[i];
 
@@ -416,17 +455,17 @@ kernel void dequant_q8_0_fused_gate_up_silu(
             device const uchar* blockG = axGate[r] + ib * q8_0BlockBytes;
             float scaleG = float(as_type<half>(*(device const ushort*)blockG));
             device const char* qsG = (device const char*)(blockG + 2);
-            float sqG = 0.f;
-            for (short i = 0; i < 32; i++) sqG += float(qsG[i]) * xl[i];
-            sumGate[r] += sqG * scaleG;
+            float sumG = 0.f;
+            for (short i = 0; i < 32; i++) sumG += float(qsG[i]) * xl[i];
+            sumGate[r] += sumG * scaleG;
 
             // Up
             device const uchar* blockU = axUp[r] + ib * q8_0BlockBytes;
             float scaleU = float(as_type<half>(*(device const ushort*)blockU));
             device const char* qsU = (device const char*)(blockU + 2);
-            float sqU = 0.f;
-            for (short i = 0; i < 32; i++) sqU += float(qsU[i]) * xl[i];
-            sumUp[r] += sqU * scaleU;
+            float sumU = 0.f;
+            for (short i = 0; i < 32; i++) sumU += float(qsU[i]) * xl[i];
+            sumUp[r] += sumU * scaleU;
         }
     }
 
@@ -608,7 +647,7 @@ kernel void dequant_q8_0_gemv_tiled(
         const uint tileStartBlock = (tileOffset) / 32;
         const uint tileEndBlock = min((tileOffset + tileLen + 31) / 32, (uint)nb);
 
-        for (short ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
+        for (uint ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
             // Calculate position within tile for this block
             const uint blockStartInTile = (ib * 32) - tileOffset;
 
@@ -697,7 +736,7 @@ kernel void dequant_q8_0_gemv_tiled_f16acc(
         const uint tileStartBlock = (tileOffset) / 32;
         const uint tileEndBlock = min((tileOffset + tileLen + 31) / 32, (uint)nb);
 
-        for (short ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
+        for (uint ib = tileStartBlock + tiisg; ib < tileEndBlock; ib += 32) {
             const uint blockStartInTile = (ib * 32) - tileOffset;
 
             half xl[32];

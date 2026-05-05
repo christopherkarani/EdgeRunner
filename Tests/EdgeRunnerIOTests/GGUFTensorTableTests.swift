@@ -69,6 +69,67 @@ struct GGUFTensorTableTests {
         #expect(infos[2].type == .q4_0)
     }
 
+    @Test func parseModernGGUFTensorTypeOrdering() throws {
+        #expect(GGUFTensorType(rawValue: 16) == .iq2_xxs)
+        #expect(GGUFTensorType(rawValue: 23) == .iq4_xs)
+        #expect(GGUFTensorType(rawValue: 24) == .i8)
+        #expect(GGUFTensorType(rawValue: 28) == .f64)
+        #expect(GGUFTensorType(rawValue: 29) == .iq1_m)
+        #expect(GGUFTensorType(rawValue: 30) == .bf16)
+        #expect(GGUFTensorType(rawValue: 34) == .tq1_0)
+        #expect(GGUFTensorType(rawValue: 35) == .tq2_0)
+        #expect(GGUFTensorType(rawValue: 39) == .mxfp4)
+        #expect(GGUFTensorType(rawValue: 40) == .nvfp4)
+        #expect(GGUFTensorType.bf16.tensorDataType == .bfloat16)
+    }
+
+    @Test func deferredUpstreamTensorTypesAreExplicitlyUnsupported() throws {
+        let unsupported: [(GGUFTensorType, String)] = [
+            (.iq2_xxs, "IQ2_XXS"),
+            (.iq2_xs, "IQ2_XS"),
+            (.iq3_xxs, "IQ3_XXS"),
+            (.iq1_s, "IQ1_S"),
+            (.iq4_nl, "IQ4_NL"),
+            (.iq3_s, "IQ3_S"),
+            (.iq2_s, "IQ2_S"),
+            (.iq4_xs, "IQ4_XS"),
+            (.iq1_m, "IQ1_M"),
+            (.tq1_0, "TQ1_0"),
+            (.tq2_0, "TQ2_0"),
+            (.mxfp4, "MXFP4"),
+            (.nvfp4, "NVFP4"),
+        ]
+
+        for (type, name) in unsupported {
+            #expect(type.tensorDataType == nil)
+            #expect(type.diagnosticName == name)
+        }
+    }
+
+    @Test func parseBF16TensorInfo() throws {
+        var builder = GGUFBuilder()
+        builder.writeUInt32(ggufMagic)
+        builder.writeUInt32(3)
+        builder.writeUInt64(1)
+        builder.writeUInt64(0)
+        builder.writeString("per_layer_model_proj.weight")
+        builder.writeUInt32(2)
+        builder.writeUInt64(2560)
+        builder.writeUInt64(10752)
+        builder.writeUInt32(30)
+        builder.writeUInt64(0)
+
+        let reader = GGUFReader(data: builder.data)
+        let header = try reader.readHeader()
+        _ = try reader.readMetadata(count: Int(header.metadataKVCount))
+        let infos = try reader.readTensorInfos(count: Int(header.tensorCount))
+
+        #expect(infos.count == 1)
+        #expect(infos[0].name == "per_layer_model_proj.weight")
+        #expect(infos[0].type == .bf16)
+        #expect(infos[0].type.tensorDataType == .bfloat16)
+    }
+
     @Test func rejectUnknownTensorType() {
         var builder = GGUFBuilder()
         builder.writeUInt32(ggufMagic)
@@ -87,6 +148,113 @@ struct GGUFTensorTableTests {
             _ = try reader.readMetadata(count: Int(header.metadataKVCount))
             _ = try reader.readTensorInfos(count: Int(header.tensorCount))
         }
+    }
+
+    @Test func loaderAcceptsMobileQuantByteCounts() async throws {
+        let cases: [(GGUFTensorType, [UInt64], Int)] = [
+            (.f16, [256], 512),
+            (.bf16, [256], 512),
+            (.q2_K, [256], 84),
+            (.q3_K, [256], 110),
+            (.q4_K, [256], 144),
+            (.q5_K, [256], 176),
+            (.q6_K, [256], 210),
+            (.q8_0, [32], 34),
+        ]
+
+        for (type, dimensions, byteCount) in cases {
+            let url = try Self.writeSingleTensorGGUF(
+                type: type,
+                dimensions: dimensions,
+                payloadByteCount: byteCount
+            )
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let map = try await GGUFLoader().load(from: url)
+            let tensor = try #require(map["test.weight"])
+            #expect(tensor.dataType == type.tensorDataType)
+            #expect(tensor.elementCount == Int(dimensions.reduce(1, *)))
+        }
+    }
+
+    @Test func loaderRejectsTruncatedMobileQuantPayloads() async throws {
+        let cases: [(GGUFTensorType, [UInt64], Int)] = [
+            (.f16, [256], 512),
+            (.bf16, [256], 512),
+            (.q2_K, [256], 84),
+            (.q3_K, [256], 110),
+            (.q4_K, [256], 144),
+            (.q5_K, [256], 176),
+            (.q6_K, [256], 210),
+            (.q8_0, [32], 34),
+        ]
+
+        for (type, dimensions, byteCount) in cases {
+            let url = try Self.writeSingleTensorGGUF(
+                type: type,
+                dimensions: dimensions,
+                payloadByteCount: byteCount - 1
+            )
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            await #expect(throws: WeightLoaderError.self, "Expected truncated \(type.diagnosticName) payload to fail") {
+                _ = try await GGUFLoader().load(from: url)
+            }
+        }
+    }
+
+    @Test func loaderRejectsDeferredUpstreamTensorTypes() async throws {
+        let unsupported: [GGUFTensorType] = [
+            .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq4_nl, .iq3_s, .iq2_s, .iq4_xs,
+            .iq1_m, .tq1_0, .tq2_0, .mxfp4, .nvfp4,
+        ]
+
+        for type in unsupported {
+            let url = try Self.writeSingleTensorGGUF(
+                type: type,
+                dimensions: [256],
+                payloadByteCount: 0
+            )
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            await #expect(throws: WeightLoaderError.unsupportedDataType(type.rawValue)) {
+                _ = try await GGUFLoader().load(from: url)
+            }
+        }
+    }
+
+    private static func writeSingleTensorGGUF(
+        type: GGUFTensorType,
+        dimensions: [UInt64],
+        payloadByteCount: Int
+    ) throws -> URL {
+        var builder = GGUFBuilder()
+        builder.writeUInt32(ggufMagic)
+        builder.writeUInt32(3)
+        builder.writeUInt64(1)
+        builder.writeUInt64(1)
+
+        builder.writeString("general.architecture")
+        builder.writeUInt32(GGUFMetadataValueType.string.rawValue)
+        builder.writeString("llama")
+
+        builder.writeString("test.weight")
+        builder.writeUInt32(UInt32(dimensions.count))
+        for dimension in dimensions {
+            builder.writeUInt64(dimension)
+        }
+        builder.writeUInt32(type.rawValue)
+        builder.writeUInt64(0)
+
+        while builder.data.count % 32 != 0 {
+            builder.data.append(0)
+        }
+        builder.data.append(contentsOf: [UInt8](repeating: 0, count: payloadByteCount))
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_gguf_quant_\(UUID().uuidString).gguf")
+        try builder.data.write(to: url)
+        return url
     }
 }
 

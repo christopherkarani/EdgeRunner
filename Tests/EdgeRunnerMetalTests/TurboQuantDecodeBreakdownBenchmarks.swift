@@ -110,7 +110,8 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             headDim: 128,
             startPos: 1023,
             theta: 1_000_000,
-            scalingFactor: 1
+            scalingFactor: 1,
+            partialRotaryFactor: 1.0
         )
         var kRoPEParams = RoPEParamsBench(
             seqLen: 1,
@@ -118,7 +119,8 @@ struct TurboQuantDecodeBreakdownBenchmarks {
             headDim: 128,
             startPos: 1023,
             theta: 1_000_000,
-            scalingFactor: 1
+            scalingFactor: 1,
+            partialRotaryFactor: 1.0
         )
         var attentionParams = TurboQuantAttentionParamsBench(
             seqLen: 1,
@@ -798,4 +800,5 @@ private struct RoPEParamsBench {
     var startPos: UInt32
     var theta: Float
     var scalingFactor: Float
+    var partialRotaryFactor: Float   // Must match ERRoPEParams field order (added for pRoPE / Gemma 4).
 }

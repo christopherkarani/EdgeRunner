@@ -54,6 +54,20 @@ struct ElementwiseKernelTests {
         #expect(result == expected)
     }
 
+    @Test func captureFloat32Slice() throws {
+        let source: [Float] = [10, 20, 30, 40, 50, 60]
+        let destination: [Float] = [-1, -1, -1, -1, -1, -1]
+        let expected: [Float] = [-1, 20, 30, 40, -1, -1]
+        let result = try dispatchCaptureSlice(
+            source: source,
+            destination: destination,
+            sourceOffset: 1,
+            destinationOffset: 1,
+            count: 3
+        )
+        #expect(result == expected)
+    }
+
     private func dispatchBinary(name: String, a: [Float], b: [Float], count: Int) throws -> [Float] {
         let byteCount = count * MemoryLayout<Float>.size
         let bufA = device.makeBuffer(bytes: a, length: byteCount, options: .storageModeShared)!
@@ -82,5 +96,62 @@ struct ElementwiseKernelTests {
 
         let ptr = bufOut.contents().bindMemory(to: Float.self, capacity: count)
         return Array(UnsafeBufferPointer(start: ptr, count: count))
+    }
+
+    private func dispatchCaptureSlice(
+        source: [Float],
+        destination: [Float],
+        sourceOffset: Int,
+        destinationOffset: Int,
+        count: Int
+    ) throws -> [Float] {
+        let sourceByteCount = source.count * MemoryLayout<Float>.size
+        let destinationByteCount = destination.count * MemoryLayout<Float>.size
+        let sourceBuffer = device.makeBuffer(
+            bytes: source,
+            length: sourceByteCount,
+            options: .storageModeShared
+        )!
+        let destinationBuffer = device.makeBuffer(
+            bytes: destination,
+            length: destinationByteCount,
+            options: .storageModeShared
+        )!
+
+        let pipeline = try registry.pipeline(for: "capture_f32_slice")
+        let commandBuffer = commandQueue.makeCommandBuffer()!
+        let encoder = commandBuffer.makeComputeCommandEncoder()!
+
+        struct CaptureParams {
+            var sourceOffsetElements: UInt32
+            var destinationOffsetElements: UInt32
+            var elementCount: UInt32
+        }
+
+        var params = CaptureParams(
+            sourceOffsetElements: UInt32(sourceOffset),
+            destinationOffsetElements: UInt32(destinationOffset),
+            elementCount: UInt32(count)
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(sourceBuffer, offset: 0, index: 0)
+        encoder.setBuffer(destinationBuffer, offset: 0, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<CaptureParams>.size, index: 2)
+
+        let threads = MTLSize(width: count, height: 1, depth: 1)
+        let threadsPerGroup = MTLSize(
+            width: min(count, pipeline.maxTotalThreadsPerThreadgroup),
+            height: 1,
+            depth: 1
+        )
+        encoder.dispatchThreads(threads, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let pointer = destinationBuffer.contents().bindMemory(to: Float.self, capacity: destination.count)
+        return Array(UnsafeBufferPointer(start: pointer, count: destination.count))
     }
 }

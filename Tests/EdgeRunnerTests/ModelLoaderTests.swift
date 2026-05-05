@@ -6,6 +6,7 @@ import Foundation
 @Suite("ModelLoader")
 struct ModelLoaderTests {
     static let qwenModelPath = "/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf"
+    static let bonsaiModelPath = (NSHomeDirectory() as NSString).appendingPathComponent("edgerunner-models/Bonsai-1.7B.gguf")
 
     @Test func loadsQwenModel() async throws {
         guard FileManager.default.fileExists(atPath: Self.qwenModelPath) else {
@@ -20,6 +21,28 @@ struct ModelLoaderTests {
         #expect(model.vocabularySize > 0)
     }
 
+    @Test func routesBonsaiToDedicatedBackend() async throws {
+        guard FileManager.default.fileExists(atPath: Self.bonsaiModelPath) else {
+            print("SKIP: Model not found at \(Self.bonsaiModelPath)")
+            return
+        }
+
+        let model = try await ModelLoader.load(
+            from: URL(fileURLWithPath: Self.bonsaiModelPath)
+        )
+        #expect(model is BonsaiLanguageModel)
+        #expect(model.vocabularySize > 0)
+    }
+
+    @Test func recognizesGemma4AsDedicatedBackend() {
+        let config = ModelConfig(
+            architectureName: "gemma4",
+            metadata: Gemma4ModelConfigTests.makeReferenceModelConfigMetadata()
+        )
+
+        #expect(Gemma4LanguageModel.supports(modelConfig: config))
+    }
+
     @Test func throwsForInvalidPath() async {
         do {
             _ = try await ModelLoader.load(
@@ -27,8 +50,7 @@ struct ModelLoaderTests {
             )
             #expect(Bool(false), "Should have thrown")
         } catch {
-            // Expected: file not found or load error
-            #expect(error is GenerationError || error is any Error)
+            #expect(String(describing: error).isEmpty == false)
         }
     }
 }

@@ -4,7 +4,7 @@ import Metal
 public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
     private struct PreparedFile: Sendable {
         let url: URL
-        let mappedFile: MemoryMappedFile
+        let regionMapper: FileRegionMapper
         let tensorInfos: [GGUFTensorInfo]
         let dataSectionOffset: Int
         let modelConfig: ModelConfig
@@ -43,7 +43,7 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
         for tensorInfo in preparedFile.tensorInfos {
             let tensorOffset = preparedFile.dataSectionOffset + Int(tensorInfo.offset)
             let byteCount = try Self.tensorByteCount(for: tensorInfo)
-            guard tensorOffset + byteCount <= preparedFile.mappedFile.size else {
+            guard tensorOffset + byteCount <= preparedFile.regionMapper.size else {
                 throw WeightLoaderError.invalidFormat(
                     "Tensor \(tensorInfo.name) exceeds GGUF data section bounds"
                 )
@@ -53,7 +53,7 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
                 throw WeightLoaderError.unsupportedDataType(tensorInfo.type.rawValue)
             }
 
-            let region = try preparedFile.mappedFile.makeMetalBufferRegion(
+            let region = try preparedFile.regionMapper.makeMetalBufferRegion(
                 device: device,
                 offset: tensorOffset,
                 length: byteCount
@@ -65,7 +65,7 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
                 dataType: dataType,
                 shape: tensorInfo.dimensions.map(Int.init),
                 name: tensorInfo.name,
-                owner: preparedFile.mappedFile
+                owner: preparedFile.regionMapper
             )
         }
 
@@ -73,8 +73,9 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
     }
 
     private static func prepare(url: URL) throws -> PreparedFile {
-        let mappedFile = try MemoryMappedFile(url: url)
-        let reader = GGUFReader(data: mappedFile.mappedData)
+        let regionMapper = try FileRegionMapper(url: url)
+        let headerData = try readParsableHeaderPrefix(url: url, fileSize: regionMapper.size)
+        let reader = GGUFReader(data: headerData)
         let header = try reader.readHeader()
         let metadata = try reader.readMetadata(count: Int(header.metadataKVCount))
         let tensorInfos = try reader.readTensorInfos(count: Int(header.tensorCount))
@@ -83,11 +84,37 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
 
         return PreparedFile(
             url: url,
-            mappedFile: mappedFile,
+            regionMapper: regionMapper,
             tensorInfos: tensorInfos,
             dataSectionOffset: dataSectionOffset,
             modelConfig: modelConfig
         )
+    }
+
+    private static func readParsableHeaderPrefix(url: URL, fileSize: Int) throws -> Data {
+        var byteCount = min(fileSize, 32 * 1024 * 1024)
+        let maximumHeaderBytes = min(fileSize, 512 * 1024 * 1024)
+
+        while true {
+            let data = try readPrefix(url: url, byteCount: byteCount)
+            do {
+                let reader = GGUFReader(data: data)
+                let header = try reader.readHeader()
+                _ = try reader.readMetadata(count: Int(header.metadataKVCount))
+                _ = try reader.readTensorInfos(count: Int(header.tensorCount))
+                return data
+            } catch WeightLoaderError.invalidFormat(let message)
+                where message.contains("Unexpected end of GGUF data")
+                    && byteCount < maximumHeaderBytes {
+                byteCount = min(maximumHeaderBytes, byteCount * 2)
+            }
+        }
+    }
+
+    private static func readPrefix(url: URL, byteCount: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        return handle.readData(ofLength: byteCount)
     }
 
     private static func align(_ offset: Int, to alignment: Int) -> Int {
@@ -141,8 +168,13 @@ public struct GGUFLoader: EdgeRunnerWeightLoader, Sendable {
             return elementCount * MemoryLayout<Int64>.stride
         case .f64:
             return elementCount * MemoryLayout<Double>.stride
-        case .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq4_nl, .iq3_s, .iq2_s, .iq4_xs:
+        case .bf16:
+            return elementCount * MemoryLayout<UInt16>.stride
+        case .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq4_nl, .iq3_s, .iq2_s, .iq4_xs,
+             .iq1_m, .tq1_0, .tq2_0, .mxfp4, .nvfp4:
             throw WeightLoaderError.unsupportedDataType(info.type.rawValue)
+        case .q1_0_g128:
+            return blocks(of: 128) * 18
         }
     }
 }

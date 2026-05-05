@@ -14,9 +14,13 @@ private func cpuGQA(
     headDim: Int,
     numHeads: Int,
     numKVHeads: Int,
-    causal: Bool
+    causal: Bool,
+    kvSeqLen: Int? = nil,
+    qOffset: Int = 0,
+    additiveMask: [Float]? = nil
 ) -> [Float] {
     let scale = 1.0 / sqrt(Float(headDim))
+    let effectiveKVSeqLen = kvSeqLen ?? seqLen
     let groupSize = numHeads / numKVHeads
     let qStride = numHeads * headDim      // stride between seq positions in Q/O
     let kvStride = numKVHeads * headDim    // stride between seq positions in K/V
@@ -26,9 +30,9 @@ private func cpuGQA(
         let kvHead = head / groupSize
 
         for qRow in 0..<seqLen {
-            var scores = [Float](repeating: 0, count: seqLen)
-            for kRow in 0..<seqLen {
-                if causal && kRow > qRow {
+            var scores = [Float](repeating: 0, count: effectiveKVSeqLen)
+            for kRow in 0..<effectiveKVSeqLen {
+                if causal && kRow > qRow + qOffset {
                     scores[kRow] = -.greatestFiniteMagnitude
                     continue
                 }
@@ -39,7 +43,7 @@ private func cpuGQA(
                 for dim in 0..<headDim {
                     dot += q[qBase + dim] * k[kBase + dim]
                 }
-                scores[kRow] = dot * scale
+                scores[kRow] = dot * scale + (additiveMask?[qRow * effectiveKVSeqLen + kRow] ?? 0)
             }
 
             let maxVal = scores.max() ?? 0
@@ -50,7 +54,7 @@ private func cpuGQA(
             let oBase = qRow * qStride + head * headDim
             for dim in 0..<headDim {
                 var value: Float = 0
-                for kRow in 0..<seqLen {
+                for kRow in 0..<effectiveKVSeqLen {
                     let vBase = kRow * kvStride + kvHead * headDim
                     value += weights[kRow] * v[vBase + dim]
                 }
@@ -223,6 +227,138 @@ struct GQATests {
 
         for index in 0..<result.count {
             #expect(abs(result[index] - expected[index]) < 1e-4)
+        }
+    }
+
+    @Test func gqaAdditiveMaskMatchesCPUReference() async throws {
+        let seqLen = 8
+        let headDim = 128
+        let numHeads = 4
+        let numKVHeads = 2
+        let q = (0..<(seqLen * numHeads * headDim)).map { Float(($0 % 17) - 8) * 0.025 }
+        let k = (0..<(seqLen * numKVHeads * headDim)).map { Float(($0 % 13) - 6) * 0.025 }
+        let v = (0..<(seqLen * numKVHeads * headDim)).map { Float(($0 % 11) - 5) * 0.02 }
+        var mask = [Float](repeating: 0, count: seqLen * seqLen)
+        mask[1 * seqLen + 0] = -.infinity
+        mask[1 * seqLen + 2] = 2.0
+        mask[5 * seqLen + 4] = -3.0
+        mask[6 * seqLen + 7] = -.infinity
+        let expected = cpuGQA(
+            q: q,
+            k: k,
+            v: v,
+            seqLen: seqLen,
+            headDim: headDim,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            causal: false,
+            additiveMask: mask
+        )
+
+        let kernel = try GQAKernel(device: device)
+        let result = try await kernel.execute(
+            q: q,
+            k: k,
+            v: v,
+            seqLen: seqLen,
+            headDim: headDim,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            causal: false,
+            additiveMask: mask,
+            commandQueue: commandQueue
+        )
+
+        for index in 0..<result.count {
+            #expect(abs(result[index] - expected[index]) < 1e-4)
+        }
+    }
+
+    @Test func gqaAdditiveMaskUsesEffectiveKVSeqLen() async throws {
+        let seqLen = 2
+        let kvSeqLen = 5
+        let qOffset = 3
+        let headDim = 64
+        let numHeads = 4
+        let numKVHeads = 2
+        let q = (0..<(seqLen * numHeads * headDim)).map { Float(($0 % 17) - 8) * 0.02 }
+        let k = (0..<(kvSeqLen * numKVHeads * headDim)).map { Float(($0 % 19) - 9) * 0.02 }
+        let v = (0..<(kvSeqLen * numKVHeads * headDim)).map { Float(($0 % 23) - 11) * 0.015 }
+        var mask = [Float](repeating: 0, count: seqLen * kvSeqLen)
+        mask[0 * kvSeqLen + 1] = -2.0
+        mask[0 * kvSeqLen + 4] = -.infinity
+        mask[1 * kvSeqLen + 2] = 1.5
+        let expected = cpuGQA(
+            q: q,
+            k: k,
+            v: v,
+            seqLen: seqLen,
+            headDim: headDim,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            causal: true,
+            kvSeqLen: kvSeqLen,
+            qOffset: qOffset,
+            additiveMask: mask
+        )
+
+        let kernel = try GQAKernel(device: device)
+        let result = try await kernel.execute(
+            q: q,
+            k: k,
+            v: v,
+            seqLen: seqLen,
+            headDim: headDim,
+            numHeads: numHeads,
+            numKVHeads: numKVHeads,
+            causal: true,
+            kvSeqLen: kvSeqLen,
+            qOffset: qOffset,
+            additiveMask: mask,
+            commandQueue: commandQueue
+        )
+
+        for index in 0..<result.count {
+            #expect(abs(result[index] - expected[index]) < 1e-4)
+        }
+    }
+
+    @Test func gqaHeadDim128AndWideDimensionsMatchCPUReference() async throws {
+        let seqLen = 4
+        let numHeads = 4
+        let numKVHeads = 2
+        let kernel = try GQAKernel(device: device)
+
+        for headDim in [128, 256, 512] {
+            let q = (0..<(seqLen * numHeads * headDim)).map { Float(($0 % 19) - 9) * 0.01 }
+            let k = (0..<(seqLen * numKVHeads * headDim)).map { Float(($0 % 23) - 11) * 0.01 }
+            let v = (0..<(seqLen * numKVHeads * headDim)).map { Float(($0 % 29) - 14) * 0.01 }
+            let expected = cpuGQA(
+                q: q,
+                k: k,
+                v: v,
+                seqLen: seqLen,
+                headDim: headDim,
+                numHeads: numHeads,
+                numKVHeads: numKVHeads,
+                causal: true
+            )
+
+            let result = try await kernel.execute(
+                q: q,
+                k: k,
+                v: v,
+                seqLen: seqLen,
+                headDim: headDim,
+                numHeads: numHeads,
+                numKVHeads: numKVHeads,
+                causal: true,
+                commandQueue: commandQueue
+            )
+
+            for index in 0..<result.count {
+                #expect(abs(result[index] - expected[index]) < 1e-4)
+            }
         }
     }
 

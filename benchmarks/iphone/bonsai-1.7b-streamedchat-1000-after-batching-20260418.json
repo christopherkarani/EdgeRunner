@@ -1,0 +1,13 @@
+{
+  "assistantResponse" : "Quantum computing is a type of computer that uses **quantum bits**, or qubits, which can exist in two states at once—**0** and **1**—rather than the two traditional bits used in traditional computers. This allows quantum computers to process information in a fundamentally different way. Here's how it works:\n\n### Simple Explanation:\nImagine a supercomputer with multiple keys. Traditional computers have to test each key one by one, checking every possible combination. Quantum computers can use a concept called a **qubit**, which can be in a state of 0, 1, or **both at the same time**. This lets them explore many possibilities at once, making it faster to solve problems that take a lot of time for classical computers.\n\n### Key Features:\n- **Quantum parallelism**: Can perform many calculations at once.\n- **Superposition**: A qubit can be in multiple states at once.\n- **Entanglement**: Two qubits can be connected in such a way that their states are linked, no matter how far apart they are.\n- **No classical speedup**: It's not about computing power, but about how it can do tasks much more quickly.\n\nSo, quantum computers are like a supercomputer that uses the rules of quantum physics to do things that can't be done by classical computers. They're still in early stages, but they're proving to be powerful in certain problems.",
+  "contextWindowSize" : 4096,
+  "decodeTokensPerSecond" : 15.412198993587706,
+  "endToEndTokensPerSecond" : 13.379597990701486,
+  "generatedTokenCount" : 288,
+  "generationDurationSeconds" : 21.52531041666225,
+  "maxTokens" : 1000,
+  "mode" : "streamed_chat",
+  "modelPath" : "\/var\/mobile\/Containers\/Data\/Application\/2656D82E-21E5-43A0-B0AD-37448CF60A44\/Documents\/Bonsai-1.7B.gguf",
+  "prompt" : "Explain quantum computing in simple terms.",
+  "timeToFirstTokenSeconds" : 2.83472850000544
+}

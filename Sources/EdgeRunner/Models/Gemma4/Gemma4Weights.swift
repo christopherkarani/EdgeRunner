@@ -1,0 +1,182 @@
+import Foundation
+import Metal
+import EdgeRunnerIO
+
+/// Per-block tensor handles for a single Gemma 4 transformer layer.
+///
+/// `attnK` / `attnV` are `nil` when this layer shares its KV cache with an earlier
+/// layer (see `Gemma4ModelConfig.kvSourceLayer(for:)`). In that case the layer
+/// reuses the source layer's cached K/V — the GGUF file ships no dedicated
+/// `attn_k.weight` / `attn_v.weight` tensors for that block.
+public struct Gemma4BlockWeights: Sendable {
+    public let inputNorm: TensorStorage
+    public let attnQ: TensorStorage
+    public let attnK: TensorStorage?
+    public let attnV: TensorStorage?
+    public let attnO: TensorStorage
+    public let attnQNorm: TensorStorage
+    public let attnKNorm: TensorStorage
+    public let postAttentionNorm: TensorStorage
+    public let ffnNorm: TensorStorage
+    public let ffnGate: TensorStorage
+    public let ffnUp: TensorStorage
+    public let ffnDown: TensorStorage
+    public let postFFNNorm: TensorStorage
+    public let perLayerInputGate: TensorStorage
+    public let perLayerProjection: TensorStorage
+    public let postPerLayerInputNorm: TensorStorage
+    public let layerOutputScale: TensorStorage
+}
+
+public enum Gemma4LoadError: Error, Sendable, Equatable {
+    /// A required model-level or per-layer tensor is missing from the weight map.
+    case missingTensor(String)
+    /// A required Per-Layer Embedding (PLE) tensor is missing from the weight map.
+    case missingPLETensor(String)
+    /// The PLE token-embedding tensor is stored in a quantization format the
+    /// Gemma 4 runtime does not support (e.g. Q4_K_M, Q2_K, Q1_0). Community
+    /// GGUFs never ship these for PLE.
+    case unsupportedPLEQuant(String)
+}
+
+/// Bundle of tensor handles extracted from a weight map for Gemma 4 (E4B).
+///
+/// This type performs validation up front: missing tensors throw
+/// `Gemma4LoadError.missingTensor` / `.missingPLETensor`, and an unsupported
+/// PLE quantization throws `.unsupportedPLEQuant`. After construction, the
+/// forward pass can read tensors directly from the typed fields without
+/// further map lookups.
+public struct Gemma4Weights: Sendable {
+    public let tokenEmbedding: TensorStorage
+    public let outputNorm: TensorStorage
+    public let perLayerTokenEmbed: TensorStorage
+    public let perLayerModelProjection: TensorStorage
+    public let perLayerProjectionNorm: TensorStorage
+    public let ropeFreqs: TensorStorage?
+    public let blocks: [Gemma4BlockWeights]
+
+    public init(
+        weightMap: WeightMap,
+        config: Gemma4ModelConfig,
+        device: MTLDevice
+    ) throws {
+        _ = device  // Reserved for future staging buffers; held to match factory signature.
+
+        self.tokenEmbedding = try Self.require("token_embd.weight", from: weightMap)
+        self.outputNorm = try Self.require("output_norm.weight", from: weightMap)
+
+        self.perLayerTokenEmbed = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_token_embd.weight",
+            from: weightMap
+        )
+        self.perLayerModelProjection = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_model_proj.weight",
+            from: weightMap
+        )
+        self.perLayerProjectionNorm = try Self.requirePLEWithQuantCheck(
+            name: "per_layer_proj_norm.weight",
+            from: weightMap
+        )
+        self.ropeFreqs = weightMap["rope_freqs.weight"]
+
+        var blocks: [Gemma4BlockWeights] = []
+        blocks.reserveCapacity(config.numHiddenLayers)
+        for layer in 0..<config.numHiddenLayers {
+            let prefix = "blk.\(layer)"
+            let ownsKV = config.kvSourceLayer(for: layer) == layer
+            let attnK: TensorStorage? = ownsKV
+                ? try Self.require("\(prefix).attn_k.weight", from: weightMap)
+                : nil
+            let attnV: TensorStorage? = ownsKV
+                ? try Self.require("\(prefix).attn_v.weight", from: weightMap)
+                : nil
+
+            let block = Gemma4BlockWeights(
+                inputNorm: try Self.require("\(prefix).attn_norm.weight", from: weightMap),
+                attnQ: try Self.require("\(prefix).attn_q.weight", from: weightMap),
+                attnK: attnK,
+                attnV: attnV,
+                attnO: try Self.require("\(prefix).attn_output.weight", from: weightMap),
+                attnQNorm: try Self.require("\(prefix).attn_q_norm.weight", from: weightMap),
+                attnKNorm: try Self.require("\(prefix).attn_k_norm.weight", from: weightMap),
+                postAttentionNorm: try Self.require(
+                    "\(prefix).post_attention_norm.weight",
+                    from: weightMap
+                ),
+                ffnNorm: try Self.require("\(prefix).ffn_norm.weight", from: weightMap),
+                ffnGate: try Self.require("\(prefix).ffn_gate.weight", from: weightMap),
+                ffnUp: try Self.require("\(prefix).ffn_up.weight", from: weightMap),
+                ffnDown: try Self.require("\(prefix).ffn_down.weight", from: weightMap),
+                postFFNNorm: try Self.require(
+                    "\(prefix).post_ffw_norm.weight",
+                    from: weightMap
+                ),
+                perLayerInputGate: try Self.require(
+                    "\(prefix).inp_gate.weight",
+                    from: weightMap
+                ),
+                perLayerProjection: try Self.require(
+                    "\(prefix).proj.weight",
+                    from: weightMap
+                ),
+                postPerLayerInputNorm: try Self.require(
+                    "\(prefix).post_norm.weight",
+                    from: weightMap
+                ),
+                layerOutputScale: try Self.require(
+                    "\(prefix).layer_output_scale.weight",
+                    from: weightMap
+                )
+            )
+            blocks.append(block)
+        }
+        self.blocks = blocks
+    }
+
+    // MARK: - Private
+
+    private static let allowedPLEQuants: Set<TensorDataType> = [
+        .q8_0, .q6_K, .q5_0, .q5_1, .q4_0, .q4_1, .float16, .float32, .bfloat16
+    ]
+
+    private static func require(
+        _ name: String,
+        from weightMap: WeightMap
+    ) throws -> TensorStorage {
+        guard let tensor = weightMap[name] else {
+            throw Gemma4LoadError.missingTensor(name)
+        }
+        return tensor
+    }
+
+    private static func requirePLE(
+        _ name: String,
+        from weightMap: WeightMap
+    ) throws -> TensorStorage {
+        guard let tensor = weightMap[name] else {
+            throw Gemma4LoadError.missingPLETensor(name)
+        }
+        return tensor
+    }
+
+    /// Loads a PLE tensor and verifies its quant is supported. Rejecting unsupported
+    /// quants here prevents the forward pass from silently proceeding with a format
+    /// that would otherwise fail deep inside a Metal kernel.
+    private static func requirePLEWithQuantCheck(
+        name: String,
+        from weightMap: WeightMap
+    ) throws -> TensorStorage {
+        let tensor = try requirePLE(name, from: weightMap)
+        guard allowedPLEQuants.contains(tensor.dataType) else {
+            throw Gemma4LoadError.unsupportedPLEQuant(quantName(for: tensor.dataType))
+        }
+        return tensor
+    }
+
+    private static func quantName(for dataType: TensorDataType) -> String {
+        // Enum case names match the GGUF quant identifiers closely enough for
+        // diagnostic use — e.g. `.q4_K` renders as "q4_K", `.float16` as "float16".
+        // Callers consume this only for error messages, not wire-format matching.
+        return String(describing: dataType)
+    }
+}

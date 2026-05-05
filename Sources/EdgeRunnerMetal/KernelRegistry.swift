@@ -15,13 +15,14 @@ package struct MetalPipelineHandle: @unchecked Sendable {
 }
 
 package final class KernelRegistry {
-    private let library: MetalLibraryHandle
+    private let primaryLibrary: MetalLibraryHandle
+    private let fallbackSourceLibrary: Mutex<MetalLibraryHandle?>
     private let cache: Mutex<PipelineCache>
     private let device: MTLDevice
 
     /// The compiled Metal library. Exposed for callers that need to create
     /// functions with `MTLFunctionConstantValues` (e.g. fused-pattern kernels).
-    package var metalLibrary: MTLLibrary { library.rawValue }
+    package var metalLibrary: MTLLibrary { primaryLibrary.rawValue }
 
     private struct PipelineCache: Sendable {
         var entries: [String: MetalPipelineHandle] = [:]
@@ -29,7 +30,8 @@ package final class KernelRegistry {
 
     package init(device: MTLDevice) throws {
         self.device = device
-        self.library = MetalLibraryHandle(rawValue: try Self.loadLibrary(device: device))
+        self.primaryLibrary = MetalLibraryHandle(rawValue: try Self.loadPrimaryLibrary(device: device))
+        self.fallbackSourceLibrary = Mutex(nil)
         self.cache = Mutex(PipelineCache())
     }
 
@@ -37,9 +39,7 @@ package final class KernelRegistry {
         if let cached = cache.withLock({ $0.entries[name] }) {
             return cached.rawValue
         }
-        guard let function = library.rawValue.makeFunction(name: name) else {
-            throw KernelRegistryError.functionNotFound(name)
-        }
+        let function = try resolveFunction(named: name)
         let descriptor = MTLComputePipelineDescriptor()
         descriptor.computeFunction = function
         descriptor.supportIndirectCommandBuffers = true
@@ -48,15 +48,19 @@ package final class KernelRegistry {
         return pipeline
     }
 
-    /// Loads the Metal library from the bundle resource.
-    /// SwiftPM copies .metal files as resources rather than compiling them,
-    /// so we compile the shader source at runtime by concatenating all .metal files.
-    private static func loadLibrary(device: MTLDevice) throws -> MTLLibrary {
-        // First try a pre-compiled metallib (e.g. when built with Xcode)
+    /// Loads the primary Metal library from the bundle when available.
+    private static func loadPrimaryLibrary(device: MTLDevice) throws -> MTLLibrary {
         if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
             return lib
         }
-        // Fall back to runtime compilation — gather all .metal source files in the bundle
+        return try compileSourceLibrary(device: device)
+    }
+
+    /// SwiftPM copies .metal files as resources rather than compiling them,
+    /// so we can compile the shader source at runtime by concatenating all
+    /// bundled .metal files when a requested function is absent from the
+    /// primary library.
+    private static func compileSourceLibrary(device: MTLDevice) throws -> MTLLibrary {
         let bundle = Bundle.module
         let metalURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: nil) ?? []
         guard !metalURLs.isEmpty else {
@@ -72,6 +76,27 @@ package final class KernelRegistry {
             .joined(separator: "\n\n")
         let options = MTLCompileOptions()
         return try device.makeLibrary(source: combinedSource, options: options)
+    }
+
+    private func resolveFunction(named name: String) throws -> MTLFunction {
+        if let function = primaryLibrary.rawValue.makeFunction(name: name) {
+            return function
+        }
+
+        let fallbackLibrary = try fallbackSourceLibrary.withLock { cachedLibrary -> MetalLibraryHandle in
+            if let cachedLibrary {
+                return cachedLibrary
+            }
+            let compiledLibrary = MetalLibraryHandle(rawValue: try Self.compileSourceLibrary(device: device))
+            cachedLibrary = compiledLibrary
+            return compiledLibrary
+        }
+
+        if let function = fallbackLibrary.rawValue.makeFunction(name: name) {
+            return function
+        }
+
+        throw KernelRegistryError.functionNotFound(name)
     }
 }
 

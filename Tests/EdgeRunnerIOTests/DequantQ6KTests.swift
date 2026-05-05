@@ -43,23 +43,23 @@ private func packQ6KBlock(values: [Float]) -> [UInt8] {
         }
     }
 
-    // Pack ql: lower 4 bits, nibble-packed into 128 bytes
-    for i in 0..<q6KWeightsPerBlock {
-        let lower4 = UInt8(quantised[i] & 0x0F)
-        let byteIndex = i / 2
-        if i % 2 == 0 {
-            block[byteIndex] = (block[byteIndex] & 0xF0) | lower4
-        } else {
-            block[byteIndex] = (block[byteIndex] & 0x0F) | (lower4 << 4)
-        }
-    }
+    for halfBlock in 0..<2 {
+        let outBase = halfBlock * 128
+        let qlBase = halfBlock * 64
+        let qhBase = 128 + halfBlock * 32
+        for lane in 0..<32 {
+            let q1 = UInt8(quantised[outBase + lane])
+            let q2 = UInt8(quantised[outBase + 32 + lane])
+            let q3 = UInt8(quantised[outBase + 64 + lane])
+            let q4 = UInt8(quantised[outBase + 96 + lane])
 
-    // Pack qh: upper 2 bits, 4 per byte into 64 bytes
-    for i in 0..<q6KWeightsPerBlock {
-        let upper2 = UInt8((quantised[i] >> 4) & 0x03)
-        let byteIndex = 128 + i / 4
-        let shift = (i % 4) * 2
-        block[byteIndex] |= upper2 << shift
+            block[qlBase + lane] = (q1 & 0x0F) | ((q3 & 0x0F) << 4)
+            block[qlBase + 32 + lane] = (q2 & 0x0F) | ((q4 & 0x0F) << 4)
+            block[qhBase + lane] = ((q1 >> 4) & 0x03)
+                | (((q2 >> 4) & 0x03) << 2)
+                | (((q3 >> 4) & 0x03) << 4)
+                | (((q4 >> 4) & 0x03) << 6)
+        }
     }
 
     // Pack scales: 16 signed int8 values at offset 192
@@ -91,19 +91,22 @@ private func dequantQ6KBlock(blockData: [UInt8]) -> [Float] {
     }
 
     var result = [Float](repeating: 0, count: q6KWeightsPerBlock)
-    for i in 0..<q6KWeightsPerBlock {
-        let sub = i / 16
-
-        // Lower 4 bits from ql
-        let qlByte = blockData[i / 2]
-        let lower4: UInt8 = (i % 2 == 0) ? (qlByte & 0x0F) : ((qlByte >> 4) & 0x0F)
-
-        // Upper 2 bits from qh
-        let qhByte = blockData[128 + i / 4]
-        let upper2 = (qhByte >> ((i % 4) * 2)) & 0x03
-
-        let q6 = Int(lower4) | (Int(upper2) << 4)
-        result[i] = d * Float(scales[sub]) * Float(q6 - 32)
+    for halfBlock in 0..<2 {
+        let outBase = halfBlock * 128
+        let qlBase = halfBlock * 64
+        let qhBase = 128 + halfBlock * 32
+        let scaleBase = halfBlock * 8
+        for lane in 0..<32 {
+            let scaleOffset = lane / 16
+            let q1 = Int((blockData[qlBase + lane] & 0x0F) | (((blockData[qhBase + lane] >> 0) & 0x03) << 4)) - 32
+            let q2 = Int((blockData[qlBase + 32 + lane] & 0x0F) | (((blockData[qhBase + lane] >> 2) & 0x03) << 4)) - 32
+            let q3 = Int((blockData[qlBase + lane] >> 4) | (((blockData[qhBase + lane] >> 4) & 0x03) << 4)) - 32
+            let q4 = Int((blockData[qlBase + 32 + lane] >> 4) | (((blockData[qhBase + lane] >> 6) & 0x03) << 4)) - 32
+            result[outBase + lane] = d * Float(scales[scaleBase + scaleOffset + 0]) * Float(q1)
+            result[outBase + 32 + lane] = d * Float(scales[scaleBase + scaleOffset + 2]) * Float(q2)
+            result[outBase + 64 + lane] = d * Float(scales[scaleBase + scaleOffset + 4]) * Float(q3)
+            result[outBase + 96 + lane] = d * Float(scales[scaleBase + scaleOffset + 6]) * Float(q4)
+        }
     }
 
     return result

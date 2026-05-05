@@ -56,6 +56,17 @@ public enum DequantDispatcher: Sendable {
             }
             return result
 
+        case .bfloat16:
+            let count = tensor.elementCount
+            let requiredBytes = count * MemoryLayout<UInt16>.size
+            try validateBufferBounds(tensor: tensor, requiredBytes: requiredBytes)
+            let bf16Ptr = pointer.assumingMemoryBound(to: UInt16.self)
+            var result = [Float](repeating: 0, count: count)
+            for i in 0..<count {
+                result[i] = Float(bitPattern: UInt32(bf16Ptr[i]) << 16)
+            }
+            return result
+
         case .q4_0:
             let blockByteCount = 18
             let weightsPerBlock = 32

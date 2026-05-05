@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "Sisyphus": {
+      "model": "qwen3.6-plus-free",
+      "options": {
+        "maxOutputTokens": 16384,
+        "temperature": 0.1
+      }
+    }
+  }
+}
