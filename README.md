@@ -1,6 +1,6 @@
 # EdgeRunner
 
-Fast, local LLM inference for Apple Silicon. Built in Swift/Metal from the ground up.
+Fast, local LLM inference for Apple Silicon. Built in Swift/Metal from the ground up
 
 ```swift
 import EdgeRunner
