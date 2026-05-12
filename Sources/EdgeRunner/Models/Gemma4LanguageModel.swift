@@ -19,9 +19,29 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         let perLayerInputs: [Float]?
         let perLayerInputsBuffer: MTLBuffer?
         let perLayerInputCount: Int
+        let tokenCount: Int
 
         func perLayerInputSlice(layer: Int, perLayerDim: Int) throws -> [Float] {
-            let start = layer * perLayerDim
+            try perLayerInputSlice(
+                tokenOffset: 0,
+                layer: layer,
+                perLayerDim: perLayerDim,
+                numLayers: layerCount(perLayerDim: perLayerDim)
+            )
+        }
+
+        func perLayerInputSlice(
+            tokenOffset: Int,
+            layer: Int,
+            perLayerDim: Int,
+            numLayers: Int
+        ) throws -> [Float] {
+            let start = Gemma4PrefillChunkPlan.pleInputElementOffset(
+                tokenOffset: tokenOffset,
+                layer: layer,
+                numLayers: numLayers,
+                perLayerDim: perLayerDim
+            )
             let end = start + perLayerDim
             guard start >= 0, end <= perLayerInputCount else {
                 throw GenerationError.modelLoadFailed(reason: "Gemma PLE input slice is out of bounds")
@@ -39,7 +59,26 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         func perLayerInputByteOffset(layer: Int, perLayerDim: Int) throws -> Int {
-            let start = layer * perLayerDim
+            try perLayerInputByteOffset(
+                tokenOffset: 0,
+                layer: layer,
+                perLayerDim: perLayerDim,
+                numLayers: layerCount(perLayerDim: perLayerDim)
+            )
+        }
+
+        func perLayerInputByteOffset(
+            tokenOffset: Int,
+            layer: Int,
+            perLayerDim: Int,
+            numLayers: Int
+        ) throws -> Int {
+            let start = Gemma4PrefillChunkPlan.pleInputElementOffset(
+                tokenOffset: tokenOffset,
+                layer: layer,
+                numLayers: numLayers,
+                perLayerDim: perLayerDim
+            )
             let end = start + perLayerDim
             guard start >= 0, end <= perLayerInputCount else {
                 throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer slice is out of bounds")
@@ -49,12 +88,48 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             }
             return start * MemoryLayout<Float>.stride
         }
+
+        private func layerCount(perLayerDim: Int) -> Int {
+            guard tokenCount > 0, perLayerDim > 0 else { return 0 }
+            return perLayerInputCount / (tokenCount * perLayerDim)
+        }
     }
 
     private struct ProjectionRequest {
         let tensor: TensorStorage
         let rows: Int
         let cols: Int
+    }
+
+    private struct ProjectionResource {
+        let request: ProjectionRequest
+        let weightBuffer: MTLBuffer
+    }
+
+    private struct LayerRuntimeResources {
+        let inputNormWeightBuffer: MTLBuffer
+        let attnQ: ProjectionResource
+        let attnK: ProjectionResource?
+        let attnV: ProjectionResource?
+        let attnO: ProjectionResource
+        let attnQNormWeightBuffer: MTLBuffer
+        let attnKNormWeightBuffer: MTLBuffer?
+        let unitHeadWeightBuffer: MTLBuffer
+        let postAttentionNormWeightBuffer: MTLBuffer
+        let ffnNormWeightBuffer: MTLBuffer
+        let ffnGate: ProjectionResource
+        let ffnUp: ProjectionResource
+        let ffnDown: ProjectionResource
+        let postFFNNormWeightBuffer: MTLBuffer
+        let pleGate: ProjectionResource
+        let pleProjection: ProjectionResource
+        let plePostNormWeightBuffer: MTLBuffer
+        let layerOutputScale: Float
+    }
+
+    private struct LMHeadResources {
+        let outputNormWeightBuffer: MTLBuffer
+        let tokenEmbedding: ProjectionResource
     }
 
     private final class RuntimeProfiler: @unchecked Sendable {
@@ -96,6 +171,11 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             }
         }
 
+        func recordDuration(_ name: String, duration: Double) {
+            guard enabled, duration.isFinite, duration >= 0 else { return }
+            record(name, duration: duration)
+        }
+
         func markTokenComplete() {
             guard enabled else { return }
             lock.lock()
@@ -108,9 +188,12 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
 
             guard shouldPrint else { return }
             let total = snapshotTotals.values.reduce(0, +)
+            let rowLimit = ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES"] == "1"
+                ? 40
+                : (ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK"] == "1" ? 24 : 12)
             let rows = snapshotTotals
                 .sorted { $0.value > $1.value }
-                .prefix(12)
+                .prefix(rowLimit)
                 .map { key, seconds in
                     let ms = seconds * 1000
                     let pct = total > 0 ? (seconds / total) * 100 : 0
@@ -287,10 +370,14 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
     private let gemmaDecodeKernels: Gemma4DecodeKernels
     private let gpuKVCache: Gemma4GPUKVCache
     private let scratch: Gemma4Scratch
+    private let layerRuntimePlans: [Gemma4LayerRuntimePlan]
+    private let layerRuntimeResources: [LayerRuntimeResources]
+    private let lmHeadResources: LMHeadResources
     private let scratchGate = AsyncGate()
     private let useCacheBackedAttention: Bool
     private let validateRuntimeTensors: Bool
     private let traceFastGQA: Bool
+    private let runtimeOptions: Gemma4RuntimeOptions
     private let profiler: RuntimeProfiler
     private let runtimeCache = RuntimeCache()
     private let decodeState = RuntimeDecodeState()
@@ -313,9 +400,13 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         gemmaDecodeKernels: Gemma4DecodeKernels,
         gpuKVCache: Gemma4GPUKVCache,
         scratch: Gemma4Scratch,
+        layerRuntimePlans: [Gemma4LayerRuntimePlan],
+        layerRuntimeResources: [LayerRuntimeResources],
+        lmHeadResources: LMHeadResources,
         useCacheBackedAttention: Bool,
         validateRuntimeTensors: Bool,
         traceFastGQA: Bool,
+        runtimeOptions: Gemma4RuntimeOptions,
         profiler: RuntimeProfiler
     ) {
         self.config = config
@@ -335,9 +426,13 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         self.gemmaDecodeKernels = gemmaDecodeKernels
         self.gpuKVCache = gpuKVCache
         self.scratch = scratch
+        self.layerRuntimePlans = layerRuntimePlans
+        self.layerRuntimeResources = layerRuntimeResources
+        self.lmHeadResources = lmHeadResources
         self.useCacheBackedAttention = useCacheBackedAttention
         self.validateRuntimeTensors = validateRuntimeTensors
         self.traceFastGQA = traceFastGQA
+        self.runtimeOptions = runtimeOptions
         self.profiler = profiler
     }
 
@@ -377,9 +472,22 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             maxSeqLen: min(configuration.contextWindowSize, config.maxPositionEmbeddings)
         )
         let scratch = try Gemma4Scratch(device: device, config: config)
+        let layerRuntimePlans = try Self.makeLayerRuntimePlans(config: config, weights: weights)
+        let layerRuntimeResources = try Self.makeLayerRuntimeResources(
+            config: config,
+            weights: weights,
+            plans: layerRuntimePlans,
+            device: device
+        )
+        let lmHeadResources = try Self.makeLMHeadResources(
+            config: config,
+            weights: weights,
+            device: device
+        )
         let useCacheBackedAttention = ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_SHORTCUT_ATTENTION"] != "1"
         let validateRuntimeTensors = ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_VALIDATE_FINITE"] == "1"
         let traceFastGQA = ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_TRACE_FAST_GQA"] == "1"
+        let runtimeOptions = Gemma4RuntimeOptions(environment: ProcessInfo.processInfo.environment)
         let profiler = RuntimeProfiler(
             enabled: ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE"] == "1"
         )
@@ -410,15 +518,381 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             gemmaDecodeKernels: gemmaDecodeKernels,
             gpuKVCache: gpuKVCache,
             scratch: scratch,
+            layerRuntimePlans: layerRuntimePlans,
+            layerRuntimeResources: layerRuntimeResources,
+            lmHeadResources: lmHeadResources,
             useCacheBackedAttention: useCacheBackedAttention,
             validateRuntimeTensors: validateRuntimeTensors,
             traceFastGQA: traceFastGQA,
+            runtimeOptions: runtimeOptions,
             profiler: profiler
         )
     }
 
     static func supports(modelConfig: ModelConfig) -> Bool {
         modelConfig.architectureName.lowercased() == "gemma4"
+    }
+
+    private static func makeLayerRuntimePlans(
+        config: Gemma4ModelConfig,
+        weights: Gemma4Weights
+    ) throws -> [Gemma4LayerRuntimePlan] {
+        let globalRotaryFactor: Float?
+        if let ropeFreqs = weights.ropeFreqs {
+            globalRotaryFactor = try globalRotaryFactorFromRopeFreqs(
+                ropeFreqs,
+                expectedElementCount: config.globalHeadDim / 2
+            )
+        } else {
+            globalRotaryFactor = nil
+        }
+        return Gemma4LayerRuntimePlan.makePlans(
+            config: config,
+            globalRotaryFactor: globalRotaryFactor
+        )
+    }
+
+    private static func globalRotaryFactorFromRopeFreqs(
+        _ storage: TensorStorage,
+        expectedElementCount: Int
+    ) throws -> Float {
+        guard storage.elementCount == expectedElementCount else {
+            throw GenerationError.modelLoadFailed(
+                reason: "\(storage.name) element count \(storage.elementCount) must equal \(expectedElementCount)"
+            )
+        }
+        let base = storage.buffer.contents() + storage.byteOffset
+        let rotatedPairs: Int
+        switch storage.dataType {
+        case .float32:
+            let ptr = base.bindMemory(to: Float.self, capacity: expectedElementCount)
+            rotatedPairs = (0..<expectedElementCount).reduce(into: 0) { count, index in
+                if ptr[index] < 1.0e20 { count += 1 }
+            }
+        case .float16:
+            let ptr = base.bindMemory(to: Float16.self, capacity: expectedElementCount)
+            rotatedPairs = (0..<expectedElementCount).reduce(into: 0) { count, index in
+                if Float(ptr[index]) < 1.0e20 { count += 1 }
+            }
+        case .bfloat16:
+            let ptr = base.bindMemory(to: UInt16.self, capacity: expectedElementCount)
+            rotatedPairs = (0..<expectedElementCount).reduce(into: 0) { count, index in
+                if Float(bitPattern: UInt32(ptr[index]) << 16) < 1.0e20 { count += 1 }
+            }
+        default:
+            throw GenerationError.modelLoadFailed(
+                reason: "\(storage.name) must be F32/F16/BF16 for Gemma rope freqs, got \(storage.dataType)"
+            )
+        }
+        return Float(rotatedPairs) / Float(expectedElementCount)
+    }
+
+    private static func makeLayerRuntimeResources(
+        config: Gemma4ModelConfig,
+        weights: Gemma4Weights,
+        plans: [Gemma4LayerRuntimePlan],
+        device: MTLDevice
+    ) throws -> [LayerRuntimeResources] {
+        try zip(weights.blocks, plans).map { block, plan in
+            let hiddenSize = config.hiddenSize
+            let perLayerDim = config.perLayerDim
+            let inputNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.inputNorm,
+                expectedElementCount: hiddenSize,
+                device: device
+            )
+            let attnQ = try makeStaticProjectionResource(
+                tensor: block.attnQ,
+                rows: plan.qRows,
+                cols: hiddenSize,
+                device: device
+            )
+            let attnK = try block.attnK.map {
+                try makeStaticProjectionResource(tensor: $0, rows: plan.kvRows, cols: hiddenSize, device: device)
+            }
+            let attnV = try block.attnV.map {
+                try makeStaticProjectionResource(tensor: $0, rows: plan.kvRows, cols: hiddenSize, device: device)
+            }
+            let attnO = try makeStaticProjectionResource(
+                tensor: block.attnO,
+                rows: hiddenSize,
+                cols: plan.qRows,
+                device: device
+            )
+            let attnQNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.attnQNorm,
+                expectedElementCount: plan.headDim,
+                device: device
+            )
+            let attnKNormWeightBuffer = try block.attnK.map { _ in
+                try makeStaticFloatBuffer(
+                    storage: block.attnKNorm,
+                    expectedElementCount: plan.headDim,
+                    device: device
+                )
+            }
+            let unitHeadWeightBuffer = try makeStaticFloatBuffer(
+                values: [Float](repeating: 1, count: plan.headDim),
+                label: "unitHeadWeight.\(plan.headDim)",
+                device: device
+            )
+            let postAttentionNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.postAttentionNorm,
+                expectedElementCount: hiddenSize,
+                device: device
+            )
+            let ffnNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.ffnNorm,
+                expectedElementCount: hiddenSize,
+                device: device
+            )
+            let ffnGate = try makeStaticProjectionResource(
+                tensor: block.ffnGate,
+                rows: config.intermediateSize,
+                cols: hiddenSize,
+                device: device
+            )
+            let ffnUp = try makeStaticProjectionResource(
+                tensor: block.ffnUp,
+                rows: config.intermediateSize,
+                cols: hiddenSize,
+                device: device
+            )
+            let ffnDown = try makeStaticProjectionResource(
+                tensor: block.ffnDown,
+                rows: hiddenSize,
+                cols: config.intermediateSize,
+                device: device
+            )
+            let postFFNNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.postFFNNorm,
+                expectedElementCount: hiddenSize,
+                device: device
+            )
+            let pleGate = try makeStaticProjectionResource(
+                tensor: block.perLayerInputGate,
+                rows: perLayerDim,
+                cols: hiddenSize,
+                device: device
+            )
+            let pleProjection = try makeStaticProjectionResource(
+                tensor: block.perLayerProjection,
+                rows: hiddenSize,
+                cols: perLayerDim,
+                device: device
+            )
+            let plePostNormWeightBuffer = try makeStaticFloatBuffer(
+                storage: block.postPerLayerInputNorm,
+                expectedElementCount: hiddenSize,
+                device: device
+            )
+            let layerOutputScale = try readStaticFloatVector(
+                storage: block.layerOutputScale,
+                expectedElementCount: 1
+            )[0]
+
+            return LayerRuntimeResources(
+                inputNormWeightBuffer: inputNormWeightBuffer,
+                attnQ: attnQ,
+                attnK: attnK,
+                attnV: attnV,
+                attnO: attnO,
+                attnQNormWeightBuffer: attnQNormWeightBuffer,
+                attnKNormWeightBuffer: attnKNormWeightBuffer,
+                unitHeadWeightBuffer: unitHeadWeightBuffer,
+                postAttentionNormWeightBuffer: postAttentionNormWeightBuffer,
+                ffnNormWeightBuffer: ffnNormWeightBuffer,
+                ffnGate: ffnGate,
+                ffnUp: ffnUp,
+                ffnDown: ffnDown,
+                postFFNNormWeightBuffer: postFFNNormWeightBuffer,
+                pleGate: pleGate,
+                pleProjection: pleProjection,
+                plePostNormWeightBuffer: plePostNormWeightBuffer,
+                layerOutputScale: layerOutputScale
+            )
+        }
+    }
+
+    private static func makeLMHeadResources(
+        config: Gemma4ModelConfig,
+        weights: Gemma4Weights,
+        device: MTLDevice
+    ) throws -> LMHeadResources {
+        let outputNormWeightBuffer = try makeStaticFloatBuffer(
+            storage: weights.outputNorm,
+            expectedElementCount: config.hiddenSize,
+            device: device
+        )
+        let tokenEmbedding = try makeStaticProjectionResource(
+            tensor: weights.tokenEmbedding,
+            rows: config.vocabSize,
+            cols: config.hiddenSize,
+            device: device
+        )
+        return LMHeadResources(
+            outputNormWeightBuffer: outputNormWeightBuffer,
+            tokenEmbedding: tokenEmbedding
+        )
+    }
+
+    private static func makeStaticProjectionResource(
+        tensor: TensorStorage,
+        rows: Int,
+        cols: Int,
+        device: MTLDevice
+    ) throws -> ProjectionResource {
+        let request = ProjectionRequest(tensor: tensor, rows: rows, cols: cols)
+        try validateStaticMatrixShape(tensor: tensor, cols: cols, rows: rows)
+        let requiredBytes = try staticProjectionRequiredBytes(request)
+        let weightBuffer = try makeStaticRawTensorBuffer(
+            storage: tensor,
+            requiredBytes: requiredBytes,
+            device: device
+        )
+        return ProjectionResource(request: request, weightBuffer: weightBuffer)
+    }
+
+    private static func validateStaticMatrixShape(
+        tensor: TensorStorage,
+        cols: Int,
+        rows: Int
+    ) throws {
+        guard tensor.shape.count == 2,
+              tensor.shape[0] == cols,
+              tensor.shape[1] == rows else {
+            throw GenerationError.modelLoadFailed(
+                reason: "\(tensor.name) shape \(tensor.shape) must be [\(cols), \(rows)]"
+            )
+        }
+    }
+
+    private static func staticProjectionRequiredBytes(_ request: ProjectionRequest) throws -> Int {
+        switch request.tensor.dataType {
+        case .float32:
+            return request.tensor.elementCount * MemoryLayout<Float>.stride
+        case .bfloat16:
+            return request.tensor.elementCount * MemoryLayout<UInt16>.stride
+        case .q4_K:
+            return try staticPackedByteCount(
+                tensorName: request.tensor.name,
+                rows: request.rows,
+                cols: request.cols,
+                weightsPerBlock: 256,
+                blockByteCount: 144
+            )
+        case .q6_K:
+            return try staticPackedByteCount(
+                tensorName: request.tensor.name,
+                rows: request.rows,
+                cols: request.cols,
+                weightsPerBlock: 256,
+                blockByteCount: 210
+            )
+        default:
+            throw GenerationError.modelLoadFailed(
+                reason: "\(request.tensor.name) projection data type \(request.tensor.dataType) is not supported by Gemma decoder projection"
+            )
+        }
+    }
+
+    private static func staticPackedByteCount(
+        tensorName: String,
+        rows: Int,
+        cols: Int,
+        weightsPerBlock: Int,
+        blockByteCount: Int
+    ) throws -> Int {
+        guard rows >= 0, cols >= 0, cols.isMultiple(of: weightsPerBlock) else {
+            throw GenerationError.modelLoadFailed(
+                reason: "\(tensorName) shape rows=\(rows) cols=\(cols) is invalid for packed \(weightsPerBlock)-wide blocks"
+            )
+        }
+        return rows * (cols / weightsPerBlock) * blockByteCount
+    }
+
+    private static func makeStaticRawTensorBuffer(
+        storage: TensorStorage,
+        requiredBytes: Int,
+        device: MTLDevice
+    ) throws -> MTLBuffer {
+        guard storage.byteOffset >= 0,
+              storage.byteOffset + requiredBytes <= storage.buffer.length else {
+            throw GenerationError.modelLoadFailed(reason: "\(storage.name) buffer is smaller than expected")
+        }
+        guard let buffer = device.makeBuffer(
+            bytesNoCopy: storage.buffer.contents() + storage.byteOffset,
+            length: requiredBytes,
+            options: .storageModeShared,
+            deallocator: nil
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create raw buffer for \(storage.name)")
+        }
+        return buffer
+    }
+
+    private static func makeStaticFloatBuffer(
+        storage: TensorStorage,
+        expectedElementCount: Int,
+        device: MTLDevice
+    ) throws -> MTLBuffer {
+        let values = try readStaticFloatVector(
+            storage: storage,
+            expectedElementCount: expectedElementCount
+        )
+        return try makeStaticFloatBuffer(values: values, label: storage.name, device: device)
+    }
+
+    private static func makeStaticFloatBuffer(
+        values: [Float],
+        label: String,
+        device: MTLDevice
+    ) throws -> MTLBuffer {
+        guard let buffer = device.makeBuffer(
+            bytes: values,
+            length: values.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ) else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to create Float buffer for \(label)")
+        }
+        return buffer
+    }
+
+    private static func readStaticFloatVector(
+        storage: TensorStorage,
+        expectedElementCount: Int
+    ) throws -> [Float] {
+        guard storage.elementCount == expectedElementCount else {
+            throw GenerationError.modelLoadFailed(
+                reason: "\(storage.name) element count \(storage.elementCount) must equal \(expectedElementCount)"
+            )
+        }
+        let base = storage.buffer.contents() + storage.byteOffset
+        var values = [Float](repeating: 0, count: expectedElementCount)
+        switch storage.dataType {
+        case .float32:
+            values.withUnsafeMutableBytes { rawBuffer in
+                rawBuffer.copyMemory(from: UnsafeRawBufferPointer(
+                    start: base,
+                    count: expectedElementCount * MemoryLayout<Float>.stride
+                ))
+            }
+        case .float16:
+            let ptr = base.bindMemory(to: Float16.self, capacity: expectedElementCount)
+            for index in 0..<expectedElementCount {
+                values[index] = Float(ptr[index])
+            }
+        case .bfloat16:
+            let ptr = base.bindMemory(to: UInt16.self, capacity: expectedElementCount)
+            for index in 0..<expectedElementCount {
+                values[index] = Float(bitPattern: UInt32(ptr[index]) << 16)
+            }
+        default:
+            throw GenerationError.modelLoadFailed(
+                reason: "\(storage.name) must be F32/F16/BF16 for Gemma norm, got \(storage.dataType)"
+            )
+        }
+        return values
     }
 
     public func tokenize(_ text: String) -> [Int] {
@@ -457,7 +931,7 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         let token = try await profiler.measureAsync("token_total") {
             let mode = decodeState.prepare(tokenIDs: tokenIDs)
             if useCacheBackedAttention,
-               ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_GPU_LAYER_RUNNER"] != "0",
+               runtimeOptions.useGPULayerRunner,
                weights.tokenEmbedding.dataType == .q6_K {
                 return try await runCacheBackedGreedyToken(
                     mode: mode,
@@ -562,9 +1036,7 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.decodingFailed("Gemma greedy decode requires at least one token")
         }
         if tokens.count > 1 {
-            for (offset, tokenID) in tokens.dropLast().enumerated() {
-                _ = try await runSingleToken(tokenID, position: startPosition + offset)
-            }
+            try await runPrefillOnlyTokens(Array(tokens.dropLast()), startPosition: startPosition)
         }
         return try await runSingleTokenGreedy(last, position: startPosition + tokens.count - 1)
     }
@@ -572,10 +1044,77 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
     private func runTokenSequence(_ tokens: [Int], startPosition: Int) async throws -> [Float] {
         guard !tokens.isEmpty else { return [] }
         var finalHidden: [Float] = []
-        for (offset, tokenID) in tokens.enumerated() {
-            finalHidden = try await runSingleToken(tokenID, position: startPosition + offset)
+        if tokens.count > 1 {
+            try await runPrefillOnlyTokens(Array(tokens.dropLast()), startPosition: startPosition)
+        }
+        if let last = tokens.last {
+            finalHidden = try await runSingleToken(last, position: startPosition + tokens.count - 1)
         }
         return finalHidden
+    }
+
+    private func runPrefillOnlyTokens(_ tokens: [Int], startPosition: Int) async throws {
+        guard !tokens.isEmpty else { return }
+        guard runtimeOptions.useGPULayerRunner,
+              weights.tokenEmbedding.dataType == .q6_K else {
+            for (offset, tokenID) in tokens.enumerated() {
+                try await runSingleTokenPrefillOnly(tokenID, position: startPosition + offset)
+            }
+            return
+        }
+
+        let chunks = try Gemma4PrefillChunkPlan.makeChunks(
+            tokenCount: tokens.count,
+            startPosition: startPosition,
+            chunkSize: 64,
+            numLayers: config.numHiddenLayers,
+            perLayerDim: config.perLayerDim
+        )
+        for chunk in chunks {
+            let range = chunk.tokenStartIndex..<(chunk.tokenStartIndex + chunk.tokenCount)
+            let chunkTokens = Array(tokens[range])
+            let prelude = try await runPLEPrelude(
+                tokenIDs: chunkTokens,
+                useLastTokenOnly: false,
+                allowSingleTokenCache: false
+            )
+            guard prelude.tokenCount == chunk.tokenCount else {
+                throw GenerationError.modelLoadFailed(reason: "Gemma prefill chunk PLE token count mismatch")
+            }
+            for tokenOffset in 0..<chunk.tokenCount {
+                try await runSingleTokenPrefillOnly(
+                    prelude: prelude,
+                    position: chunk.position(forTokenOffset: tokenOffset),
+                    tokenOffset: tokenOffset
+                )
+            }
+        }
+    }
+
+    private func runSingleTokenPrefillOnly(_ tokenID: Int, position: Int) async throws {
+        let prelude = try await runPLEPrelude(tokenIDs: [tokenID])
+        try await runSingleTokenPrefillOnly(prelude: prelude, position: position, tokenOffset: 0)
+    }
+
+    private func runSingleTokenPrefillOnly(
+        prelude: PreludeState,
+        position: Int,
+        tokenOffset: Int
+    ) async throws {
+        if runtimeOptions.useGPULayerRunner {
+            _ = try await runDecoderLayerStackWithGPUCache(
+                prelude: prelude,
+                position: position,
+                tokenOffset: tokenOffset,
+                readOutput: false
+            )
+        } else {
+            _ = try await runDecoderLayerStack(
+                prelude: prelude,
+                position: position,
+                useCacheBackedAttention: true
+            )
+        }
     }
 
     private func runSingleTokenGreedy(_ tokenID: Int, position: Int) async throws -> Int {
@@ -595,14 +1134,19 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         )
     }
 
-    private func runPLEPrelude(tokenIDs: [Int]) async throws -> PreludeState {
+    private func runPLEPrelude(
+        tokenIDs: [Int],
+        useLastTokenOnly: Bool = true,
+        allowSingleTokenCache: Bool = true
+    ) async throws -> PreludeState {
         guard !tokenIDs.isEmpty else {
             return PreludeState(
                 hidden: [],
                 hiddenBuffer: nil,
                 perLayerInputs: [],
                 perLayerInputsBuffer: nil,
-                perLayerInputCount: 0
+                perLayerInputCount: 0,
+                tokenCount: 0
             )
         }
 
@@ -618,15 +1162,17 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         let numLayers = config.numHiddenLayers
         let perLayerDim = config.perLayerDim
         let projectionDim = numLayers * perLayerDim
-        let activeTokenIDs = [tokenIDs[tokenIDs.count - 1]]
-        if let cached = runtimeCache.preludeState(tokenID: activeTokenIDs[0]) {
+        let activeTokenIDs = useLastTokenOnly ? [tokenIDs[tokenIDs.count - 1]] : tokenIDs
+        if activeTokenIDs.count == 1,
+           allowSingleTokenCache,
+           let cached = runtimeCache.preludeState(tokenID: activeTokenIDs[0]) {
             return cached
         }
         let batchSeq = activeTokenIDs.count
         if batchSeq == 1,
            useCacheBackedAttention,
-           ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_GPU_LAYER_RUNNER"] != "0",
-           ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE"] == "1",
+           runtimeOptions.useGPULayerRunner,
+           runtimeOptions.useBufferNativePrelude,
            weights.tokenEmbedding.dataType == .q6_K {
             return try await runPLEPreludeBufferNative(
                 tokenID: activeTokenIDs[0],
@@ -737,9 +1283,12 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             hiddenBuffer: nil,
             perLayerInputs: nil,
             perLayerInputsBuffer: perLayerInputsBuffer,
-            perLayerInputCount: perLayerInputCount
+            perLayerInputCount: perLayerInputCount,
+            tokenCount: batchSeq
         )
-        runtimeCache.storePreludeState(prelude, tokenID: activeTokenIDs[0])
+        if batchSeq == 1, allowSingleTokenCache {
+            runtimeCache.storePreludeState(prelude, tokenID: activeTokenIDs[0])
+        }
         return prelude
     }
 
@@ -873,7 +1422,8 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             hiddenBuffer: hiddenBuffer,
             perLayerInputs: nil,
             perLayerInputsBuffer: perLayerInputsBuffer,
-            perLayerInputCount: projectionDim
+            perLayerInputCount: projectionDim,
+            tokenCount: 1
         )
         runtimeCache.storePreludeState(prelude, tokenID: tokenID)
         return prelude
@@ -894,7 +1444,7 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         }
 
         if useCacheBackedAttention,
-           ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_GPU_LAYER_RUNNER"] != "0" {
+           runtimeOptions.useGPULayerRunner {
             return try await runDecoderLayerStackWithGPUCache(
                 prelude: prelude,
                 position: position
@@ -928,10 +1478,16 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
 
     private func runDecoderLayerStackWithGPUCache(
         prelude: PreludeState,
-        position: Int
+        position: Int,
+        tokenOffset: Int = 0,
+        readOutput: Bool = true
     ) async throws -> [Float] {
         guard let pleInputBuffer = prelude.perLayerInputsBuffer else {
             throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer is unavailable")
+        }
+        let expectedPLEInputCount = prelude.tokenCount * config.numHiddenLayers * config.perLayerDim
+        guard prelude.perLayerInputCount == expectedPLEInputCount else {
+            throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer has invalid shape")
         }
 
         return try await profiler.measureAsync("gpu_layer_stack") {
@@ -941,8 +1497,11 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                     try encodeCopyBuffer(
                         source: hiddenBuffer,
                         destination: scratch.currentHidden,
+                        sourceOffset: tokenOffset * config.hiddenSize * MemoryLayout<Float>.stride,
                         byteCount: config.hiddenSize * MemoryLayout<Float>.stride
                     )
+                } else if prelude.tokenCount > 1 {
+                    try scratch.copyHiddenBatch(prelude.hidden, tokenOffset: tokenOffset)
                 } else {
                     try scratch.copyHidden(prelude.hidden)
                 }
@@ -950,28 +1509,43 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                     throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma GPU layer command buffer")
                 }
 
-                for layer in 0..<config.numHiddenLayers {
-                    let pleInputOffset = try prelude.perLayerInputByteOffset(
-                        layer: layer,
-                        perLayerDim: config.perLayerDim
-                    )
-                    try encodeDecoderLayerWithCache(
-                        commandBuffer: commandBuffer,
-                        layer: layer,
-                        position: position,
-                        pleInputBuffer: pleInputBuffer,
-                        pleInputOffset: pleInputOffset,
-                        scratch: scratch
-                    )
+                try profiler.measure("gpu_layer_stack_encode_layers") {
+                    for plan in layerRuntimePlans {
+                        try profiler.measure("gpu_layer_encode_total") {
+                            try encodeDecoderLayerWithCache(
+                                commandBuffer: commandBuffer,
+                                plan: plan,
+                                position: position,
+                                pleInputBuffer: pleInputBuffer,
+                                pleInputOffset: try prelude.perLayerInputByteOffset(
+                                    tokenOffset: tokenOffset,
+                                    layer: plan.layer,
+                                    perLayerDim: config.perLayerDim,
+                                    numLayers: config.numHiddenLayers
+                                ),
+                                scratch: scratch
+                            )
+                        }
+                    }
                 }
 
-                commandBuffer.commit()
-                await commandBuffer.completed()
-                if let error = commandBuffer.error {
-                    throw error
+                try await profiler.measureAsync("gpu_layer_stack_wait") {
+                    commandBuffer.commit()
+                    await commandBuffer.completed()
+                    if let error = commandBuffer.error {
+                        throw error
+                    }
+                }
+                recordMetalTimings(commandBuffer, prefix: "gpu_layer_stack")
+
+                guard readOutput else {
+                    await scratchGate.release()
+                    return []
                 }
 
-                let output = try scratch.readHidden()
+                let output = try profiler.measure("gpu_layer_stack_read_hidden") {
+                    try scratch.readHidden()
+                }
                 try validateFinite(output, label: "Gemma GPU decoder layer stack")
                 await scratchGate.release()
                 return output
@@ -984,21 +1558,36 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
 
     private func runDecoderLayerStackWithGPUCacheGreedy(
         prelude: PreludeState,
-        position: Int
+        position: Int,
+        tokenOffset: Int = 0
     ) async throws -> Int {
         guard let pleInputBuffer = prelude.perLayerInputsBuffer else {
             throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer is unavailable")
         }
+        let expectedPLEInputCount = prelude.tokenCount * config.numHiddenLayers * config.perLayerDim
+        guard prelude.perLayerInputCount == expectedPLEInputCount else {
+            throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer has invalid shape")
+        }
 
         return try await profiler.measureAsync("gpu_layer_stack") {
+            if profiler.isEnabled,
+               ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK"] == "1" {
+                return try await runDecoderLayerStackWithGPUCacheGreedySplitProfile(
+                    prelude: prelude,
+                    position: position
+                )
+            }
             await scratchGate.acquire()
             do {
                 if let hiddenBuffer = prelude.hiddenBuffer {
                     try encodeCopyBuffer(
                         source: hiddenBuffer,
                         destination: scratch.currentHidden,
+                        sourceOffset: tokenOffset * config.hiddenSize * MemoryLayout<Float>.stride,
                         byteCount: config.hiddenSize * MemoryLayout<Float>.stride
                     )
+                } else if prelude.tokenCount > 1 {
+                    try scratch.copyHiddenBatch(prelude.hidden, tokenOffset: tokenOffset)
                 } else {
                     try scratch.copyHidden(prelude.hidden)
                 }
@@ -1006,30 +1595,41 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                     throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma GPU greedy command buffer")
                 }
 
-                for layer in 0..<config.numHiddenLayers {
-                    let pleInputOffset = try prelude.perLayerInputByteOffset(
-                        layer: layer,
-                        perLayerDim: config.perLayerDim
-                    )
-                    try encodeDecoderLayerWithCache(
-                        commandBuffer: commandBuffer,
-                        layer: layer,
-                        position: position,
-                        pleInputBuffer: pleInputBuffer,
-                        pleInputOffset: pleInputOffset,
-                        scratch: scratch
-                    )
+                try profiler.measure("gpu_layer_stack_encode_layers") {
+                    for plan in layerRuntimePlans {
+                        try profiler.measure("gpu_layer_encode_total") {
+                            try encodeDecoderLayerWithCache(
+                                commandBuffer: commandBuffer,
+                                plan: plan,
+                                position: position,
+                                pleInputBuffer: pleInputBuffer,
+                                pleInputOffset: try prelude.perLayerInputByteOffset(
+                                    tokenOffset: tokenOffset,
+                                    layer: plan.layer,
+                                    perLayerDim: config.perLayerDim,
+                                    numLayers: config.numHiddenLayers
+                                ),
+                                scratch: scratch
+                            )
+                        }
+                    }
                 }
-                try encodeGreedyQ6KLogitsFromScratch(commandBuffer: commandBuffer, scratch: scratch)
-
-                commandBuffer.commit()
-                await commandBuffer.completed()
-                if let error = commandBuffer.error {
-                    throw error
+                try profiler.measure("gpu_layer_stack_encode_lm_head") {
+                    try encodeGreedyQ6KLogitsFromScratch(commandBuffer: commandBuffer, scratch: scratch)
                 }
 
-                let pointer = scratch.logits.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
-                let token = try greedyArgmax(pointer: pointer, count: config.vocabSize)
+                try await profiler.measureAsync("gpu_layer_stack_wait") {
+                    commandBuffer.commit()
+                    await commandBuffer.completed()
+                    if let error = commandBuffer.error {
+                        throw error
+                    }
+                }
+                recordMetalTimings(commandBuffer, prefix: "gpu_layer_stack")
+
+                let token = try profiler.measure("gpu_layer_stack_argmax") {
+                    try readGreedyTokenFromScratch(scratch)
+                }
                 await scratchGate.release()
                 return token
             } catch {
@@ -1039,54 +1639,334 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         }
     }
 
+    private func runDecoderLayerStackWithGPUCacheGreedySplitProfile(
+        prelude: PreludeState,
+        position: Int
+    ) async throws -> Int {
+        guard let pleInputBuffer = prelude.perLayerInputsBuffer else {
+            throw GenerationError.modelLoadFailed(reason: "Gemma PLE input buffer is unavailable")
+        }
+
+        await scratchGate.acquire()
+        do {
+            if let hiddenBuffer = prelude.hiddenBuffer {
+                try encodeCopyBuffer(
+                    source: hiddenBuffer,
+                    destination: scratch.currentHidden,
+                    byteCount: config.hiddenSize * MemoryLayout<Float>.stride
+                )
+            } else {
+                try scratch.copyHidden(prelude.hidden)
+            }
+
+            for layer in 0..<config.numHiddenLayers {
+                let pleInputOffset = try prelude.perLayerInputByteOffset(
+                    layer: layer,
+                    perLayerDim: config.perLayerDim
+                )
+                if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES"] == "1" {
+                    try await runSplitProfilePhase(
+                        aggregatePrefix: splitProfileAggregatePrefix("gpu_split_attention", layer: layer),
+                        layerPrefix: "gpu_split_layer_\(layer)_attention",
+                        encode: { commandBuffer in
+                            try encodeDecoderLayerAttentionWithCache(
+                                commandBuffer: commandBuffer,
+                                layer: layer,
+                                position: position,
+                                scratch: scratch
+                            )
+                        }
+                    )
+                    if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN"] == "1" {
+                        if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION"] == "1" {
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_norm", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_norm",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNInputNormWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_gate_up", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_gate_up",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNGateUpWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_geglu", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_geglu",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNActivationOnlyWithCache(
+                                        commandBuffer: commandBuffer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                        } else {
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_activation", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_activation",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNInputAndActivationWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                        }
+                        if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN"] == "1" {
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_down_projection", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_down_projection",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNDownProjectionWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_post_norm", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_post_norm",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNPostNormWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                        } else {
+                            try await runSplitProfilePhase(
+                                aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn_down", layer: layer),
+                                layerPrefix: "gpu_split_layer_\(layer)_ffn_down",
+                                encode: { commandBuffer in
+                                    try encodeDecoderLayerFFNDownAndPostNormWithCache(
+                                        commandBuffer: commandBuffer,
+                                        layer: layer,
+                                        scratch: scratch
+                                    )
+                                }
+                            )
+                        }
+                    } else {
+                        try await runSplitProfilePhase(
+                            aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ffn", layer: layer),
+                            layerPrefix: "gpu_split_layer_\(layer)_ffn",
+                            encode: { commandBuffer in
+                                try encodeDecoderLayerFFNWithCache(
+                                    commandBuffer: commandBuffer,
+                                    layer: layer,
+                                    scratch: scratch
+                                )
+                            }
+                        )
+                    }
+                    try await runSplitProfilePhase(
+                        aggregatePrefix: splitProfileAggregatePrefix("gpu_split_ple", layer: layer),
+                        layerPrefix: "gpu_split_layer_\(layer)_ple",
+                        encode: { commandBuffer in
+                            try encodeDecoderLayerPLEWithCache(
+                                commandBuffer: commandBuffer,
+                                layer: layer,
+                                pleInputBuffer: pleInputBuffer,
+                                pleInputOffset: pleInputOffset,
+                                scratch: scratch
+                            )
+                        }
+                    )
+                } else {
+                    guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                        throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma split-profile layer command buffer")
+                    }
+                    try profiler.measure("gpu_split_layer_encode") {
+                        try profiler.measure("gpu_split_layer_\(layer)_encode") {
+                            try encodeDecoderLayerWithCache(
+                                commandBuffer: commandBuffer,
+                                layer: layer,
+                                position: position,
+                                pleInputBuffer: pleInputBuffer,
+                                pleInputOffset: pleInputOffset,
+                                scratch: scratch
+                            )
+                        }
+                    }
+                    try await profiler.measureAsync("gpu_split_layer_wait") {
+                        try await profiler.measureAsync("gpu_split_layer_\(layer)_wait") {
+                            commandBuffer.commit()
+                            await commandBuffer.completed()
+                            if let error = commandBuffer.error {
+                                throw error
+                            }
+                        }
+                    }
+                    recordMetalTimings(commandBuffer, prefix: "gpu_split_layer")
+                    recordMetalTimings(commandBuffer, prefix: "gpu_split_layer_\(layer)")
+                }
+            }
+
+            guard let lmHeadCommandBuffer = commandQueue.makeCommandBuffer() else {
+                throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma split-profile LM-head command buffer")
+            }
+            try profiler.measure("gpu_split_lm_head_encode") {
+                try encodeGreedyQ6KLogitsFromScratch(commandBuffer: lmHeadCommandBuffer, scratch: scratch)
+            }
+            try await profiler.measureAsync("gpu_split_lm_head_wait") {
+                lmHeadCommandBuffer.commit()
+                await lmHeadCommandBuffer.completed()
+                if let error = lmHeadCommandBuffer.error {
+                    throw error
+                }
+            }
+            recordMetalTimings(lmHeadCommandBuffer, prefix: "gpu_split_lm_head")
+
+            let token = try profiler.measure("gpu_split_argmax") {
+                try readGreedyTokenFromScratch(scratch)
+            }
+            await scratchGate.release()
+            return token
+        } catch {
+            await scratchGate.release()
+            throw error
+        }
+    }
+
+    private func runSplitProfilePhase(
+        aggregatePrefix: String,
+        layerPrefix: String,
+        encode: (MTLCommandBuffer) throws -> Void
+    ) async throws {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma split-profile phase command buffer")
+        }
+        try profiler.measure("\(aggregatePrefix)_encode") {
+            try profiler.measure("\(layerPrefix)_encode") {
+                try encode(commandBuffer)
+            }
+        }
+        try await profiler.measureAsync("\(aggregatePrefix)_wait") {
+            try await profiler.measureAsync("\(layerPrefix)_wait") {
+                commandBuffer.commit()
+                await commandBuffer.completed()
+                if let error = commandBuffer.error {
+                    throw error
+                }
+            }
+        }
+        recordMetalTimings(commandBuffer, prefix: aggregatePrefix)
+        recordMetalTimings(commandBuffer, prefix: layerPrefix)
+    }
+
+    private func splitProfileAggregatePrefix(_ base: String, layer: Int) -> String {
+        guard ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES"] == "1" else {
+            return base
+        }
+
+        let attentionType: String
+        switch config.layerTypes[layer] {
+        case .sliding:
+            attentionType = "sliding"
+        case .global:
+            attentionType = "global"
+        }
+
+        let kvOwnership = config.kvSourceLayer(for: layer) == layer ? "ownkv" : "sharedkv"
+        return "\(base)_\(attentionType)_\(kvOwnership)"
+    }
+
+    private func recordMetalTimings(_ commandBuffer: MTLCommandBuffer, prefix: String) {
+        let gpuDuration = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+        profiler.recordDuration("\(prefix)_gpu_time", duration: gpuDuration)
+
+        let kernelDuration = commandBuffer.kernelEndTime - commandBuffer.kernelStartTime
+        profiler.recordDuration("\(prefix)_kernel_time", duration: kernelDuration)
+    }
+
     private func encodeGreedyQ6KLogitsFromScratch(
         commandBuffer: MTLCommandBuffer,
         scratch: Gemma4Scratch
     ) throws {
-        let tensor = weights.tokenEmbedding
+        let tensor = lmHeadResources.tokenEmbedding.request.tensor
         guard tensor.dataType == .q6_K else {
             throw GenerationError.modelLoadFailed(
                 reason: "Gemma GPU greedy path requires Q6_K tied token embeddings"
             )
         }
-        try validateMatrixShape(tensor: tensor, cols: config.hiddenSize, rows: config.vocabSize)
-        let outputNormWeightBuffer = try makeFloatBuffer(
-            storage: weights.outputNorm,
-            expectedElementCount: config.hiddenSize
-        )
         try gemmaDecodeKernels.encodeRMSNorm(
             commandBuffer: commandBuffer,
             inputBuffer: scratch.currentHidden,
-            weightBuffer: outputNormWeightBuffer,
+            weightBuffer: lmHeadResources.outputNormWeightBuffer,
             outputBuffer: scratch.normed,
             rows: 1,
             cols: config.hiddenSize,
             eps: config.rmsNormEps
         )
-        let requiredBytes = try packedByteCount(
-            tensorName: tensor.name,
-            rows: config.vocabSize,
-            cols: config.hiddenSize,
-            weightsPerBlock: 256,
-            blockByteCount: 210
-        )
-        let weightBuffer = try makeRawTensorBuffer(storage: tensor, requiredBytes: requiredBytes)
-        try gemvKernel.encodeQ6KWeights(
-            commandBuffer: commandBuffer,
-            weightBuffer: weightBuffer,
-            inputBuffer: scratch.normed,
-            outputBuffer: scratch.logits,
-            M: config.vocabSize,
-            K: config.hiddenSize
-        )
+        let weightBuffer = lmHeadResources.tokenEmbedding.weightBuffer
+        if runtimeOptions.useQ6Top1 {
+            try gemvKernel.encodeQ6KWeightsPackedTop1(
+                commandBuffer: commandBuffer,
+                weightBuffer: weightBuffer,
+                inputBuffer: scratch.normed,
+                partialValuesBuffer: scratch.top1PartialValues,
+                partialIndicesBuffer: scratch.top1PartialIndices,
+                outputIndexBuffer: scratch.top1Token,
+                M: config.vocabSize,
+                K: config.hiddenSize
+            )
+        } else if runtimeOptions.useQ6Packed {
+            try gemvKernel.encodeQ6KWeightsPacked(
+                commandBuffer: commandBuffer,
+                weightBuffer: weightBuffer,
+                inputBuffer: scratch.normed,
+                outputBuffer: scratch.logits,
+                M: config.vocabSize,
+                K: config.hiddenSize
+            )
+        } else {
+            try gemvKernel.encodeQ6KWeights(
+                commandBuffer: commandBuffer,
+                weightBuffer: weightBuffer,
+                inputBuffer: scratch.normed,
+                outputBuffer: scratch.logits,
+                M: config.vocabSize,
+                K: config.hiddenSize
+            )
+        }
+    }
+
+    private func readGreedyTokenFromScratch(_ scratch: Gemma4Scratch) throws -> Int {
+        if runtimeOptions.useQ6Top1 {
+            let pointer = scratch.top1Token.contents().bindMemory(to: UInt32.self, capacity: 1)
+            let token = Int(pointer.pointee)
+            guard token >= 0, token < config.vocabSize else {
+                throw GenerationError.decodingFailed("Gemma top-1 token \(token) is outside vocab \(config.vocabSize)")
+            }
+            return token
+        }
+
+        let pointer = scratch.logits.contents().bindMemory(to: Float.self, capacity: config.vocabSize)
+        return try greedyArgmax(pointer: pointer, count: config.vocabSize)
     }
 
     private func encodeCopyBuffer(
         source: MTLBuffer,
         destination: MTLBuffer,
+        sourceOffset: Int = 0,
         byteCount: Int
     ) throws {
-        guard source.length >= byteCount,
+        guard sourceOffset >= 0,
+              source.length >= sourceOffset + byteCount,
               destination.length >= byteCount,
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeBlitCommandEncoder() else {
@@ -1094,7 +1974,7 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         }
         encoder.copy(
             from: source,
-            sourceOffset: 0,
+            sourceOffset: sourceOffset,
             to: destination,
             destinationOffset: 0,
             size: byteCount
@@ -1115,116 +1995,156 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         pleInputOffset: Int,
         scratch: Gemma4Scratch
     ) throws {
-        let block = weights.blocks[layer]
-        let hiddenSize = config.hiddenSize
-        let layerHeadDim = headDim(forLayer: layer)
-        let qRows = config.numAttentionHeads * layerHeadDim
-        let kvRows = config.numKeyValueHeads * layerHeadDim
-
-        let inputNormWeightBuffer = try makeFloatBuffer(
-            storage: block.inputNorm,
-            expectedElementCount: hiddenSize
+        try encodeDecoderLayerWithCache(
+            commandBuffer: commandBuffer,
+            plan: layerRuntimePlans[layer],
+            position: position,
+            pleInputBuffer: pleInputBuffer,
+            pleInputOffset: pleInputOffset,
+            scratch: scratch
         )
+    }
+
+    private func encodeDecoderLayerWithCache(
+        commandBuffer: MTLCommandBuffer,
+        plan: Gemma4LayerRuntimePlan,
+        position: Int,
+        pleInputBuffer: MTLBuffer,
+        pleInputOffset: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerAttentionWithCache(
+            commandBuffer: commandBuffer,
+            plan: plan,
+            position: position,
+            scratch: scratch
+        )
+        try encodeDecoderLayerFFNWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[plan.layer],
+            scratch: scratch
+        )
+        try encodeDecoderLayerPLEWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[plan.layer],
+            pleInputBuffer: pleInputBuffer,
+            pleInputOffset: pleInputOffset,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerAttentionWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        position: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerAttentionWithCache(
+            commandBuffer: commandBuffer,
+            plan: layerRuntimePlans[layer],
+            position: position,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerAttentionWithCache(
+        commandBuffer: MTLCommandBuffer,
+        plan: Gemma4LayerRuntimePlan,
+        position: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        let layer = plan.layer
+        let resources = layerRuntimeResources[layer]
+        let hiddenSize = config.hiddenSize
+        let layerHeadDim = plan.headDim
+        let qRows = plan.qRows
+        let kvRows = plan.kvRows
+
         try gemmaDecodeKernels.encodeRMSNorm(
             commandBuffer: commandBuffer,
             inputBuffer: scratch.currentHidden,
-            weightBuffer: inputNormWeightBuffer,
+            weightBuffer: resources.inputNormWeightBuffer,
             outputBuffer: scratch.normed,
             rows: 1,
             cols: hiddenSize,
             eps: config.rmsNormEps
         )
 
-        let qRequest = ProjectionRequest(tensor: block.attnQ, rows: qRows, cols: hiddenSize)
-        if let attnK = block.attnK, let attnV = block.attnV {
-            let kRequest = ProjectionRequest(tensor: attnK, rows: kvRows, cols: hiddenSize)
-            let vRequest = ProjectionRequest(tensor: attnV, rows: kvRows, cols: hiddenSize)
+        let qRequest = resources.attnQ.request
+        if let kResource = resources.attnK, let vResource = resources.attnV {
+            let kRequest = kResource.request
+            let vRequest = vResource.request
             if qRequest.tensor.dataType == .q4_K,
                kRequest.tensor.dataType == .q4_K,
                vRequest.tensor.dataType == .q4_K {
-                let qWeightBuffer = try makeRawTensorBuffer(
-                    storage: qRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(qRequest)
-                )
-                let kWeightBuffer = try makeRawTensorBuffer(
-                    storage: kRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(kRequest)
-                )
-                let vWeightBuffer = try makeRawTensorBuffer(
-                    storage: vRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(vRequest)
-                )
-                try gemvKernel.encodeQ4KWeightsTriple(
-                    commandBuffer: commandBuffer,
-                    weightBufferA: qWeightBuffer,
-                    weightBufferB: kWeightBuffer,
-                    weightBufferC: vWeightBuffer,
-                    inputBuffer: scratch.normed,
-                    outputBufferA: scratch.q,
-                    outputBufferB: scratch.k,
-                    outputBufferC: scratch.v,
-                    rowsA: qRows,
-                    rowsB: kvRows,
-                    rowsC: kvRows,
-                    K: hiddenSize
-                )
+                if runtimeOptions.useQ4Packed {
+                    try gemvKernel.encodeQ4KWeightsTriplePacked(
+                        commandBuffer: commandBuffer,
+                        weightBufferA: resources.attnQ.weightBuffer,
+                        weightBufferB: kResource.weightBuffer,
+                        weightBufferC: vResource.weightBuffer,
+                        inputBuffer: scratch.normed,
+                        outputBufferA: scratch.q,
+                        outputBufferB: scratch.k,
+                        outputBufferC: scratch.v,
+                        rowsA: qRows,
+                        rowsB: kvRows,
+                        rowsC: kvRows,
+                        K: hiddenSize
+                    )
+                } else {
+                    try gemvKernel.encodeQ4KWeightsTriple(
+                        commandBuffer: commandBuffer,
+                        weightBufferA: resources.attnQ.weightBuffer,
+                        weightBufferB: kResource.weightBuffer,
+                        weightBufferC: vResource.weightBuffer,
+                        inputBuffer: scratch.normed,
+                        outputBufferA: scratch.q,
+                        outputBufferB: scratch.k,
+                        outputBufferC: scratch.v,
+                        rowsA: qRows,
+                        rowsB: kvRows,
+                        rowsC: kvRows,
+                        K: hiddenSize
+                    )
+                }
             } else {
-                let qWeightBuffer = try makeRawTensorBuffer(
-                    storage: qRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(qRequest)
-                )
                 try encodeProjection(
                     qRequest,
-                    weightBuffer: qWeightBuffer,
+                    weightBuffer: resources.attnQ.weightBuffer,
                     inputBuffer: scratch.normed,
                     outputBuffer: scratch.q,
                     commandBuffer: commandBuffer
                 )
-                let kWeightBuffer = try makeRawTensorBuffer(
-                    storage: kRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(kRequest)
-                )
-                let vWeightBuffer = try makeRawTensorBuffer(
-                    storage: vRequest.tensor,
-                    requiredBytes: try projectionRequiredBytes(vRequest)
-                )
                 try encodeProjection(
                     kRequest,
-                    weightBuffer: kWeightBuffer,
+                    weightBuffer: kResource.weightBuffer,
                     inputBuffer: scratch.normed,
                     outputBuffer: scratch.k,
                     commandBuffer: commandBuffer
                 )
                 try encodeProjection(
                     vRequest,
-                    weightBuffer: vWeightBuffer,
+                    weightBuffer: vResource.weightBuffer,
                     inputBuffer: scratch.normed,
                     outputBuffer: scratch.v,
                     commandBuffer: commandBuffer
                 )
             }
         } else {
-            let qWeightBuffer = try makeRawTensorBuffer(
-                storage: qRequest.tensor,
-                requiredBytes: try projectionRequiredBytes(qRequest)
-            )
             try encodeProjection(
                 qRequest,
-                weightBuffer: qWeightBuffer,
+                weightBuffer: resources.attnQ.weightBuffer,
                 inputBuffer: scratch.normed,
                 outputBuffer: scratch.q,
                 commandBuffer: commandBuffer
             )
         }
 
-        let qNormWeightBuffer = try makeFloatBuffer(
-            storage: block.attnQNorm,
-            expectedElementCount: layerHeadDim
-        )
         try gemmaDecodeKernels.encodeRMSNorm(
             commandBuffer: commandBuffer,
             inputBuffer: scratch.q,
-            weightBuffer: qNormWeightBuffer,
+            weightBuffer: resources.attnQNormWeightBuffer,
             outputBuffer: scratch.qRotated,
             rows: config.numAttentionHeads,
             cols: layerHeadDim,
@@ -1238,15 +2158,11 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             numHeads: config.numAttentionHeads,
             headDim: layerHeadDim,
             startPos: position,
-            theta: ropeTheta(forLayer: layer),
-            partialRotaryFactor: try rotaryFactor(forLayer: layer)
+            theta: plan.ropeTheta,
+            partialRotaryFactor: plan.rotaryFactor
         )
 
-        if block.attnK != nil, block.attnV != nil {
-            let kNormWeightBuffer = try makeFloatBuffer(
-                storage: block.attnKNorm,
-                expectedElementCount: layerHeadDim
-            )
+        if resources.attnK != nil, resources.attnV != nil, let kNormWeightBuffer = resources.attnKNormWeightBuffer {
             try gemmaDecodeKernels.encodeRMSNorm(
                 commandBuffer: commandBuffer,
                 inputBuffer: scratch.k,
@@ -1264,8 +2180,8 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 numHeads: config.numKeyValueHeads,
                 headDim: layerHeadDim,
                 startPos: position,
-                theta: ropeTheta(forLayer: layer),
-                partialRotaryFactor: try rotaryFactor(forLayer: layer)
+                theta: plan.ropeTheta,
+                partialRotaryFactor: plan.rotaryFactor
             )
             try gemmaDecodeKernels.encodeStoreF32ToF16(
                 commandBuffer: commandBuffer,
@@ -1275,11 +2191,10 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 count: kvRows
             )
 
-            let unitWeightBuffer = try makeUnitFloatBuffer(count: layerHeadDim)
             try gemmaDecodeKernels.encodeRMSNorm(
                 commandBuffer: commandBuffer,
                 inputBuffer: scratch.v,
-                weightBuffer: unitWeightBuffer,
+                weightBuffer: resources.unitHeadWeightBuffer,
                 outputBuffer: scratch.kRotated,
                 rows: config.numKeyValueHeads,
                 cols: layerHeadDim,
@@ -1294,7 +2209,7 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             )
         }
 
-        let kvSource = config.kvSourceLayer(for: layer)
+        let kvSource = plan.kvSourceLayer
         let attentionRange = gpuKVCache.attentionRange(layer: kvSource, currentPosition: position)
         try gemmaDecodeKernels.encodeDecodeGQAF16KVWindowedBestAvailable(
             commandBuffer: commandBuffer,
@@ -1311,74 +2226,266 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             attentionScale: 1.0
         )
 
-        let attentionProjectionRequest = ProjectionRequest(tensor: block.attnO, rows: hiddenSize, cols: qRows)
-        let attentionProjectionWeightBuffer = try makeRawTensorBuffer(
-            storage: attentionProjectionRequest.tensor,
-            requiredBytes: try projectionRequiredBytes(attentionProjectionRequest)
-        )
         try encodeProjection(
-            attentionProjectionRequest,
-            weightBuffer: attentionProjectionWeightBuffer,
+            resources.attnO.request,
+            weightBuffer: resources.attnO.weightBuffer,
             inputBuffer: scratch.attention,
             outputBuffer: scratch.nextHidden,
             commandBuffer: commandBuffer
-        )
-        let postAttentionNormWeightBuffer = try makeFloatBuffer(
-            storage: block.postAttentionNorm,
-            expectedElementCount: hiddenSize
         )
         try gemmaDecodeKernels.encodeResidualRMSNormAdd(
             commandBuffer: commandBuffer,
             residualBuffer: scratch.currentHidden,
             inputBuffer: scratch.nextHidden,
-            weightBuffer: postAttentionNormWeightBuffer,
+            weightBuffer: resources.postAttentionNormWeightBuffer,
             outputBuffer: scratch.nextHidden,
             count: hiddenSize,
             eps: config.rmsNormEps
         )
+    }
 
-        let ffnNormWeightBuffer = try makeFloatBuffer(
-            storage: block.ffnNorm,
-            expectedElementCount: hiddenSize
+    private func encodeDecoderLayerFFNWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
         )
+    }
+
+    private func encodeDecoderLayerFFNWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNInputAndActivationWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+        try encodeDecoderLayerFFNDownAndPostNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNInputAndActivationWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNInputAndActivationWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNInputAndActivationWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNInputNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+        try encodeDecoderLayerFFNGateUpWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+        try encodeDecoderLayerFFNActivationOnlyWithCache(
+            commandBuffer: commandBuffer,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNInputNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNInputNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNInputNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        let hiddenSize = config.hiddenSize
         try gemmaDecodeKernels.encodeRMSNorm(
             commandBuffer: commandBuffer,
             inputBuffer: scratch.nextHidden,
-            weightBuffer: ffnNormWeightBuffer,
+            weightBuffer: resources.ffnNormWeightBuffer,
             outputBuffer: scratch.ffnInput,
             rows: 1,
             cols: hiddenSize,
             eps: config.rmsNormEps
         )
-        try encodeGeGLUDown(
-            gateTensor: block.ffnGate,
-            upTensor: block.ffnUp,
-            downTensor: block.ffnDown,
+    }
+
+    private func encodeDecoderLayerFFNGateUpWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNGateUpWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNGateUpWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeGeGLUActivation(
+            gate: resources.ffnGate,
+            up: resources.ffnUp,
             inputBuffer: scratch.ffnInput,
             gateBuffer: scratch.ffnGate,
             upBuffer: scratch.ffnUp,
             activatedBuffer: scratch.ffnActivated,
+            encodeActivation: false,
+            commandBuffer: commandBuffer
+        )
+    }
+
+    private func encodeDecoderLayerFFNActivationOnlyWithCache(
+        commandBuffer: MTLCommandBuffer,
+        scratch: Gemma4Scratch
+    ) throws {
+        try gegluKernel.encode(
+            commandBuffer: commandBuffer,
+            gateBuffer: scratch.ffnGate,
+            upBuffer: scratch.ffnUp,
+            outputBuffer: scratch.ffnActivated,
+            count: config.intermediateSize
+        )
+    }
+
+    private func encodeDecoderLayerFFNDownAndPostNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNDownAndPostNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNDownAndPostNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNDownProjectionWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+        try encodeDecoderLayerFFNPostNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNDownProjectionWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNDownProjectionWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerFFNDownProjectionWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeGeGLUDownProjection(
+            down: resources.ffnDown,
+            activatedBuffer: scratch.ffnActivated,
             downBuffer: scratch.ffnDown,
             commandBuffer: commandBuffer
         )
+    }
 
-        let postFFNNormWeightBuffer = try makeFloatBuffer(
-            storage: block.postFFNNorm,
-            expectedElementCount: hiddenSize
+    private func encodeDecoderLayerFFNPostNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerFFNPostNormWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            scratch: scratch
         )
+    }
+
+    private func encodeDecoderLayerFFNPostNormWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        scratch: Gemma4Scratch
+    ) throws {
+        let hiddenSize = config.hiddenSize
         try gemmaDecodeKernels.encodeResidualRMSNormAdd(
             commandBuffer: commandBuffer,
             residualBuffer: scratch.nextHidden,
             inputBuffer: scratch.ffnDown,
-            weightBuffer: postFFNNormWeightBuffer,
+            weightBuffer: resources.postFFNNormWeightBuffer,
             outputBuffer: scratch.currentHidden,
             count: hiddenSize,
             eps: config.rmsNormEps
         )
+    }
 
+    private func encodeDecoderLayerPLEWithCache(
+        commandBuffer: MTLCommandBuffer,
+        layer: Int,
+        pleInputBuffer: MTLBuffer,
+        pleInputOffset: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodeDecoderLayerPLEWithCache(
+            commandBuffer: commandBuffer,
+            resources: layerRuntimeResources[layer],
+            pleInputBuffer: pleInputBuffer,
+            pleInputOffset: pleInputOffset,
+            scratch: scratch
+        )
+    }
+
+    private func encodeDecoderLayerPLEWithCache(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        pleInputBuffer: MTLBuffer,
+        pleInputOffset: Int,
+        scratch: Gemma4Scratch
+    ) throws {
         try encodePLESideChannel(
             commandBuffer: commandBuffer,
-            block: block,
+            resources: resources,
             hiddenBuffer: scratch.currentHidden,
             pleInputBuffer: pleInputBuffer,
             pleInputOffset: pleInputOffset,
@@ -1803,14 +2910,25 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
             throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma greedy LM-head buffers")
         }
 
-        try gemvKernel.encodeQ6KWeights(
-            commandBuffer: commandBuffer,
-            weightBuffer: weightBuffer,
-            inputBuffer: inputBuffer,
-            outputBuffer: outputBuffer,
-            M: config.vocabSize,
-            K: config.hiddenSize
-        )
+        if runtimeOptions.useQ6Packed {
+            try gemvKernel.encodeQ6KWeightsPacked(
+                commandBuffer: commandBuffer,
+                weightBuffer: weightBuffer,
+                inputBuffer: inputBuffer,
+                outputBuffer: outputBuffer,
+                M: config.vocabSize,
+                K: config.hiddenSize
+            )
+        } else {
+            try gemvKernel.encodeQ6KWeights(
+                commandBuffer: commandBuffer,
+                weightBuffer: weightBuffer,
+                inputBuffer: inputBuffer,
+                outputBuffer: outputBuffer,
+                M: config.vocabSize,
+                K: config.hiddenSize
+            )
+        }
         commandBuffer.commit()
         await commandBuffer.completed()
         if let error = commandBuffer.error {
@@ -2327,12 +3445,38 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         downBuffer: MTLBuffer,
         commandBuffer: MTLCommandBuffer
     ) throws {
+        try encodeGeGLUActivation(
+            gateTensor: gateTensor,
+            upTensor: upTensor,
+            inputBuffer: inputBuffer,
+            gateBuffer: gateBuffer,
+            upBuffer: upBuffer,
+            activatedBuffer: activatedBuffer,
+            commandBuffer: commandBuffer
+        )
+        try encodeGeGLUDownProjection(
+            downTensor: downTensor,
+            activatedBuffer: activatedBuffer,
+            downBuffer: downBuffer,
+            commandBuffer: commandBuffer
+        )
+    }
+
+    private func encodeGeGLUActivation(
+        gateTensor: TensorStorage,
+        upTensor: TensorStorage,
+        inputBuffer: MTLBuffer,
+        gateBuffer: MTLBuffer,
+        upBuffer: MTLBuffer,
+        activatedBuffer: MTLBuffer,
+        encodeActivation: Bool = true,
+        commandBuffer: MTLCommandBuffer
+    ) throws {
         let hiddenSize = config.hiddenSize
         let intermediateSize = config.intermediateSize
         let gateRequest = ProjectionRequest(tensor: gateTensor, rows: intermediateSize, cols: hiddenSize)
         let upRequest = ProjectionRequest(tensor: upTensor, rows: intermediateSize, cols: hiddenSize)
-        let downRequest = ProjectionRequest(tensor: downTensor, rows: hiddenSize, cols: intermediateSize)
-        for request in [gateRequest, upRequest, downRequest] {
+        for request in [gateRequest, upRequest] {
             try validateMatrixShape(tensor: request.tensor, cols: request.cols, rows: request.rows)
         }
 
@@ -2346,7 +3490,75 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 storage: upRequest.tensor,
                 requiredBytes: try projectionRequiredBytes(upRequest)
             )
-            if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU"] == "1" {
+            if runtimeOptions.useQ4Packed {
+                if runtimeOptions.useQ4LlamaStyleDual {
+                    try gemvKernel.encodeQ4KWeightsLlamaStyleDual(
+                        commandBuffer: commandBuffer,
+                        weightBufferA: gateWeightBuffer,
+                        weightBufferB: upWeightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBufferA: gateBuffer,
+                        outputBufferB: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    if encodeActivation {
+                        try gegluKernel.encode(
+                            commandBuffer: commandBuffer,
+                            gateBuffer: gateBuffer,
+                            upBuffer: upBuffer,
+                            outputBuffer: activatedBuffer,
+                            count: intermediateSize
+                        )
+                    }
+                    return
+                }
+                if runtimeOptions.useQ4Tiled {
+                    try gemvKernel.encodeQ4KWeightsPackedFourRows(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: gateWeightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: gateBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    try gemvKernel.encodeQ4KWeightsPackedFourRows(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: upWeightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                } else {
+                    try gemvKernel.encodeQ4KWeightsPacked(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: gateWeightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: gateBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    try gemvKernel.encodeQ4KWeightsPacked(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: upWeightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                }
+                if encodeActivation {
+                    try gegluKernel.encode(
+                        commandBuffer: commandBuffer,
+                        gateBuffer: gateBuffer,
+                        upBuffer: upBuffer,
+                        outputBuffer: activatedBuffer,
+                        count: intermediateSize
+                    )
+                }
+            } else if encodeActivation,
+                      runtimeOptions.useQ4FusedGeGLU {
                 try gemvKernel.encodeQ4KWeightsDualGeGLU(
                     commandBuffer: commandBuffer,
                     gateWeightBuffer: gateWeightBuffer,
@@ -2368,13 +3580,15 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                     K: hiddenSize
                 )
 
-                try gegluKernel.encode(
-                    commandBuffer: commandBuffer,
-                    gateBuffer: gateBuffer,
-                    upBuffer: upBuffer,
-                    outputBuffer: activatedBuffer,
-                    count: intermediateSize
-                )
+                if encodeActivation {
+                    try gegluKernel.encode(
+                        commandBuffer: commandBuffer,
+                        gateBuffer: gateBuffer,
+                        upBuffer: upBuffer,
+                        outputBuffer: activatedBuffer,
+                        count: intermediateSize
+                    )
+                }
             }
         } else {
             let gateWeightBuffer = try makeRawTensorBuffer(
@@ -2401,15 +3615,171 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 commandBuffer: commandBuffer
             )
 
-            try gegluKernel.encode(
-                commandBuffer: commandBuffer,
-                gateBuffer: gateBuffer,
-                upBuffer: upBuffer,
-                outputBuffer: activatedBuffer,
-                count: intermediateSize
-            )
+            if encodeActivation {
+                try gegluKernel.encode(
+                    commandBuffer: commandBuffer,
+                    gateBuffer: gateBuffer,
+                    upBuffer: upBuffer,
+                    outputBuffer: activatedBuffer,
+                    count: intermediateSize
+                )
+            }
         }
+    }
 
+    private func encodeGeGLUActivation(
+        gate: ProjectionResource,
+        up: ProjectionResource,
+        inputBuffer: MTLBuffer,
+        gateBuffer: MTLBuffer,
+        upBuffer: MTLBuffer,
+        activatedBuffer: MTLBuffer,
+        encodeActivation: Bool = true,
+        commandBuffer: MTLCommandBuffer
+    ) throws {
+        let hiddenSize = gate.request.cols
+        let intermediateSize = gate.request.rows
+
+        if gate.request.tensor.dataType == .q4_K,
+           up.request.tensor.dataType == .q4_K {
+            if runtimeOptions.useQ4Packed {
+                if runtimeOptions.useQ4LlamaStyleDual {
+                    try gemvKernel.encodeQ4KWeightsLlamaStyleDual(
+                        commandBuffer: commandBuffer,
+                        weightBufferA: gate.weightBuffer,
+                        weightBufferB: up.weightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBufferA: gateBuffer,
+                        outputBufferB: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    if encodeActivation {
+                        try gegluKernel.encode(
+                            commandBuffer: commandBuffer,
+                            gateBuffer: gateBuffer,
+                            upBuffer: upBuffer,
+                            outputBuffer: activatedBuffer,
+                            count: intermediateSize
+                        )
+                    }
+                    return
+                }
+                if runtimeOptions.useQ4Tiled {
+                    try gemvKernel.encodeQ4KWeightsPackedFourRows(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: gate.weightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: gateBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    try gemvKernel.encodeQ4KWeightsPackedFourRows(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: up.weightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                } else {
+                    try gemvKernel.encodeQ4KWeightsPacked(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: gate.weightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: gateBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                    try gemvKernel.encodeQ4KWeightsPacked(
+                        commandBuffer: commandBuffer,
+                        weightBuffer: up.weightBuffer,
+                        inputBuffer: inputBuffer,
+                        outputBuffer: upBuffer,
+                        M: intermediateSize,
+                        K: hiddenSize
+                    )
+                }
+                if encodeActivation {
+                    try gegluKernel.encode(
+                        commandBuffer: commandBuffer,
+                        gateBuffer: gateBuffer,
+                        upBuffer: upBuffer,
+                        outputBuffer: activatedBuffer,
+                        count: intermediateSize
+                    )
+                }
+            } else if encodeActivation,
+                      runtimeOptions.useQ4FusedGeGLU {
+                try gemvKernel.encodeQ4KWeightsDualGeGLU(
+                    commandBuffer: commandBuffer,
+                    gateWeightBuffer: gate.weightBuffer,
+                    upWeightBuffer: up.weightBuffer,
+                    inputBuffer: inputBuffer,
+                    outputBuffer: activatedBuffer,
+                    M: intermediateSize,
+                    K: hiddenSize
+                )
+            } else {
+                try gemvKernel.encodeQ4KWeightsDual(
+                    commandBuffer: commandBuffer,
+                    weightBufferA: gate.weightBuffer,
+                    weightBufferB: up.weightBuffer,
+                    inputBuffer: inputBuffer,
+                    outputBufferA: gateBuffer,
+                    outputBufferB: upBuffer,
+                    M: intermediateSize,
+                    K: hiddenSize
+                )
+
+                if encodeActivation {
+                    try gegluKernel.encode(
+                        commandBuffer: commandBuffer,
+                        gateBuffer: gateBuffer,
+                        upBuffer: upBuffer,
+                        outputBuffer: activatedBuffer,
+                        count: intermediateSize
+                    )
+                }
+            }
+        } else {
+            try encodeProjection(
+                gate.request,
+                weightBuffer: gate.weightBuffer,
+                inputBuffer: inputBuffer,
+                outputBuffer: gateBuffer,
+                commandBuffer: commandBuffer
+            )
+            try encodeProjection(
+                up.request,
+                weightBuffer: up.weightBuffer,
+                inputBuffer: inputBuffer,
+                outputBuffer: upBuffer,
+                commandBuffer: commandBuffer
+            )
+
+            if encodeActivation {
+                try gegluKernel.encode(
+                    commandBuffer: commandBuffer,
+                    gateBuffer: gateBuffer,
+                    upBuffer: upBuffer,
+                    outputBuffer: activatedBuffer,
+                    count: intermediateSize
+                )
+            }
+        }
+    }
+
+    private func encodeGeGLUDownProjection(
+        downTensor: TensorStorage,
+        activatedBuffer: MTLBuffer,
+        downBuffer: MTLBuffer,
+        commandBuffer: MTLCommandBuffer
+    ) throws {
+        let hiddenSize = config.hiddenSize
+        let intermediateSize = config.intermediateSize
+        let downRequest = ProjectionRequest(tensor: downTensor, rows: hiddenSize, cols: intermediateSize)
+        try validateMatrixShape(tensor: downRequest.tensor, cols: downRequest.cols, rows: downRequest.rows)
         let downWeightBuffer = try makeRawTensorBuffer(
             storage: downRequest.tensor,
             requiredBytes: try projectionRequiredBytes(downRequest)
@@ -2417,6 +3787,21 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
         try encodeProjection(
             downRequest,
             weightBuffer: downWeightBuffer,
+            inputBuffer: activatedBuffer,
+            outputBuffer: downBuffer,
+            commandBuffer: commandBuffer
+        )
+    }
+
+    private func encodeGeGLUDownProjection(
+        down: ProjectionResource,
+        activatedBuffer: MTLBuffer,
+        downBuffer: MTLBuffer,
+        commandBuffer: MTLCommandBuffer
+    ) throws {
+        try encodeProjection(
+            down.request,
+            weightBuffer: down.weightBuffer,
             inputBuffer: activatedBuffer,
             outputBuffer: downBuffer,
             commandBuffer: commandBuffer
@@ -2593,6 +3978,89 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
 
     private func encodePLESideChannel(
         commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        hiddenBuffer: MTLBuffer,
+        pleInputBuffer: MTLBuffer,
+        pleInputOffset: Int,
+        scratch: Gemma4Scratch
+    ) throws {
+        try encodePLESideChannel(
+            commandBuffer: commandBuffer,
+            resources: resources,
+            hiddenBuffer: hiddenBuffer,
+            pleInputBuffer: pleInputBuffer,
+            pleInputOffset: pleInputOffset,
+            gateBuffer: scratch.pleGate,
+            activatedBuffer: scratch.pleActivated,
+            projectionBuffer: scratch.pleProjection
+        )
+    }
+
+    private func encodePLESideChannel(
+        commandBuffer: MTLCommandBuffer,
+        resources: LayerRuntimeResources,
+        hiddenBuffer: MTLBuffer,
+        pleInputBuffer: MTLBuffer,
+        pleInputOffset: Int,
+        gateBuffer: MTLBuffer,
+        activatedBuffer: MTLBuffer,
+        projectionBuffer: MTLBuffer
+    ) throws {
+        let hiddenSize = config.hiddenSize
+        let perLayerDim = config.perLayerDim
+        let f32 = MemoryLayout<Float>.stride
+        guard hiddenBuffer.length >= hiddenSize * f32,
+              pleInputOffset >= 0,
+              pleInputBuffer.length >= pleInputOffset + perLayerDim * f32,
+              gateBuffer.length >= perLayerDim * f32,
+              activatedBuffer.length >= perLayerDim * f32,
+              projectionBuffer.length >= hiddenSize * f32 else {
+            throw GenerationError.modelLoadFailed(reason: "Gemma PLE side-channel buffer is too small")
+        }
+
+        try encodeProjection(
+            resources.pleGate.request,
+            weightBuffer: resources.pleGate.weightBuffer,
+            inputBuffer: hiddenBuffer,
+            outputBuffer: gateBuffer,
+            commandBuffer: commandBuffer
+        )
+        try pleGateKernel.encode(
+            commandBuffer: commandBuffer,
+            gateBuffer: gateBuffer,
+            pleBuffer: pleInputBuffer,
+            outputBuffer: activatedBuffer,
+            count: perLayerDim,
+            pleBufferOffset: pleInputOffset
+        )
+
+        try encodeProjection(
+            resources.pleProjection.request,
+            weightBuffer: resources.pleProjection.weightBuffer,
+            inputBuffer: activatedBuffer,
+            outputBuffer: projectionBuffer,
+            commandBuffer: commandBuffer
+        )
+
+        try pleSideChannelKernel.encode(
+            commandBuffer: commandBuffer,
+            hiddenBuffer: hiddenBuffer,
+            projectionBuffer: projectionBuffer,
+            postNormWeightBuffer: resources.plePostNormWeightBuffer,
+            hiddenSize: hiddenSize,
+            batchSeq: 1,
+            rmsEps: config.rmsNormEps
+        )
+        try gemmaDecodeKernels.encodeMulScalar(
+            commandBuffer: commandBuffer,
+            valuesBuffer: hiddenBuffer,
+            scale: resources.layerOutputScale,
+            count: hiddenSize
+        )
+    }
+
+    private func encodePLESideChannel(
+        commandBuffer: MTLCommandBuffer,
         block: Gemma4BlockWeights,
         hiddenBuffer: MTLBuffer,
         pleInputBuffer: MTLBuffer,
@@ -2763,7 +4231,25 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 K: request.cols
             )
         case .q4_K:
-            if ProcessInfo.processInfo.environment["EDGERUNNER_GEMMA4_Q4_2ROW"] == "1",
+            if runtimeOptions.useQ4LlamaStyle {
+                try gemvKernel.encodeQ4KWeightsLlamaStyle(
+                    commandBuffer: commandBuffer,
+                    weightBuffer: weightBuffer,
+                    inputBuffer: inputBuffer,
+                    outputBuffer: outputBuffer,
+                    M: request.rows,
+                    K: request.cols
+                )
+            } else if runtimeOptions.useQ4Packed {
+                try gemvKernel.encodeQ4KWeightsPacked(
+                    commandBuffer: commandBuffer,
+                    weightBuffer: weightBuffer,
+                    inputBuffer: inputBuffer,
+                    outputBuffer: outputBuffer,
+                    M: request.rows,
+                    K: request.cols
+                )
+            } else if runtimeOptions.useQ4TwoRow,
                request.rows >= 512 {
                 try gemvKernel.encodeQ4KWeightsTwoRows(
                     commandBuffer: commandBuffer,
@@ -2952,19 +4438,48 @@ public struct Gemma4LanguageModel: LogitsModel, @unchecked Sendable {
                 storage: projection,
                 requiredBytes: projection.elementCount * MemoryLayout<UInt16>.stride
             )
-            for tokenIndex in 0..<batchSeq {
-                let start = tokenIndex * hiddenSize
-                let tokenHidden = Array(hidden[start..<(start + hiddenSize)])
+            if batchSeq > 1 {
+                guard let inputBuffer = device.makeBuffer(
+                    bytes: hidden,
+                    length: hidden.count * MemoryLayout<Float>.stride,
+                    options: .storageModeShared
+                ),
+                let outputBuffer = device.makeBuffer(
+                    length: batchSeq * projectionDim * MemoryLayout<Float>.stride,
+                    options: .storageModeShared
+                ),
+                let commandBuffer = commandQueue.makeCommandBuffer() else {
+                    throw GenerationError.modelLoadFailed(reason: "Failed to allocate Gemma batched PLE projection buffers")
+                }
+                try gemvKernel.encodeBatchedBF16Weights(
+                    commandBuffer: commandBuffer,
+                    weightBuffer: weightBuffer,
+                    inputBuffer: inputBuffer,
+                    outputBuffer: outputBuffer,
+                    batchSeq: batchSeq,
+                    M: projectionDim,
+                    K: hiddenSize
+                )
+                commandBuffer.commit()
+                await commandBuffer.completed()
+                if let error = commandBuffer.error {
+                    throw error
+                }
+                let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: output.count)
+                output = Array(UnsafeBufferPointer(start: pointer, count: output.count))
+                for index in output.indices {
+                    output[index] *= outputScale
+                }
+            } else {
                 let projected = try await gemvKernel.executeBF16WeightsWithWeightBuffer(
                     weightBuffer: weightBuffer,
-                    x: tokenHidden,
+                    x: hidden,
                     M: projectionDim,
                     K: hiddenSize,
                     commandQueue: commandQueue
                 )
-                let outputStart = tokenIndex * projectionDim
                 for index in 0..<projectionDim {
-                    output[outputStart + index] = projected[index] * outputScale
+                    output[index] = projected[index] * outputScale
                 }
             }
         case .float32:

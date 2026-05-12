@@ -12,6 +12,12 @@ private struct ERGemma4ResidualRMSNormParams {
     var eps: Float
 }
 
+private struct ERGemma4ResidualRMSNormRowsParams {
+    var rows: UInt32
+    var cols: UInt32
+    var eps: Float
+}
+
 private struct ERGemma4EmbeddingParams {
     var rowWidth: UInt32
     var tokenCount: UInt32
@@ -38,6 +44,7 @@ public struct Gemma4DecodeKernels: Sendable {
     private let device: MTLDevice
     private let rmsNormPipeline: MTLComputePipelineState
     private let residualRMSNormPipeline: MTLComputePipelineState
+    private let residualRMSNormRowsPipeline: MTLComputePipelineState
     private let storeF32ToF16Pipeline: MTLComputePipelineState
     private let mulScalarPipeline: MTLComputePipelineState
     private let q6KEmbeddingGatherPipeline: MTLComputePipelineState
@@ -49,6 +56,7 @@ public struct Gemma4DecodeKernels: Sendable {
         let registry = try KernelRegistry(device: device)
         self.rmsNormPipeline = try registry.pipeline(for: "gemma4_rmsnorm_f32")
         self.residualRMSNormPipeline = try registry.pipeline(for: "gemma4_residual_rmsnorm_add_f32")
+        self.residualRMSNormRowsPipeline = try registry.pipeline(for: "gemma4_residual_rmsnorm_add_rows_f32")
         self.storeF32ToF16Pipeline = try registry.pipeline(for: "gemma4_store_f32_to_f16")
         self.mulScalarPipeline = try registry.pipeline(for: "gemma4_mul_scalar_f32")
         self.q6KEmbeddingGatherPipeline = try registry.pipeline(for: "gemma4_gather_token_embedding_q6_k")
@@ -208,6 +216,89 @@ public struct Gemma4DecodeKernels: Sendable {
         encoder.endEncoding()
     }
 
+    public func runResidualRMSNormAddRows(
+        residual: [Float],
+        input: [Float],
+        weight: [Float],
+        rows: Int,
+        cols: Int,
+        eps: Float,
+        commandQueue: MTLCommandQueue
+    ) async throws -> [Float] {
+        precondition(residual.count == rows * cols)
+        precondition(input.count == rows * cols)
+        precondition(weight.count == cols)
+        guard let residualBuffer = device.makeBuffer(
+            bytes: residual,
+            length: residual.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let inputBuffer = device.makeBuffer(
+            bytes: input,
+            length: input.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let weightBuffer = device.makeBuffer(
+            bytes: weight,
+            length: weight.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let outputBuffer = device.makeBuffer(
+            length: input.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw Gemma4DecodeKernelError.encodingFailed
+        }
+
+        try encodeResidualRMSNormAddRows(
+            commandBuffer: commandBuffer,
+            residualBuffer: residualBuffer,
+            inputBuffer: inputBuffer,
+            weightBuffer: weightBuffer,
+            outputBuffer: outputBuffer,
+            rows: rows,
+            cols: cols,
+            eps: eps
+        )
+
+        commandBuffer.commit()
+        await commandBuffer.completed()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: input.count)
+        return Array(UnsafeBufferPointer(start: pointer, count: input.count))
+    }
+
+    public func encodeResidualRMSNormAddRows(
+        commandBuffer: MTLCommandBuffer,
+        residualBuffer: MTLBuffer,
+        inputBuffer: MTLBuffer,
+        weightBuffer: MTLBuffer,
+        outputBuffer: MTLBuffer,
+        rows: Int,
+        cols: Int,
+        eps: Float
+    ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw Gemma4DecodeKernelError.encodingFailed
+        }
+        var params = ERGemma4ResidualRMSNormRowsParams(rows: UInt32(rows), cols: UInt32(cols), eps: eps)
+        encoder.setComputePipelineState(residualRMSNormRowsPipeline)
+        encoder.setBuffer(residualBuffer, offset: 0, index: 0)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 1)
+        encoder.setBuffer(weightBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
+        encoder.setBytes(&params, length: MemoryLayout<ERGemma4ResidualRMSNormRowsParams>.stride, index: 4)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+    }
+
     public func runStoreF32ToF16(values: [Float], outputOffset: Int = 0) async throws -> [Float16] {
         guard let inputBuffer = device.makeBuffer(
             bytes: values,
@@ -249,12 +340,30 @@ public struct Gemma4DecodeKernels: Sendable {
         outputOffset: Int,
         count: Int
     ) throws {
+        try encodeStoreF32ToF16(
+            commandBuffer: commandBuffer,
+            inputBuffer: inputBuffer,
+            inputOffset: 0,
+            outputBuffer: outputBuffer,
+            outputOffset: outputOffset,
+            count: count
+        )
+    }
+
+    public func encodeStoreF32ToF16(
+        commandBuffer: MTLCommandBuffer,
+        inputBuffer: MTLBuffer,
+        inputOffset: Int,
+        outputBuffer: MTLBuffer,
+        outputOffset: Int,
+        count: Int
+    ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw Gemma4DecodeKernelError.encodingFailed
         }
         var countValue = UInt32(count)
         encoder.setComputePipelineState(storeF32ToF16Pipeline)
-        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(inputBuffer, offset: inputOffset, index: 0)
         encoder.setBuffer(outputBuffer, offset: outputOffset, index: 1)
         encoder.setBytes(&countValue, length: MemoryLayout<UInt32>.stride, index: 2)
         encoder.dispatchThreads(

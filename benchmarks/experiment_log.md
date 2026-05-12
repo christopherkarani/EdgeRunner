@@ -997,3 +997,45 @@ The 214 tok/s represents the current code state's genuine performance ceiling. R
 - **Change:** Added buffer-backed `PreludeState`, buffer-native Q6_K token embedding gather, PLE projection, and PLE row/input construction for single-token cache-backed Gemma decode behind `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1`.
 - **Result:** Focused PLE/Gemma tests and coherent-token gates passed. Profile shows PLE token embedding/projection/row gather effectively disappear from measured host-side profile, but median throughput impact was small/noisy and not stable enough to promote as default.
 - **Status:** OPT-IN; default remains the more stable prelude path.
+
+### Gemma Experiment 65: Load-Time Gemma Runtime Options Snapshot — KEPT
+- **Hypothesis:** The current best Gemma runner spends measurable CPU time in `gpu_layer_stack_encode_layers`; repeated `ProcessInfo.processInfo.environment` lookups in per-token/per-layer Q4, Q6, and GPU-runner branch selection are invariant host work that can be hoisted to model load.
+- **Change:** Added `Gemma4RuntimeOptions`, covered it with failing-first tests, and routed the greedy GPU-layer gate, buffer-native prelude gate, Q4 projection selection, Q4 gate/up selection, Q6 LM-head selection, and Q6 top-1 readback through the load-time snapshot.
+- **Result:** Focused options tests passed. Gemma token IDs/text stayed unchanged. Profile showed `gpu_layer_stack_encode_layers` drop from about `262.4ms/26` to `104.9ms/26`, and the short median improved from the prior `29.236 tok/s` best to `39.770 tok/s` median / `40.370 tok/s` best with median TTFT `0.402369s`.
+- **Status:** KEPT
+
+### Gemma Experiment 66: Layer Runtime Metadata Plan — KEPT
+- **Hypothesis:** After hoisting env lookups, the layer encode loop still repeats metadata work for PLE offsets, head dimensions, Q/KV row counts, KV-source mapping, and RoPE constants. A load-time metadata plan can remove that host work without changing math or kernels.
+- **Change:** Added `Gemma4LayerRuntimePlan`, covered it with failing-first tests, computed plans at model load, and routed the default GPU layer-stack encoder through those plans.
+- **Result:** Focused plan/options tests passed. Gemma token IDs/text stayed unchanged. Profile showed `gpu_layer_stack_encode_layers` drop from about `104.9ms/26` to `24.8ms/26`, and the short median improved to `40.790 tok/s` median / `40.884 tok/s` best with median TTFT `0.392397s`.
+- **Status:** KEPT
+
+### Gemma Experiment 67: Layer Resource Prebinding — KEPT
+- **Hypothesis:** The metadata plan removed cheap per-layer switches and offsets, but the token loop still rebuilt projection requests and performed cached MTLBuffer lookups for immutable weights and norms. Prebinding those resources at model load should remove more host encode overhead without changing math, dispatch order, or kernels.
+- **Change:** Added load-time layer/LM-head resource binding for projection requests, raw tensor buffers, norm buffers, PLE post-norm buffers, layer-output scale, and the Q6_K greedy LM head, then routed the default GPU layer-stack attention/FFN/PLE/LM-head path through those resources.
+- **Result:** Focused resource/options tests passed. Gemma token IDs/text stayed unchanged. Profile showed `gpu_layer_stack_encode_layers` drop from `24.8ms/26` to `10.3ms/26`, and the short median improved from `40.790 tok/s` to `42.040 tok/s` median / `42.267 tok/s` best with median TTFT `0.379830s`. Qwen publishable stayed deterministic at `251.1 tok/s` with hash `0afae14a84cf0df8`.
+- **Status:** KEPT
+
+### Gemma Experiment 68: Fused PLE Gate Projection — ROLLED BACK
+- **Hypothesis:** Combining PLE gate Q4_K projection with the `GELU(gate) * ple` operation can remove one dispatch per decoder layer without changing the side-channel math.
+- **Change:** Temporarily added `q4_k_gemv_llama_style_ple_gate_f32`, `GEMVKernel.encodeQ4KWeightsLlamaStylePLEGate(...)`, parity coverage, and an exact-shape microbench row.
+- **Result:** Parity passed against the existing Q4_K projection plus `PLEGateKernel`, but the exact PLE gate microbench regressed from `0.164 ms/op` to `0.173 ms/op`.
+- **Status:** ROLLED BACK
+
+### Gemma Experiment 69: No-Read Serial Prefill Bridge — KEPT
+- **Hypothesis:** Non-final tokens in serial full prefill only need to populate KV cache; reading their final hidden vector back to CPU is wasted synchronization.
+- **Change:** Added a prefill-only single-token helper and a `readOutput` switch on the GPU cache layer stack so non-final full-prefill tokens skip `scratch.readHidden()`.
+- **Result:** Focused tests passed. Short diagnostic output stayed coherent. The short median improved slightly from `42.040 tok/s` to `42.182 tok/s`, with best `42.500 tok/s` and median TTFT `0.375818s`. Long prompt still stalls in prompt processing, so this is not the publishable long-prompt solution.
+- **Status:** KEPT
+
+### Gemma Experiment 70: Batched PLE Projection Prelude — KEPT
+- **Hypothesis:** The long publishable prompt is blocked partly by rebuilding Gemma PLE prelude one token at a time. Batching token embedding, PLE row gather, PLE input build, and especially BF16 `perLayerModelProjection` should reduce prompt-processing time while preserving exact token outputs.
+- **Change:** Added a tested `Gemma4PrefillChunkPlan`, token-aware PLE offsets, batched hidden-slice copy, `gemv_bf16_f32_batched`, and routed non-final prompt tokens through batched PLE chunks before the existing serial prefill-only decoder passes.
+- **Result:** Focused debug and release shards passed. Short diagnostic prompt processing improved from about `10.6s` to `1.966178s` and kept the first two tokens as `Fast local`. The 1037-token long prompt now completes, but prompt processing still takes `251.973358s`; short median measured `41.967 tok/s`, essentially flat/slightly below the previous `42.182 tok/s`.
+- **Status:** KEPT as exact prefill-progress infrastructure; not publishable. Remaining blocker is layer-major chunked decoder prefill.
+
+### Gemma Experiment 71: Batched Q4_K Projection Foundation — PARTIAL
+- **Hypothesis:** A layer-major chunked prefill runner needs Q4_K projections over a batch of prompt hidden states. Adding a generic batched Q4_K GEMV primitive is the smallest correctness-first unlock before rewiring Gemma layer execution.
+- **Change:** Added `q4_k_gemv_f32_batched`, Swift wrappers for batched Q4_K execution/encoding, and a parity test against the existing single-token GPU path plus CPU Q4_K reference. Also added scratch chunk hidden buffers, release-passing allocation/copy coverage, source-offset support for the F32-to-F16 KV-store wrapper, chunked KV row-write regression coverage, and row-wise residual RMSNorm add coverage for prompt chunks.
+- **Result:** Batched Q4_K parity passed in debug and release. F32-to-F16 source-offset store and chunked KV row writes passed in debug and release. Row-wise residual RMSNorm add passed against per-row CPU reference in debug and release. A conservative opt-in layer-major runtime probe using existing single-token layer math crashed in release with signal 5 during short prompt processing, so the runtime flag and routing were rolled back.
+- **Status:** KEPT only the proven primitive/foundation; runtime layer-major prefill remains unimplemented.

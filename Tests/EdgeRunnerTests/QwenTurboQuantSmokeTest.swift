@@ -26,7 +26,7 @@ struct QwenTurboQuantSmokeTest {
             from: URL(fileURLWithPath: Self.modelPath),
             configuration: ModelConfiguration(
                 contextWindowSize: 8192,
-                kvCacheCompression: .turboQuantAggressive
+                kvCacheCompression: .turboquantV2
             )
         )
 

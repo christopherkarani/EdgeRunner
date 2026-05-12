@@ -21,12 +21,7 @@ struct TurboQuantQualityHarnessTest {
         let promptLength = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_QUALITY_PROMPT_LEN"] ?? "4096") ?? 4096
         let decodeCount = Int(ProcessInfo.processInfo.environment["EDGERUNNER_TURBOQUANT_QUALITY_DECODE_TOKENS"] ?? "8") ?? 8
         let presetName = ProcessInfo.processInfo.environment[Self.presetEnvKey] ?? "aggressive"
-        let turboCompression: KVCacheCompression
-        if presetName == "balanced" {
-            turboCompression = .turboQuantBalanced
-        } else if presetName == "aggressive" {
-            turboCompression = .turboQuantAggressive
-        } else {
+        guard presetName == "balanced" || presetName == "aggressive" else {
             Issue.record("Unknown TurboQuant quality preset: \(presetName)")
             return
         }
@@ -43,7 +38,7 @@ struct TurboQuantQualityHarnessTest {
             modelURL: modelURL,
             prompt: prompt,
             decodeCount: decodeCount,
-            compression: turboCompression
+            compression: .turboquantV2
         )
 
         let report = Self.compare(lhs: fp16Trace, rhs: turboTrace)

@@ -12,6 +12,12 @@ struct ERGemma4ResidualRMSNormParams {
     float eps;
 };
 
+struct ERGemma4ResidualRMSNormRowsParams {
+    uint rows;
+    uint cols;
+    float eps;
+};
+
 struct ERGemma4EmbeddingParams {
     uint rowWidth;
     uint tokenCount;
@@ -123,6 +129,44 @@ kernel void gemma4_residual_rmsnorm_add_f32(
     const float scale = rsqrt(partial[0] / float(params.count) + params.eps);
     for (uint index = tid; index < params.count; index += threadCount) {
         output[index] = residual[index] + input[index] * scale * weight[index];
+    }
+}
+
+kernel void gemma4_residual_rmsnorm_add_rows_f32(
+    device const float *residual [[buffer(0)]],
+    device const float *input [[buffer(1)]],
+    device const float *weight [[buffer(2)]],
+    device float *output [[buffer(3)]],
+    constant ERGemma4ResidualRMSNormRowsParams &params [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (row >= params.rows) {
+        return;
+    }
+
+    constexpr uint threadCount = 256;
+    threadgroup float partial[threadCount];
+    const uint offset = row * params.cols;
+
+    float sum = 0.0f;
+    for (uint col = tid; col < params.cols; col += threadCount) {
+        const float value = input[offset + col];
+        sum += value * value;
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = threadCount / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            partial[tid] += partial[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float scale = rsqrt(partial[0] / float(params.cols) + params.eps);
+    for (uint col = tid; col < params.cols; col += threadCount) {
+        output[offset + col] = residual[offset + col] + input[offset + col] * scale * weight[col];
     }
 }
 

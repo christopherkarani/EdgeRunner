@@ -132,3 +132,45 @@ kernel void gemv_bf16_f32(
         }
     }
 }
+
+kernel void gemv_bf16_f32_batched(
+    device const ushort*     A       [[buffer(0)]],
+    device const float*      x       [[buffer(1)]],
+    device float*            y       [[buffer(2)]],
+    constant ERGEMVParams&   params  [[buffer(3)]],
+    uint3 group_id     [[threadgroup_position_in_grid]],
+    uint3 local_pos    [[thread_position_in_threadgroup]],
+    uint  simd_lane    [[thread_index_in_simdgroup]],
+    uint  simd_group   [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = group_id.x;
+    uint batch = group_id.y;
+    uint local_id = local_pos.x;
+    if (row >= params.M) return;
+
+    float partial = 0.0f;
+    device const ushort* a_row = A + row * params.lda;
+    device const float* x_row = x + batch * params.K;
+
+    for (uint j = local_id; j < params.K; j += GEMV_THREADS_PER_ROW) {
+        float a = as_type<float>(uint(a_row[j]) << 16);
+        partial += a * x_row[j];
+    }
+
+    partial = simd_sum(partial);
+
+    threadgroup float shared_sums[32];
+    if (simd_lane == 0) {
+        shared_sums[simd_group] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        uint num_simdgroups = (GEMV_THREADS_PER_ROW + 31) / 32;
+        float val = (simd_lane < num_simdgroups) ? shared_sums[simd_lane] : 0.0f;
+        val = simd_sum(val);
+        if (simd_lane == 0) {
+            y[batch * params.M + row] = val;
+        }
+    }
+}

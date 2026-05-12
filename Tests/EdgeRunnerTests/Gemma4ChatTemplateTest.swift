@@ -12,7 +12,6 @@ struct Gemma4ChatTemplateTests {
 
         #expect(rendered == """
         <|turn>system
-        <|think|>
         You are helpful.<turn|>
         <|turn>user
         Hi<turn|>
@@ -32,21 +31,19 @@ struct Gemma4ChatTemplateTests {
         #expect(!rendered.contains("assistant"))
     }
 
-    @Test("Injects thinking system block before user-only prompts")
-    func injectsThinkingSystemBlock() {
+    @Test("Does not inject thinking block before user-only prompts")
+    func doesNotInjectThinkingSystemBlock() {
         let rendered = Gemma4ChatTemplate.render(messages: [
             .init(role: .user, content: "Write one short sentence.")
         ], addGenerationPrompt: true)
 
         #expect(rendered == """
-        <|turn>system
-        <|think|>
-        <turn|>
         <|turn>user
         Write one short sentence.<turn|>
         <|turn>model
 
         """)
+        #expect(!rendered.contains("<|think|>"))
     }
 
     @Test("Throws on tool messages (unsupported in v1)")

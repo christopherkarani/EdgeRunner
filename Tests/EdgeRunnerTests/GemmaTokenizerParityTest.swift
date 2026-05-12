@@ -141,11 +141,12 @@ struct GemmaTokenizerParityTest {
             addGenerationPrompt: true
         )
         let expected = [
-            2, 105, 9731, 107, 98, 107, 106, 107, 105, 2364, 107, 6974,
+            2, 105, 2364, 107, 6974,
             886, 2822, 13315, 1003, 4592, 2263, 34711, 236761, 106, 107,
             105, 4368, 107,
         ]
 
         #expect(tokenizer.encode(prompt, addBOS: tokenizer.shouldAddBOS) == expected)
+        #expect(!prompt.contains("<|think|>"))
     }
 }

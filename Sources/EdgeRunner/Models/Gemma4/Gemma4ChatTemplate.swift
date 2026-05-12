@@ -69,12 +69,12 @@ public enum Gemma4ChatTemplate: Sendable {
         var output = ""
         var loopMessages = messages
 
-        output.append("<|turn>system\n<|think|>\n")
         if let first = messages.first, first.role == .system {
+            output.append("<|turn>system\n")
             output.append(first.content.trimmingCharacters(in: .whitespacesAndNewlines))
             loopMessages.removeFirst()
+            output.append("<turn|>\n")
         }
-        output.append("<turn|>\n")
 
         for message in loopMessages {
             let role = try renderedRole(for: message.role)

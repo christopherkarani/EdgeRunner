@@ -4,8 +4,10 @@
 
 # Agent/tool caches
 .claude/
+.qwen/
 .sisyphus/
 .ruff_cache/
+__pycache__/
 
 # Marketing content
 marketing/
@@ -27,6 +29,11 @@ benchmarks/framework_comparison.json
 benchmarks/long_prompt_framework_comparison.json
 benchmarks/long_story_report.json
 benchmarks/logs/
+benchmarks/__pycache__/
+benchmarks/autoresearch_runs/
+
+# Local model artifacts
+/models/
 
 # macOS
 .DS_Store

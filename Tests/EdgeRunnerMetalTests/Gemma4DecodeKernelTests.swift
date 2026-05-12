@@ -25,6 +25,30 @@ private func cpuGemmaRMSNorm(
     return output
 }
 
+private func cpuGemmaResidualRMSNormAddRows(
+    residual: [Float],
+    input: [Float],
+    weight: [Float],
+    rows: Int,
+    cols: Int,
+    eps: Float
+) -> [Float] {
+    var output = [Float](repeating: 0, count: input.count)
+    for row in 0..<rows {
+        let offset = row * cols
+        var meanSquare: Float = 0
+        for col in 0..<cols {
+            let value = input[offset + col]
+            meanSquare += value * value
+        }
+        let scale = 1 / sqrt(meanSquare / Float(cols) + eps)
+        for col in 0..<cols {
+            output[offset + col] = residual[offset + col] + input[offset + col] * scale * weight[col]
+        }
+    }
+    return output
+}
+
 @Suite("Gemma4DecodeKernels")
 struct Gemma4DecodeKernelTests {
     let device: MTLDevice
@@ -146,6 +170,39 @@ struct Gemma4DecodeKernelTests {
         }
     }
 
+    @Test("Residual RMSNorm add rows matches per-row CPU")
+    func residualRMSNormAddRowsMatchesPerRowCPU() async throws {
+        let rows = 3
+        let cols = 257
+        let count = rows * cols
+        let residual = (0..<count).map { Float($0 % 23 - 11) / 31.0 }
+        let input = (0..<count).map { Float($0 % 29 - 14) / 37.0 }
+        let weight = (0..<cols).map { Float($0 % 17 - 8) / 19.0 }
+        let expected = cpuGemmaResidualRMSNormAddRows(
+            residual: residual,
+            input: input,
+            weight: weight,
+            rows: rows,
+            cols: cols,
+            eps: 1e-6
+        )
+
+        let kernels = try Gemma4DecodeKernels(device: device)
+        let actual = try await kernels.runResidualRMSNormAddRows(
+            residual: residual,
+            input: input,
+            weight: weight,
+            rows: rows,
+            cols: cols,
+            eps: 1e-6,
+            commandQueue: commandQueue
+        )
+
+        for index in actual.indices {
+            #expect(abs(actual[index] - expected[index]) < 1e-5)
+        }
+    }
+
     @Test("F32 to F16 store supports output byte offsets")
     func storeF32ToF16SupportsOutputOffset() async throws {
         let values: [Float] = [-2.5, -0.25, 0, 0.5, 3.75]
@@ -156,6 +213,91 @@ struct Gemma4DecodeKernelTests {
         )
 
         #expect(actual == values.map(Float16.init))
+    }
+
+    @Test("F32 to F16 store supports input and output byte offsets")
+    func storeF32ToF16SupportsInputAndOutputOffsets() async throws {
+        guard let inputBuffer = device.makeBuffer(
+            bytes: [Float](arrayLiteral: 100, 200, -1.5, 0.25, 3.5),
+            length: 5 * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let outputBuffer = device.makeBuffer(
+            length: 6 * MemoryLayout<Float16>.stride,
+            options: .storageModeShared
+        ),
+        let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw TestError.noMetal
+        }
+
+        let kernels = try Gemma4DecodeKernels(device: device)
+        try kernels.encodeStoreF32ToF16(
+            commandBuffer: commandBuffer,
+            inputBuffer: inputBuffer,
+            inputOffset: 2 * MemoryLayout<Float>.stride,
+            outputBuffer: outputBuffer,
+            outputOffset: 1 * MemoryLayout<Float16>.stride,
+            count: 3
+        )
+
+        commandBuffer.commit()
+        await commandBuffer.completed()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let pointer = outputBuffer.contents().bindMemory(to: Float16.self, capacity: 6)
+        let actual = Array(UnsafeBufferPointer(start: pointer.advanced(by: 1), count: 3))
+        #expect(actual == [-1.5, 0.25, 3.5].map(Float16.init))
+    }
+
+    @Test("F32 to F16 store supports chunked KV row writes")
+    func storeF32ToF16SupportsChunkedKVRowWrites() async throws {
+        let rowWidth = 4
+        let sourceRows: [Float] = [
+            10, 11, 12, 13,
+            20, 21, 22, 23,
+            30, 31, 32, 33
+        ]
+        guard let inputBuffer = device.makeBuffer(
+            bytes: sourceRows,
+            length: sourceRows.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ),
+        let kvCacheBuffer = device.makeBuffer(
+            length: 8 * rowWidth * MemoryLayout<Float16>.stride,
+            options: .storageModeShared
+        ),
+        let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw TestError.noMetal
+        }
+
+        let kernels = try Gemma4DecodeKernels(device: device)
+        for (sourceRow, cacheRow) in zip([0, 1, 2], [1, 3, 6]) {
+            try kernels.encodeStoreF32ToF16(
+                commandBuffer: commandBuffer,
+                inputBuffer: inputBuffer,
+                inputOffset: sourceRow * rowWidth * MemoryLayout<Float>.stride,
+                outputBuffer: kvCacheBuffer,
+                outputOffset: cacheRow * rowWidth * MemoryLayout<Float16>.stride,
+                count: rowWidth
+            )
+        }
+
+        commandBuffer.commit()
+        await commandBuffer.completed()
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let pointer = kvCacheBuffer.contents().bindMemory(to: Float16.self, capacity: 8 * rowWidth)
+        for (sourceRow, cacheRow) in zip([0, 1, 2], [1, 3, 6]) {
+            let actual = Array(
+                UnsafeBufferPointer(start: pointer.advanced(by: cacheRow * rowWidth), count: rowWidth)
+            )
+            let expected = sourceRows[(sourceRow * rowWidth)..<((sourceRow + 1) * rowWidth)].map(Float16.init)
+            #expect(actual == expected)
+        }
     }
 
     @Test("GeGLU kernel remains finite for large gates")
@@ -542,4 +684,5 @@ struct Gemma4DecodeKernelTests {
         let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: q.count)
         return Array(UnsafeBufferPointer(start: pointer, count: q.count))
     }
+
 }

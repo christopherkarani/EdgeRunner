@@ -1,4 +1,2546 @@
+# Active TurboQuant Long-Context Performance Plan
+
+- [ ] Establish the current TurboQuant long-context baseline at 4k, 8k, and 16k prompt lengths
+  - [x] Ensure `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` resolves to the pinned 639,446,688 byte model
+  - [x] Update the benchmark output so each run reports decode tok/s, per-token p50/p90/p99 latency, and generated token hash
+  - [ ] Run TurboQuant-only baselines sequentially at 4096, 8192, and 16384 prompt tokens
+- [ ] Apply the lowest-risk decode-kernel optimization first
+  - [ ] Replace lane-0 serial randomized Hadamard calls in TurboQuant single-token decode kernels with existing parallel helpers
+  - [ ] Keep the 16-thread dispatch shape unchanged for this phase
+  - [ ] Build and run focused TurboQuant correctness tests
+- [ ] Re-run the 4k/8k/16k sweep after the kernel change
+  - [ ] Compare before/after decode tok/s and latency percentiles
+  - [ ] Treat token-hash drift or quality-test failure as a rollback condition
+  - [ ] Commit only if the long-context sweep shows a real win without correctness regression
+
+### Active TurboQuant Spec
+
+- User correction:
+  - TurboQuant is only useful at long context, so optimization proof must be based on 4k, 8k, and 16k context measurements rather than the 128-token publishable lane alone.
+- Hypothesis:
+  - The current TurboQuant decode path wastes work in the per-head attention kernels by running randomized Hadamard transforms serially on lane 0 even though parallel threadgroup helpers already exist in `TurboQuant.metal`.
+  - A no-layout-change parallel-Hadamard pass should reduce per-token decode latency at long context without changing quantization format, cache layout, or dispatch width.
+- Constraints:
+  - Preserve the existing dirty Gemma work and unrelated task notes.
+  - Use the pinned Qwen3 0.6B Q8_0 model as the benchmark artifact.
+  - Benchmark variants sequentially; do not run long-context Metal benchmarks in parallel.
+  - Do not promote wider 32-thread decode variants until the current baseline and the low-risk Hadamard pass are measured.
+
+### Active TurboQuant Review
+
+- Benchmark infrastructure:
+  - Created `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` as a hard link to the pinned repo-local model. `ls -l` reports `639446688` bytes.
+  - `Tests/EdgeRunnerTests/TurboQuantLongContextBenchmark.swift` now prints p50/p90/p99 decode latency and generated-token hash for FP16 and TurboQuant runs.
+  - Focused instrumentation test passed:
+    - `swift test --filter "TurboQuantLongContextBenchmark/benchmarkSummaryComputesPercentilesAndStableTokenHash"`
+- Runtime path correction:
+  - The legacy `.turboQuantAggressive` smoke and benchmark path crashed at `LlamaLanguageModel.swift:2527` because it allocated compressed V storage while the non-v2 prefill path force-unwrapped dense `layerVCache`.
+  - Retargeted the long-context benchmark, smoke, and quality harness to `.turboquantV2`, which is the runtime path that initializes `TurboQuantKernel` and dispatches the TurboQuant attention kernels.
+  - With `EDGERUNNER_TURBOQUANT_KEY_PRESET=aggressive EDGERUNNER_TURBOQUANT_VALUE_PRESET=aggressive`, the smoke path runs but the old expected sequence is stale: observed `[16, 220, 220, 220]` versus old `[16, 11, 220, 508]`.
+- Baseline sweep:
+  - 4k command:
+    - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_KEY_PRESET=aggressive EDGERUNNER_TURBOQUANT_VALUE_PRESET=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=4096 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=32 swift test -c release --filter "TurboQuantLongContextBenchmark/compareTurboQuantAgainstFP16"`
+  - 4k result:
+    - decode `4.08 tok/s`, TTFT `103588.13 ms`, p50 `245.07 ms`, p90 `246.74 ms`, p99 `249.68 ms`, token hash `2016b678272bfc9d`.
+  - 8k command:
+    - `EDGERUNNER_RUN_TURBOQUANT_BENCHMARK=1 EDGERUNNER_TURBOQUANT_BENCHMARK_MODE=aggressive EDGERUNNER_TURBOQUANT_KEY_PRESET=aggressive EDGERUNNER_TURBOQUANT_VALUE_PRESET=aggressive EDGERUNNER_TURBOQUANT_PROMPT_LEN=8192 EDGERUNNER_TURBOQUANT_DECODE_TOKENS=32 swift test -c release --filter "TurboQuantLongContextBenchmark/compareTurboQuantAgainstFP16"`
+  - 8k result:
+    - decode `2.67 tok/s`, TTFT `423597.02 ms`, p50 `374.29 ms`, p90 `377.57 ms`, p99 `379.54 ms`, token hash `ca4795976067ee06`.
+
 # Current Mobile GGUF Quant Support Plan
+
+## Active Plan: Same-Model llama.cpp Reference Check
+
+- [x] Establish a same-model external reference before the next architecture change
+  - [x] Verify local llama.cpp checkout and `llama-bench` availability
+  - [x] Run one sequential same-model `llama-bench` with prompt/decode split
+  - [x] Compare llama.cpp decode throughput against the current EdgeRunner best stack
+  - [x] Use the gap to choose whether the next lever is command-buffer architecture, projection kernels, or benchmark artifact hardening
+
+### Active Spec
+
+- Hypothesis:
+  - Several local kernel probes are no-go and current EdgeRunner Gemma is still far below the `>=150 tok/s` target. A same-model llama.cpp reference on the same M3 Max will show whether the target is within the local hardware/model envelope and whether EdgeRunner is losing mostly to architecture/command-buffer overhead rather than individual Q4_K row math.
+- Constraints:
+  - No EdgeRunner code changes for this check.
+  - Use the same model path: `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`.
+  - Do not run any Gemma benchmark in parallel.
+  - Record command/output here before selecting the next implementation probe.
+
+### Active Review
+
+- `llama-bench` found at `/tmp/edgerunner-llama-src/build-metal/bin/llama-bench`.
+- `llama-bench --help` initialized Metal on Apple M3 Max and reports Metal 4 family available, tensor API disabled for pre-M5/pre-A19, simdgroup reduction/matrix multiply available, unified memory and bfloat available.
+- Same-model reference command:
+  - `/tmp/edgerunner-llama-src/build-metal/bin/llama-bench -m /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf -p 128 -n 128 -r 3 -ngl 99 -o json`
+- Same-model reference result:
+  - prompt processing: `826.96 tok/s` average for 128 prompt tokens.
+  - decode: `60.75 tok/s` average for 128 generated tokens.
+- Flash-attention reference command:
+  - `/tmp/edgerunner-llama-src/build-metal/bin/llama-bench -m /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf -p 128 -n 128 -r 3 -ngl 99 -fa 1 -o json`
+- Flash-attention reference result:
+  - prompt processing: `850.10 tok/s`.
+  - decode: `62.24 tok/s`.
+- Interpretation:
+  - The `>=150 tok/s` target is above this local llama.cpp same-model/same-hardware reference. The next EdgeRunner work should focus on the architecture gap to llama.cpp first, especially command-buffer and layer-runner structure, not isolated Q4_K row math.
+
+## Active Plan: Gemma Decode Command-Buffer Gap Audit
+
+- [ ] Find the smallest architectural gap between EdgeRunner Gemma decode and llama.cpp's same-model reference
+  - [x] Inspect current Gemma decode command-buffer lifecycle and per-layer encoder sequence
+  - [x] Count or instrument command buffer commits per generated token without changing benchmark semantics
+  - [x] Compare current split-profile buckets with command-buffer synchronization points
+  - [x] Pick one TDD-gated architectural probe if the audit finds a concrete redundant commit/wait
+  - [x] Add failing-first test for encoding the hidden-buffer copy into a caller-owned command buffer
+  - [x] Implement the minimal scratch helper and use it in the GPU layer-stack paths
+  - [x] Run focused tests and buffer-native Gemma smoke/median before deciding keep/rollback
+
+### Active Spec
+
+- Hypothesis:
+  - EdgeRunner is now roughly half of llama.cpp generation throughput on the same Gemma 4 E4B Q4_K_M model. Since direct Q4_K row-math probes are repeatedly no-go, the remaining gap is likely command-buffer structure, CPU/GPU synchronization, or whole-layer fusion rather than a single projection kernel.
+- Constraints:
+  - Audit first; no implementation until a concrete redundant synchronization or dispatch boundary is proven.
+  - Do not change benchmark semantics.
+  - Preserve all existing dirty source changes.
+
+### Active Review
+
+- Audit finding:
+  - Default GPU greedy decode uses one command buffer for the layer stack and LM head, but `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` produced `prelude command buffer -> separate hidden blit command buffer -> main layer/LM-head command buffer`.
+  - The separate hidden blit was a concrete redundant commit/wait in the buffer-native path that previously missed the best stack by a small margin (`28.905 tok/s` vs `29.236 tok/s` median).
+- Red step:
+  - `swift test --filter 'Gemma4ScratchTests/encodesHiddenCopyIntoCallerCommandBuffer'` failed at compile with missing `Gemma4Scratch.encodeCopyHidden`, proving the test covered the intended API.
+- Implemented:
+  - `Gemma4Scratch.encodeCopyHidden(from:byteCount:commandBuffer:)`.
+  - `runDecoderLayerStackWithGPUCache(...)` and `runDecoderLayerStackWithGPUCacheGreedy(...)` now encode the buffer-native hidden copy into the caller-owned layer command buffer instead of committing a separate blit command buffer.
+- Focused tests passed:
+  - `swift test --filter 'Gemma4ScratchTests/encodesHiddenCopyIntoCallerCommandBuffer|Gemma4ScratchTests/copiesAndReadsActiveHiddenBuffer'`.
+- Gemma smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Smoke result:
+  - generated token IDs and coherent text stayed unchanged.
+  - decode: `28.546 tok/s`.
+- Decision:
+  - ROLLED BACK the diagnostic scratch helper/test and GPU-stack call-site changes. Folding the hidden blit into the layer command buffer was correct but did not beat the prior buffer-native smoke or current best median, so it did not earn a median run.
+
+## Active Plan: Publishable Artifact Timing Separation Tightening
+
+- [x] Make the publishable benchmark harness prove prompt-processing timing separately from decode timing
+  - [x] Inspect existing artifact and harness timing fields
+  - [x] Add a failing-first fake `LogitsModel` test that distinguishes explicit first-logits prompt processing from `nextToken`
+  - [x] Update the publishable generation helper to use explicit first logits for `LogitsModel`s
+  - [x] Re-run focused benchmark metadata/coherence tests
+
+### Active Spec
+
+- Hypothesis:
+  - The existing artifact already records TTFT, prompt tok/s, decode tok/s, generated text, model hash, git state, machine, OS, Swift, command, env, token counts, coherence, and limitations. However, `promptProcessingSeconds` was copied from TTFT, which is too weak for the requirement to separate prompt processing from decode timing.
+- Constraints:
+  - Keep greedy output semantics unchanged: first token must come from the same logits that `nextToken` would sample for pure greedy generation.
+  - Do not change prompt text, max generated tokens, model path, quantization, or coherence gates.
+  - Do not rerun the long publishable benchmark until the harness unit coverage is green.
+
+### Active Review
+
+- Existing artifact inspected:
+  - `benchmarks/gemma4_publishable_benchmark.json` includes short/long generated samples, SHA256 `90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f`, command/env/model/git/machine/OS/Swift metadata, coherence verdicts, token IDs/counts, median decode, TTFT, prompt throughput, and limitations.
+  - It is still below target: short median `27.3369 tok/s`, long decode `1.5944 tok/s`.
+  - It is stale for the tightened prompt-processing semantics and should be regenerated only when a candidate stack is worth a full publishable run.
+- Red step:
+  - Strengthened `generationSeparatesPromptProcessingFromDecodeForLogitsModels` failed with generated IDs `[42, 2, 3]` because the first token came from `nextToken`, not the explicit first logits pass.
+- Implemented:
+  - `runGeneration(model:prompt:label:maxTokens:)` now uses `logits(for:)` for the first token when the model conforms to `LogitsModel`, records that interval as `promptProcessingSeconds`, and measures decode throughput over subsequent tokens.
+- Focused tests passed:
+  - `swift test --filter 'Gemma4DownloadedBenchmark/generationSeparatesPromptProcessingFromDecodeForLogitsModels|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`.
+
+## Active Plan: Current Best-Stack Aggregate Profile
+
+- [x] Re-run the current best Gemma short benchmark with aggregate profiling
+  - [x] Use the current best flags only, without diagnostic buffer-native or split-profile flags
+  - [x] Record dominant wall, wait, GPU, encode, and PLE buckets
+  - [x] Verify whether raw tensor and float MTL buffers are cached after warmup
+  - [x] Choose the next bounded TDD probe from the measured non-cached bottlenecks
+  - [x] Add failing-first coverage for load-time Gemma runtime option snapshots
+  - [x] Replace hot-path Gemma Q4/Q6/GPU-layer environment lookups with the snapshot
+  - [x] Re-run focused tests, Gemma smoke/profile, and Gemma median
+
+### Active Spec
+
+- Hypothesis:
+  - With Q4_K row-math probes repeatedly losing, the remaining EdgeRunner gap to same-model llama.cpp is more likely from whole-token orchestration: layer-stack GPU time, Swift encode overhead, and PLE prelude boundaries.
+- Constraints:
+  - No kernel or benchmark-semantic changes from this profile alone.
+  - Do not repeat the rolled-back Q4_K ext-style, fused norm, buffer-native hidden-blit, GQA no-wrap, or fused FFN-down probes.
+  - Preserve existing dirty source/test work.
+
+### Active Review
+
+- Profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - Generated text stayed coherent and unchanged from the current stack.
+  - TTFT: `1.195602s`.
+  - Decode: `28.457 tok/s`.
+- Dominant profile rows:
+  - `tokens=1`: `gpu_layer_stack=835.1ms/19x/28.8%`, `gpu_layer_stack_wait=641.6ms/19x/22.2%`, `gpu_layer_stack_gpu_time=401.5ms/19x/13.9%`, `gpu_layer_stack_kernel_time=234.2ms/19x/8.1%`, `ple_row_gather=198.8ms/16x/6.9%`, `gpu_layer_stack_encode_layers=193.0ms/19x/6.7%`, `gpu_layer_encode_total=193.0ms/798x/6.7%`, `ple_token_embedding=143.4ms/16x/5.0%`.
+  - `tokens=8`: `gpu_layer_stack=1073.2ms/26x/27.9%`, `gpu_layer_stack_wait=809.2ms/26x/21.0%`, `gpu_layer_stack_gpu_time=564.9ms/26x/14.7%`, `token_total=281.0ms/8x/7.3%`, `gpu_layer_stack_encode_layers=262.4ms/26x/6.8%`, `gpu_layer_encode_total=262.3ms/1092x/6.8%`, `gpu_layer_stack_kernel_time=234.6ms/26x/6.1%`, `ple_row_gather=199.8ms/21x/5.2%`, `ple_token_embedding=144.4ms/21x/3.7%`.
+- Cache check:
+  - `RuntimeCache.rawTensorBuffer(...)` caches `bytesNoCopy` MTL buffers by tensor name, byte offset, required byte count, and backing buffer length.
+  - `RuntimeCache.floatBuffer(...)` caches norm/unit buffers by tensor key.
+  - Therefore the `~10ms/token` `gpu_layer_stack_encode_layers` bucket is not an obvious repeated MTLBuffer allocation leak; it is mostly Swift-side per-layer encode orchestration and compute-encoder setup.
+- Current interpretation:
+  - Approximate per-token layer-stack GPU time is `564.9ms / 26 ~= 21.7ms/token`.
+  - Approximate per-token layer-stack encode time is `262.4ms / 26 ~= 10.1ms/token`.
+  - PLE token embedding plus PLE row gather remain visible pre-layer costs, but the existing buffer-native PLE path previously trailed the best stack and needs a more specific proof before being revisited.
+- Red step:
+  - `swift test --filter 'Gemma4RuntimeOptionsTests'` failed at compile with missing `Gemma4RuntimeOptions`, proving the test covered the intended load-time option snapshot API.
+- Implemented:
+  - Added `Gemma4RuntimeOptions` to snapshot hot-path Gemma flags once at model load.
+  - Replaced repeated `ProcessInfo.processInfo.environment[...]` reads in the greedy GPU-layer runner, buffer-native prelude gate, Q4 projection selection, Q4 gate/up selection, Q6 LM-head selection, and Q6 top-1 readback path.
+- Focused tests passed:
+  - `swift test --filter 'Gemma4RuntimeOptionsTests'`.
+- Gemma smoke/profile:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - Same generated token IDs/text stayed coherent.
+  - Decode: `38.828 tok/s`.
+  - `gpu_layer_stack_encode_layers` dropped from `262.4ms/26 ~= 10.1ms/token` to `104.9ms/26 ~= 4.0ms/token`.
+- Gemma median:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `39.770 tok/s`, best `40.370 tok/s`, min `38.154 tok/s`, median TTFT `0.402369s`.
+- Qwen regression gate:
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'` passed.
+  - Qwen median decode: `241.5 tok/s`.
+  - Qwen token hash: `0afae14a84cf0df8`.
+- Diff hygiene:
+  - `git diff --check` passed.
+- Decision:
+  - KEPT. This is a host/orchestration optimization with identical generated tokens and a clear median improvement over the prior best short median.
+- Next candidate from subagent audit:
+  - Build an immutable per-layer runtime plan that pre-resolves raw weight buffers, norm buffers, dimensions, KV source, RoPE constants, and PLE offsets. This extends the same invariant-hoisting strategy, but should be a separate TDD probe because it touches more layer-runner surface.
+
+## Active Plan: Gemma Layer Runtime Metadata Plan
+
+- [x] Hoist cheap per-layer decode invariants out of the token loop
+  - [x] Add failing-first tests for a `Gemma4LayerRuntimePlan`
+  - [x] Precompute PLE offsets, head dims, projection rows, KV source, RoPE theta, and rotary factor
+  - [x] Wire the default GPU layer-stack path to consume plans
+  - [x] Run focused tests, profiled Gemma smoke, and Gemma median
+
+### Active Spec
+
+- Hypothesis:
+  - After load-time runtime options cut environment lookup overhead, `gpu_layer_stack_encode_layers` still includes repeated metadata work: PLE byte-offset checks, layer head-dim switches, row calculations, KV-source lookups, and RoPE factor/theta lookups. Precomputing those values should reduce host encode time without touching math or kernel choice.
+- Constraints:
+  - Do not prebind MTL weight/norm buffers in this pass; keep this as a small metadata-only plan.
+  - Preserve generated token IDs exactly.
+  - Keep diagnostic split-profile compatibility.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'Gemma4LayerRuntimePlanTests'` failed at compile with missing `Gemma4LayerRuntimePlan`.
+- Implemented:
+  - Added `Gemma4LayerRuntimePlan` with `makePlans(config:globalRotaryFactor:)`.
+  - Added model-load plan construction, including global-layer rotary factor derived once from `ropeFreqs` when present.
+  - Routed default `runDecoderLayerStackWithGPUCache(...)` and `runDecoderLayerStackWithGPUCacheGreedy(...)` loops through the precomputed plan.
+- Focused tests passed:
+  - `swift test --filter 'Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests'`.
+- Gemma profiled smoke:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - Same generated token IDs/text stayed coherent.
+  - Decode: `39.293 tok/s`.
+  - `gpu_layer_stack_encode_layers` dropped from `104.9ms/26 ~= 4.0ms/token` to `24.8ms/26 ~= 1.0ms/token`.
+- Gemma median:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `40.790 tok/s`, best `40.884 tok/s`, min `40.222 tok/s`, median TTFT `0.392397s`.
+- Decision:
+  - KEPT. It is a small, math-preserving host-path improvement with identical generated output and a real median improvement over the prior `39.770 tok/s` best.
+- Qwen regression gate:
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'` passed after the kept layer metadata plan.
+  - Qwen median decode: `242.2 tok/s`.
+  - Qwen token hash: `0afae14a84cf0df8`.
+- Follow-up check:
+  - Re-tested `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` under the new metadata-plan runner.
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `40.345 tok/s`, best `40.488 tok/s`, min `40.034 tok/s`, median TTFT `0.396826s`.
+  - Decision: default remains faster; buffer-native PLE prelude stays opt-in.
+
+## Active Plan: Current Best-Stack Split-Phase Attribution
+
+- [ ] Refresh bottleneck attribution after the runtime-options and layer-plan wins
+  - [x] Run one sequential split-phase profile under the current best flags
+  - [x] Run the existing K-quant shape microbenchmark under the current code
+  - [x] Identify the largest current phase bucket by layer type and KV ownership
+  - [ ] Choose one bounded TDD probe that does not repeat rolled-back kernel variants
+
+### Active Spec
+
+- Hypothesis:
+  - Host encode overhead is no longer the main wall after `gpu_layer_stack_encode_layers` dropped to about `1ms/token`. The next improvement needs to come from real GPU work: Q4_K projections, attention/GQA, FFN down/up/gate, PLE side-channel, or LM head.
+- Constraints:
+  - Attribution only; no code changes from the profile.
+  - Do not run this in parallel with another Gemma job.
+  - Use current best flags and keep buffer-native prelude disabled unless a later probe proves otherwise.
+
+### Active Review
+
+- Split-phase command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Split-phase output stayed coherent with the same generated token IDs/text.
+- Top split buckets at `tokens=8`:
+  - `gpu_split_ffn_down_projection_sliding_ownkv_wait=65.1ms/160x`
+  - `gpu_split_attention_sliding_ownkv_wait=51.6ms/160x`
+  - `gpu_split_ffn_down_projection_sliding_sharedkv_wait=50.3ms/120x`
+  - `gpu_split_ffn_activation_sliding_ownkv_wait=49.4ms/160x`
+  - `gpu_split_lm_head_wait=21.0ms/8x`, `gpu_split_lm_head_gpu_time=19.4ms/8x`
+- K-quant microbenchmark command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Relevant K-quant microbenchmark results:
+  - `gemma_ffn_gate_up_dual_q4k_llama_style`: `0.327 ms/op`, `90.4 GB/s`.
+  - `gemma_ffn_down_q4k_llama_style`: `0.284 ms/op`, `52.1 GB/s`.
+  - `gemma_lm_head_q6k_top1`: `3.128 ms/op`, `176.3 GB/s`.
+- Interpretation:
+  - Q4_K FFN projection work is still a large aggregate bucket because it runs across many layers, but the isolated llama-style Q4_K kernels are already strong and prior Q4 row-layout/ext/fusion variants regressed.
+  - The Q6_K top-1 LM head is the largest single-kernel cost that has not had a recent exactness-preserving fusion probe. A final-norm/LM-head path is a cleaner next target than another Q4 row variant.
+
+## Active Plan: Q6_K Top-1 Eight-Row Tile Probe
+
+- [x] Test whether increasing Q6_K top-1 tile width improves the Gemma LM head
+  - [x] Add failing-first parity coverage for an 8-row top-1 encoder
+  - [x] Implement the temporary shader and Swift wrapper
+  - [x] Add it to the existing K-quant shape microbenchmark
+  - [x] Roll back if the LM-head microbenchmark loses
+
+### Active Spec
+
+- Hypothesis:
+  - The current Q6_K top-1 LM head uses 4 rows per tile. An 8-row tile may reuse each loaded input vector segment across more vocab rows and halve the reduction partial count while preserving exact top-1 semantics.
+- Constraints:
+  - Keep the new path diagnostic-only unless it beats the current `q6_k_gemv_packed_4row_top1_f32` microbench.
+  - Preserve exact CPU-reference top-1 parity.
+  - Do not wire into Gemma before the microbench wins.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/packedQ6KTop1EightRowsMatchesCPUReference'` failed at compile with missing `GEMVKernel.encodeQ6KWeightsPackedTop1EightRows`.
+- Temporary implementation:
+  - Added `q6_k_gemv_packed_8row_top1_f32`.
+  - Added `GEMVKernel.encodeQ6KWeightsPackedTop1EightRows(...)`.
+  - Added parity test and `gemma_lm_head_q6k_top1_8row` microbench row.
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/packedQ6KTop1EightRowsMatchesCPUReference|GEMVTests/packedQ6KTop1MatchesCPUReference'`.
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Result:
+  - current `gemma_lm_head_q6k_top1`: `2.785 ms/op`.
+  - experimental `gemma_lm_head_q6k_top1_8row`: `3.373 ms/op`.
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The 8-row tile preserved parity but was slower than the current 4-row top-1 path.
+
+## Active Plan: Gemma Layer Resource Prebinding
+
+- [x] Prebind invariant Gemma layer resource buffers at model load
+  - [x] Add failing-first tests for resource-plan shape and layer coverage
+  - [x] Precompute raw tensor buffers, norm buffers, projection requests, and LM-head buffers
+  - [x] Route layer and LM-head encoding through the resource plan without changing kernels
+  - [x] Run focused tests, profiled Gemma smoke, and Gemma median
+
+### Active Spec
+
+- Hypothesis:
+  - The metadata plan removed switches and offset math, but each token still rebuilds projection requests and does cached MTLBuffer lookups/string-key construction/locking for per-layer weights and norms. Prebinding those immutable resources at model load can remove more host work without touching math, dispatch order, or kernel code.
+- Constraints:
+  - Exactness-preserving only: no kernel changes, no dispatch-order changes, no altered prompt/benchmark semantics.
+  - Keep the first pass narrow and rollback if median does not beat `40.790 tok/s`.
+  - Preserve existing dirty worktree changes.
+
+### Active Review
+
+- Red/resource coverage:
+  - `swift test --filter 'Gemma4LayerRuntimePlanTests/describesInvariantPerLayerResourceNames'` first failed before `Gemma4LayerResourceDescriptor` existed.
+  - Added descriptor coverage for stable per-layer tensor names and own/shared KV resource shape.
+- Implemented:
+  - Added load-time `LayerRuntimeResources` and `LMHeadResources`.
+  - Prebound raw tensor buffers, norm buffers, projection requests, Q6_K LM-head buffers, and scalar layer-output scale at model load.
+  - Routed the default GPU layer-stack attention, FFN gate/up/down, PLE side-channel, and greedy LM head through the prebound resources.
+  - Kept kernel selection and dispatch order unchanged.
+- Focused tests passed:
+  - `swift test --filter 'Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests'`.
+- Profiled Gemma smoke:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - Same generated token IDs/text stayed coherent:
+    - `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+    - `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - Decode: `40.001 tok/s`.
+  - `gpu_layer_stack_encode_layers` measured `10.3ms/26`, down from the prior `24.8ms/26` profile.
+- Gemma median:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `42.040 tok/s`, best `42.267 tok/s`, min `41.310 tok/s`, median TTFT `0.379830s`.
+- Decision:
+  - KEPT. The median improved over the prior `40.790 tok/s` best while preserving the exact generated output.
+- Qwen regression gate:
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'` passed.
+  - Qwen median decode: `251.1 tok/s`.
+  - Qwen token hash: `0afae14a84cf0df8`.
+
+## Active Plan: Post-Prebinding Gemma Bottleneck Refresh
+
+- [ ] Refresh current bottleneck attribution after layer resource prebinding
+  - [x] Run one sequential split-phase Gemma profile under the current best flags
+  - [x] Compare the largest phase buckets against the previous metadata-plan profile
+  - [ ] Pick one bounded TDD probe that does not repeat rolled-back kernel/layout variants
+  - [ ] Define keep/rollback criteria before editing
+
+### Active Spec
+
+- Hypothesis:
+  - Resource prebinding reduced host encode overhead to roughly `10.3ms/26` in the profiled smoke, so the next useful improvement is likely in real GPU phase cost: FFN gate/up/down, attention/GQA, PLE, or LM-head work rather than more request/buffer lookup hoisting.
+- Constraints:
+  - Measurement only before the next implementation.
+  - Do not run multiple Gemma jobs in parallel.
+  - Preserve exact generated output and the current `42.040 tok/s` median baseline.
+  - Do not revisit known no-go probes without new evidence: Q6 top-1 8-row, Q4_K ext-style down, fused norm/residual, GQA no-wrap, fused GeGLU-down, global triple QKV, sidecar Q4, or buffer-native prelude promotion.
+
+### Active Review
+
+- Split-phase command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Split-phase result:
+  - Same generated token IDs/text stayed coherent.
+  - Split profiling itself slowed decode to `11.608 tok/s`, so only phase attribution is meaningful.
+  - Layer encode remains small: `gpu_layer_stack_encode_layers=6.2ms/18`.
+  - Largest split GPU-time buckets at the 8-token checkpoint were FFN down projection, FFN gate/up activation, attention, and LM head:
+    - sliding FFN down projection: `37.1ms/160` own-KV + `28.9ms/120` shared-KV.
+    - sliding FFN activation/gate-up: `21.6ms/160` own-KV + `16.0ms/120` shared-KV.
+    - sliding attention: `21.4ms/160` own-KV + `11.8ms/120` shared-KV.
+    - LM head: `20.1ms/8`.
+- Existing opt-in prelude recheck:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `41.699 tok/s`, best `42.117 tok/s`, min `41.125 tok/s`, median TTFT `0.384201s`.
+  - Decision: default remains faster than buffer-native prelude after resource prebinding.
+- K-quant shape microbenchmark:
+  - Command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - Relevant rows:
+    - `gemma_ffn_gate_up_dual_q4k_llama_style`: `4.487 ms/op`.
+    - `gemma_ffn_gate_q4k_packed_4row`: `0.412 ms/op` for a single projection.
+    - `gemma_ffn_down_q4k_llama_style`: `0.479 ms/op`.
+    - `gemma_lm_head_q6k_top1`: `3.289 ms/op`.
+  - A/B check without `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1` lost badly: median `32.703 tok/s`, so the real-model gate still requires the dual llama-style path despite the isolated row.
+- Subagent read-only recommendation:
+  - First bounded probe: fused final RMSNorm + Q6_K top-1 LM head, guarded by parity and microbench before runtime wiring.
+  - Backup probe: fused PLE gate projection + GELU*PLE slice.
+
+## Active Plan: Fused Final-Norm Q6_K Top-1 Probe
+
+- [x] Test whether fusing final RMSNorm into Q6_K top-1 improves the Gemma LM head
+  - [x] Check the implementation assumption before adding code
+  - [x] Reject the probe before implementation when it becomes a false positive
+
+### Active Spec
+
+- Hypothesis:
+  - The current greedy LM head encodes final RMSNorm into `scratch.normed`, then runs Q6_K top-1 over the normalized vector. A fused diagnostic top-1 kernel can read `currentHidden` and output norm weights directly, compute the same RMS scale, and avoid one dispatch plus one full hidden-vector write/read.
+- Constraints:
+  - Preserve exact top-1 semantics relative to the existing RMSNorm + Q6_K path.
+  - Do not repeat the rejected Q6_K 8-row tile.
+  - Keep the first implementation diagnostic until a focused microbench beats the current top-1 path.
+  - Roll back fully if parity, microbench, coherent smoke, or median gate loses.
+
+### Active Review
+
+- False-positive check:
+  - A single fused Q6_K top-1 kernel would need the normalized vector for every vocab row. Unless it still stages the normalized vector, it would reread output-norm weights and apply normalization work across the vocab-row loop.
+  - That trades away one small hidden-vector write/read for much larger repeated memory traffic in the LM-head kernel.
+- Decision:
+  - STOPPED before implementation. This does not satisfy the "exactness-preserving and likely bounded win" bar.
+
+## Active Plan: Fused PLE Gate Projection Probe
+
+- [x] Test whether fusing PLE gate projection and GELU*PLE improves side-channel cost
+  - [x] Add failing-first parity coverage against existing Q4_K projection + `PLEGateKernel`
+  - [x] Implement a diagnostic shader/API behind an explicit wrapper
+  - [x] Add a release microbench row against the current two-dispatch PLE gate path
+  - [x] Roll back when the microbench loses
+
+### Active Spec
+
+- Hypothesis:
+  - Each layer currently does PLE gate projection into `scratch.pleGate`, then a separate `ple_gate_gelu_mul_f32` dispatch into `scratch.pleActivated`. A fused Q4_K llama-style PLE gate projection can remove that dispatch and intermediate write while preserving the exact GELU formula.
+- Constraints:
+  - Diagnostic-only until the exact PLE gate shape microbench beats the current path.
+  - Do not wire into Gemma before the microbench win.
+  - Roll back fully if the microbench loses.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KPLEGateMatchesSeparateProjectionAndPLEGate'` failed at compile with missing `GEMVKernel.encodeQ4KWeightsLlamaStylePLEGate`.
+- Temporary implementation:
+  - Added `q4_k_gemv_llama_style_ple_gate_f32`.
+  - Added `GEMVKernel.encodeQ4KWeightsLlamaStylePLEGate(...)`.
+  - Added parity test and `gemma_ple_gate_q4k_llama_style_fused` microbench row.
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KPLEGateMatchesSeparateProjectionAndPLEGate'`.
+- Microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Result:
+  - current `gemma_ple_gate_q4k_llama_style_plus_gate`: `0.164 ms/op`.
+  - experimental `gemma_ple_gate_q4k_llama_style_fused`: `0.173 ms/op`.
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The fused path preserved parity but lost the exact shape microbench.
+- Rollback verification:
+  - `rg -n "PLEGate|ple_gate_f32|llama_style_ple_gate|gemma_ple_gate|encodeQ4KWeightsLlamaStylePLEGate" Sources/EdgeRunnerMetal Tests/EdgeRunnerMetalTests/GEMVTests.swift` shows only the existing `PLEGateKernel` and `PLE.metal` symbols.
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/packedQ6KTop1MatchesCPUReference|Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests'` passed.
+
+## Active Plan: Current Publishable Artifact Attempt
+
+- [x] Try to refresh the Gemma publishable artifact under the current best stack
+  - [x] Run the publishable harness with current best flags
+  - [x] Stop the run if it does not complete in a reasonable local window
+  - [x] Record whether a new artifact was produced
+  - [x] Add a gated diagnostic to locate the non-completing phase
+
+### Active Spec
+
+- Hypothesis:
+  - The short median is now `42.040 tok/s`, but the full publishable harness also includes a 64-token short sample, a long prompt, coherence gates, and the `>=150 tok/s` expectation. Running it will show whether the current blocker is just the target threshold or also long-prompt completion.
+- Constraints:
+  - Do not run other Gemma workloads in parallel.
+  - Preserve benchmark semantics and the real `>=150 tok/s` expectation.
+
+### Active Review
+
+- Command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+- Result:
+  - Build completed, then the test produced no benchmark output for roughly five minutes.
+  - The live `swift-test` / `swiftpm-testing-helper` processes were terminated to avoid leaving an orphaned long Metal workload.
+  - `benchmarks/gemma4_publishable_benchmark.json` timestamp stayed at `May 12 17:35:35 2026`, so no fresh artifact was produced.
+- Decision:
+  - Current publishable blocker is stronger than the `>=150 tok/s` short-median miss: the full publishable run does not complete locally in a reasonable window under the current best stack.
+- Diagnostic isolation:
+  - Added gated test `Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases`; it is inert unless `EDGERUNNER_GEMMA4_PUBLISHABLE_DIAGNOSTIC=1`.
+  - Diagnostic command:
+    - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PUBLISHABLE_DIAGNOSTIC=1 EDGERUNNER_GEMMA4_DIAGNOSTIC_MAX_TOKENS=8 EDGERUNNER_GEMMA4_DIAGNOSTIC_LOG=tasks/gemma4_publishable_diagnostic.log EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'`
+  - Evidence:
+    - model load completed.
+    - short prompt: `18` prompt tokens, first-logits prompt processing `11.290556s`, 8-token output coherent.
+    - short decode step times: about `0.026-0.030s/token`.
+    - long prompt: `1037` prompt tokens, then stalled at `phase=prompt_processing_start`; no long `prompt_processing` completion after another 30 seconds.
+  - Source-cause inspection:
+    - `Gemma4LanguageModel.logits(for:)` uses `runCacheBackedTokens(...)`.
+    - `.fullPrefill` routes to `runTokenSequence(...)`, which loops every prompt token through `runSingleToken(...)`.
+    - Therefore long-prompt publishability is blocked by sequential token-by-token prefill, not artifact writing or coherence evaluation.
+  - Inert diagnostic verification:
+    - `swift test -c release --filter 'Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'` passed without diagnostic env vars.
+
+## Active Plan: No-Read Serial Prefill Bridge
+
+- [x] Remove unused CPU hidden readback for non-final full-prefill tokens
+  - [x] Route non-final `.fullPrefill` / multi-token suffix tokens through a prefill-only helper
+  - [x] Add a `readOutput` switch to the GPU cache layer stack
+  - [x] Re-run focused compile/tests and diagnostic long-prompt isolation
+  - [x] Run short median gate and decide keep/rollback
+
+### Active Spec
+
+- Hypothesis:
+  - During serial full prefill, all non-final prompt tokens only need to populate KV cache. Their final hidden vector is discarded, so reading it back to CPU after every token is avoidable host/GPU synchronization.
+- Constraints:
+  - Exactness-preserving only: still process every prompt token, still write KV cache, still compute the final token hidden/logits normally.
+  - This is an interim bridge, not the expected publishable long-prompt fix.
+
+### Active Review
+
+- Implemented:
+  - `runTokenSequenceForGreedy(...)` and `runTokenSequence(...)` now route non-final tokens through `runSingleTokenPrefillOnly(...)`.
+  - `runDecoderLayerStackWithGPUCache(...)` now accepts `readOutput: Bool = true`; prefill-only calls use `false`.
+- Focused verification:
+  - `swift test --filter 'Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests|Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'` passed.
+  - `swift test -c release --filter 'Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'` passed without diagnostic env vars.
+- Diagnostic result:
+  - Short prompt still coherent for 8 tokens.
+  - Short first-logits prompt processing moved from `11.290556s` to `10.834246s`.
+  - Long prompt still stalled at `label=long phase=prompt_processing_start`; this bridge is insufficient for publishable long-prompt completion.
+- Short median gate:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `42.182 tok/s`, best `42.500 tok/s`, min `42.023 tok/s`, median TTFT `0.375818s`.
+
+## Active Plan: Chunked Prefill Foundation
+
+- [ ] Build the first tested foundation for layer-major Gemma prompt prefill
+  - [x] Add failing-first coverage for batched prelude layout and chunk planning
+  - [x] Implement only the shape/layout helper needed by a future chunked prefill runner
+  - [x] Add failing-first coverage for copying one hidden vector from a batched hidden array
+  - [x] Add a batched BF16 GEMV parity test for `perLayerModelProjection`
+  - [x] Wire the BF16 batched projection into the Gemma PLE prelude path
+  - [x] Verify focused release tests, diff hygiene, and regression gates
+  - [x] Use the result to choose the next layer-major runner slice
+
+### Active Spec
+
+- Hypothesis:
+  - The full publishable harness stalls because long prompts still enter `runTokenSequence(...)`, which loops every prompt token through a complete single-token decoder pass. A real fix needs a layer-major prefill path that treats prompt tokens as chunks, not independent decode requests.
+- First slice:
+  - Before touching decoder math, define and test the buffer layout contract for chunked prefill: chunk ranges, per-token positions, and per-token/per-layer PLE offsets in the existing `[batchSeq, numLayers, perLayerDim]` layout produced by `PLEGatherKernel` and `PLEInputsKernel`.
+- Constraints:
+  - Do not change benchmark semantics.
+  - Do not run Gemma benchmarks in parallel.
+  - Keep the first implementation exactness-preserving and small enough to rollback cleanly.
+  - Do not wire a chunked layer runner until helper tests prove the layout contract.
+
+### Active Review
+
+- Red steps:
+  - `swift test --filter 'Gemma4PrefillChunkPlanTests'` first failed because `Gemma4PrefillChunkPlan` did not exist.
+  - `swift test --filter 'Gemma4ScratchTests/copiesHiddenSliceFromBatch'` first failed because `Gemma4Scratch.copyHiddenBatch` did not exist.
+  - `swift test --filter 'GEMVTests/batchedBF16WeightsMatchPerTokenReference'` first failed because `GEMVKernel.executeBatchedBF16Weights` did not exist.
+- Implemented:
+  - Added `Gemma4PrefillChunkPlan` for chunk ranges, absolute positions, and `[token, layer, feature]` PLE byte offsets.
+  - Made `PreludeState` token-count aware and routed PLE byte-offset calculation through the tested prefill layout.
+  - Added batched hidden-slice copy support in `Gemma4Scratch`.
+  - Added `gemv_bf16_f32_batched` and a Swift wrapper, then used it for BF16 `perLayerModelProjection` when `batchSeq > 1`.
+  - Routed non-final prompt tokens through batched PLE prelude chunks before serial prefill-only decoder passes.
+- Focused tests passed:
+  - `swift test --filter 'GEMVTests/batchedBF16WeightsMatchPerTokenReference|GEMVTests/gemvBFloat16WeightsFloatInput|Gemma4ScratchTests/copiesHiddenSliceFromBatch|Gemma4PrefillChunkPlanTests|Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests|Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'`
+  - `swift test -c release --filter 'GEMVTests/batchedBF16WeightsMatchPerTokenReference'`
+  - `swift test -c release --filter 'GEMVTests/gemvBFloat16WeightsFloatInput'`
+  - `swift test -c release --filter 'Gemma4ScratchTests/copiesHiddenSliceFromBatch'`
+  - `swift test -c release --filter 'Gemma4PrefillChunkPlanTests|Gemma4LayerRuntimePlanTests|Gemma4RuntimeOptionsTests|Gemma4DownloadedBenchmark/diagnosePublishableGenerationPhases'`
+  - Combined release test selection crashed with signal 11 during parallel suite startup, but each focused release shard above passed.
+- Diagnostic result:
+  - Same gated command with `EDGERUNNER_GEMMA4_DIAGNOSTIC_MAX_TOKENS=2`.
+  - Short prompt processing improved from about `10.6s` to `1.966178s`; first two tokens stayed `Fast local`.
+  - Long prompt now completed prompt processing, but still took `251.973358s` for `1037` prompt tokens and generated `Reporting median`.
+- Short median gate:
+  - Command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - Result: median `41.967 tok/s`, best `42.320 tok/s`, min `41.819 tok/s`, median TTFT `0.378552s`.
+  - Interpretation: decode median is essentially flat/slightly lower than the previous `42.182 tok/s`; the real win is TTFT/prompt processing, not decode throughput.
+- Regression gate:
+  - `git diff --check` passed.
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'` could not run because `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` is currently missing.
+- Decision:
+  - The batched prelude/projection slice is a real exactness-preserving improvement, but it is not publishable. The remaining blocker is serial token-major decoder-layer prefill; next work must be a layer-major chunked runner.
+
+## Active Plan: Layer-Major Chunked Prefill Design
+
+- [ ] Build the smallest correctness-first chunked prefill path
+  - [x] Add a batched Q4_K projection parity test for prompt chunks
+  - [x] Implement only the generic batched Q4_K GEMV primitive needed by chunked layer execution
+  - [x] Add scratch chunk hidden buffers and CPU-visible row-copy coverage
+  - [x] Reject and roll back unsafe release-crashing blit/runtime routing probe
+  - [x] Add source-offset support for F32-to-F16 KV-store encoding
+  - [x] Add row-wise residual RMSNorm add primitive and per-row parity coverage
+  - [ ] Add tests for batched PLE prelude shape and last-token parity
+  - [x] Add tests for chunked KV writes across sliding/global layers
+  - [ ] Add a tiny full-model parity gate comparing serial vs chunked prefill logits
+  - [ ] Implement only enough chunked layer execution to make long prompt processing complete
+  - [ ] Keep only if short median does not regress and long prompt is coherent
+
+### Active Spec
+
+- Hypothesis:
+  - The current long-prompt path is asymptotically wrong: `1037` prompt tokens are processed as `1037` independent 42-layer decode passes. A layer-major chunked prefill path can process chunks through each layer while writing KV cache once per token, turning the long prompt from token-major full-stack repetition toward layer-major batched work.
+- Constraints:
+  - Do not change publishable prompt, token count, context size, timing semantics, or coherence gates.
+  - Preserve exact short output and Qwen publishable correctness after any shared runtime/Metal changes.
+  - Start with correctness and small chunks; optimize only after serial-vs-chunked parity is proven.
+
+### Active Review
+
+- Current local scan:
+  - `Gemma4DecodeKernels.encodeRMSNorm(...)` already accepts `rows > 1`.
+  - `RoPEKernel.encodeNeoX(...)` already accepts `seqLen > 1`.
+  - Experiment 70 added batched BF16 projection for PLE prelude.
+  - The first missing primitive for layer-major chunked execution is Q4_K projection from a batch of hidden states; active Gemma layer projections are Q4_K-heavy.
+- Red/green slice:
+  - `swift test --filter 'GEMVTests/batchedQ4KWeightsMatchPerTokenReference'` first failed because `GEMVKernel.executeBatchedQ4KWeights` did not exist.
+  - Added `q4_k_gemv_f32_batched`, `GEMVKernel.encodeBatchedQ4KWeights(...)`, and `executeBatchedQ4KWeights(...)`.
+  - Debug and release `GEMVTests/batchedQ4KWeightsMatchPerTokenReference` passed.
+  - Added chunk hidden buffers to `Gemma4Scratch` plus release-passing coverage for allocation and batched hidden array copy.
+- Failed probe:
+  - Tried an opt-in `EDGERUNNER_GEMMA4_LAYER_MAJOR_PREFILL=1` runner that used chunk hidden buffers but still encoded the existing single-token layer primitive inside a layer-major loop.
+  - Release diagnostic crashed with signal 5 during short prompt processing; debug completed the short prompt but was slower (`9.350171s` prompt processing for one generated token).
+  - Rolled back the runtime flag and layer-major routing. Kept only the proven batched Q4_K primitive and scratch buffer allocation/copy foundation.
+- KV-store foundation:
+  - `swift test --filter 'Gemma4DecodeKernelTests/storeF32ToF16SupportsInputAndOutputOffsets|Gemma4DecodeKernelTests/storeF32ToF16SupportsOutputOffset'` passed.
+  - `swift test -c release --filter 'Gemma4DecodeKernelTests/storeF32ToF16SupportsInputAndOutputOffsets'` passed.
+  - `swift test --filter 'Gemma4DecodeKernelTests/storeF32ToF16SupportsChunkedKVRowWrites'` passed.
+  - `swift test -c release --filter 'Gemma4DecodeKernelTests/storeF32ToF16SupportsChunkedKVRowWrites'` passed.
+  - `Gemma4DecodeKernels.encodeStoreF32ToF16(...)` now has a source-offset overload while preserving the existing no-source-offset signature for current callers.
+- Row-wise residual RMSNorm foundation:
+  - `swift test --filter 'Gemma4DecodeKernelTests/residualRMSNormAddRowsMatchesPerRowCPU'` first failed because `Gemma4DecodeKernels.runResidualRMSNormAddRows(...)` did not exist.
+  - Added `gemma4_residual_rmsnorm_add_rows_f32` plus `runResidualRMSNormAddRows(...)` / `encodeResidualRMSNormAddRows(...)`.
+  - `swift test --filter 'Gemma4DecodeKernelTests/residualRMSNormAddMatchesCPU|Gemma4DecodeKernelTests/residualRMSNormAddRowsMatchesPerRowCPU'` passed.
+  - `swift test -c release --filter 'Gemma4DecodeKernelTests/residualRMSNormAddRowsMatchesPerRowCPU'` passed.
+- Read-only subagent recommendation:
+  - Implement `runPrefillSequence(tokens:startPosition:chunkSize:)` and route multi-token `.fullPrefill` / `.prefixReuse` through it.
+  - Add `runPLEPreludeBatch(tokenIDs:)` because existing PLE gather/input kernels are already batch-aware, while the model currently collapses prelude inputs to `[lastToken]`.
+  - Use `Gemma4LayerRuntimePlan` for head dims, PLE offsets, KV source, and RoPE constants.
+  - Treat Q4_K batched projection and chunked attention as the correctness-sensitive parts.
+
+## Active Plan: Upstream Q4_K Ext-Style Down Projection Probe
+
+- [x] Test whether llama.cpp's newer `kernel_mul_mv_ext_q4_K_f32_r1_*` style is a credible FFN-down replacement
+  - [x] Verify the previous fused norm probe was fully rolled back
+  - [x] Re-run focused norm tests after rollback
+  - [x] Compare the current local llama-style Q4_K path with upstream Metal Q4_K variants
+  - [x] Add failing-first parity coverage for a minimal ext-style Q4_K GEMV entry point if the source delta is material
+  - [x] Implement only enough wrapper/shader code to pass parity
+  - [x] Add a release microbench against `gemma_ffn_down_q4k_llama_style`
+  - [x] Wire into Gemma only if the FFN-down microbench wins materially
+
+### Active Spec
+
+- Hypothesis:
+  - The refreshed layer-type profile points at FFN down projection as the largest remaining bucket under the current dual llama-style stack. The local `q4_k_gemv_llama_style_f32` mirrors llama.cpp's classic `kernel_mul_mv_q4_K_f32_impl` structure, while upstream also has a newer `kernel_mul_mv_ext_q4_K_f32_r1_*` float4x4 family. A microbench-only port of that newer shape may expose a real algorithmic win, unlike prior row-count or fusion tweaks.
+- Constraints:
+  - No runtime wiring until a parity test and release shape microbench pass.
+  - Do not repeat prior no-go variants: GQA no-wrap, K RoPE direct F16 store, fused residual-plus-RMSNorm, fused GeGLU-input down, triple llama-style QKV, Q4 sidecar, buffer-native prelude, or older row-layout tweaks.
+  - Keep the first probe scoped to FFN down shape `M=2560`, `K=10240`.
+  - Do not run multiple Gemma jobs in parallel.
+- Verification:
+  - Red: a new focused parity test should fail on the missing ext-style API before production code is added.
+  - Focused: parity plus existing llama-style Q4_K parity.
+  - Microbench: `EDGERUNNER_GEMMA4_FFN_DOWN_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaFFNDownQ4KExtMicrobenchmark'`
+
+### Active Review
+
+- Rollback verification:
+  - `rg -n "ResidualThenRMSNorm|residual_rmsnorm_add_then_rmsnorm|encodeResidualRMSNormAddThenRMSNorm|fusedResidualAddThenRMSNorm|NORM_MICROBENCH" Sources Tests tasks/todo.md` shows only task notes.
+  - `swift test --filter 'Gemma4DecodeKernelTests/residualRMSNormAddMatchesCPU|Gemma4DecodeKernelTests/gemmaRMSNormMatchesCPU'` passed.
+  - `git diff --check` passed.
+- Source comparison so far:
+  - Current Gemma FFN down uses `encodeProjection(... .q4_K)` and selects `GEMVKernel.encodeQ4KWeightsLlamaStyle(...)` when `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1`.
+  - The dual flag affects gate/up only; FFN down remains the single-matrix llama-style path.
+  - Local `q4_k_gemv_llama_style_f32` in `Sources/EdgeRunnerMetal/Shaders/Dequant_Q4_K_M.metal` is structurally close to llama.cpp's classic `kernel_mul_mv_q4_K_f32_impl`.
+  - Upstream's materially different candidate is `kernel_mul_mv_ext_q4_K_f32_r1_2` / `_r1_3` / `_r1_4` / `_r1_5`, built on `kernel_mul_mv_ext_q4x4_f32_impl` and `dequantize_q4_K`.
+- Red step:
+  - `swift test --filter 'GEMVTests/llamaStyleExtQ4KGemvMatchesCPUReference'` failed at compile with missing `GEMVKernel.encodeQ4KWeightsLlamaStyleExt`, proving the new parity test covered the intended API.
+- Temporary implementation:
+  - `q4_k_gemv_llama_style_ext_f32`
+  - `GEMVKernel.encodeQ4KWeightsLlamaStyleExt(...)`
+  - a narrow `gemmaFFNDownQ4KExtMicrobenchmark` row for the FFN down shape only.
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/llamaStyleExtQ4KGemvMatchesCPUReference'`
+  - `swift test --filter 'GEMVTests/llamaStyleExtQ4KGemvMatchesCPUReference|GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaFFNDownQ4KExtMicrobenchmark'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_FFN_DOWN_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaFFNDownQ4KExtMicrobenchmark'`
+- Result:
+  - packed FFN down: `1.099 ms/op`
+  - current llama-style FFN down: `0.817 ms/op`
+  - upstream-ext-style FFN down: `1.083 ms/op`
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The ext-style 4x4 dequant/dot path preserved math but was slower than the current llama-style FFN down path, so it did not earn Gemma runtime wiring.
+
+## Active Plan: Post-Attention Plus FFN-Norm Fusion Probe
+
+- [x] Test whether fusing post-attention residual norm with FFN input norm helps the current dual stack
+  - [x] Derive hypothesis from refreshed layer-type profile and FFN boundary inspection
+  - [x] Add failing-first parity coverage for a fused residual-RMSNorm-add plus RMSNorm kernel
+  - [x] Implement the smallest Metal wrapper/kernel for one hidden vector
+  - [x] Add a release microbench comparing the existing two-dispatch sequence against the fused kernel
+  - [x] Wire behind a Gemma env flag only if the microbench wins
+  - [x] Run focused tests and one Gemma smoke only if runtime wiring is earned
+
+### Active Spec
+
+- Hypothesis:
+  - Each layer currently runs `gemma4_residual_rmsnorm_add_f32` after the attention output projection, then immediately runs `gemma4_rmsnorm_f32` on `scratch.nextHidden` to produce `scratch.ffnInput`. A fused kernel can compute `nextHidden` and `ffnInput` in one dispatch with two reductions, removing one command encoder and one full-vector read pass.
+- Constraints:
+  - Preserve exact math: `nextHidden = residual + input * rms(input) * postAttentionWeight`; `ffnInput = nextHidden * rms(nextHidden) * ffnNormWeight`.
+  - Scope this to the Gemma GPU layer runner and guard runtime wiring behind an env flag.
+  - Do not change Q4 projection kernels or benchmark semantics.
+  - Do not run multiple Gemma benchmarks in parallel.
+- Verification:
+  - Red: `swift test --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMatchesTwoDispatchReference'`
+  - Focused: `swift test --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMatchesTwoDispatchReference|Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMicrobenchmark|Gemma4DecodeKernelTests/gemmaResidualRMSNormAddMatchesCPU'`
+  - Microbench: `EDGERUNNER_GEMMA4_NORM_MICROBENCH=1 swift test -c release --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMicrobenchmark'`
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMatchesTwoDispatchReference'` failed at compile with missing `Gemma4DecodeKernels.encodeResidualRMSNormAddThenRMSNorm`, proving the new parity test covered the intended API.
+- Implemented:
+  - `gemma4_residual_rmsnorm_add_then_rmsnorm_f32`
+  - `Gemma4DecodeKernels.encodeResidualRMSNormAddThenRMSNorm(...)`
+- Focused parity passed:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMatchesTwoDispatchReference'`
+- Focused checks passed:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMatchesTwoDispatchReference|Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMicrobenchmark|Gemma4DecodeKernelTests/residualRMSNormAddMatchesCPU'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_NORM_MICROBENCH=1 swift test -c release --filter 'Gemma4DecodeKernelTests/fusedResidualAddThenRMSNormMicrobenchmark'`
+- Result:
+  - existing residual add then RMSNorm: `2.73 ms/op`
+  - fused residual add then RMSNorm: `2.74 ms/op`
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The fused kernel preserved math but did not beat the existing two-dispatch sequence, so it did not earn Gemma runtime wiring or a smoke run.
+
+## Active Plan: Current Dual-Stack Layer-Type Attribution
+
+- [x] Refresh layer-type bottleneck attribution under the current best dual llama-style stack
+  - [x] Record why the older layer-type profile is stale
+  - [x] Run one sequential split-profile with `EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1`
+  - [x] Compare sliding/global and own/shared KV buckets against no-go candidates
+  - [x] Pick the next bounded experiment from current data
+
+### Active Spec
+
+- Current best stack:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1`
+  - `EDGERUNNER_GEMMA4_Q4_TILED=1`
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1`
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1`
+  - `EDGERUNNER_GEMMA4_Q6_TOP1=1`
+- Hypothesis:
+  - The previous layer-type attribution was captured before the kept dual llama-style gate/up path. Two follow-up attention cleanup probes had small microbench wins but regressed real smoke, so the next experiment should be selected from refreshed layer-type buckets rather than broad `gpu_split_attention` totals.
+- Constraints:
+  - Diagnostic-only run; no code or benchmark semantic changes.
+  - Do not run multiple Gemma jobs in parallel.
+- Verification:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+
+### Active Review
+
+- Split layer-type profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged.
+  - diagnostic decode: `9.387 tok/s`.
+  - token 8 dominant layer-type buckets: `gpu_split_ffn_down_projection_sliding_ownkv_gpu_time=35.7ms/160x`, `gpu_split_ffn_down_projection_sliding_sharedkv_gpu_time=28.7ms/120x`, `gpu_split_attention_sliding_ownkv_gpu_time=23.1ms/160x`, `gpu_split_lm_head_gpu_time=20.0ms/8x`, `gpu_split_ffn_gate_up_sliding_ownkv_gpu_time=18.9ms/160x`, `gpu_split_ffn_gate_up_sliding_sharedkv_gpu_time=13.8ms/120x`, `gpu_split_attention_sliding_sharedkv_gpu_time=11.5ms/120x`.
+- Interpretation:
+  - The remaining bottleneck is broad sliding-layer projection work, especially FFN down. Global-only or attention-only cleanup is too small to bridge the target gap.
+  - Next bounded experiment is an upstream-source-backed Q4_K FFN-down kernel probe, not another local row-count tweak.
+
+## Active Plan: K RoPE Direct F16 Store Probe
+
+- [x] Test whether K RoPE can write directly to the F16 KV cache
+  - [x] Derive hypothesis from the attention phase inspection
+  - [x] Add failing-first parity coverage for NeoX RoPE direct F16 output with output byte offset
+  - [x] Implement the smallest `RoPEKernel` wrapper around the existing `rope_neox_f32_to_f16` shader
+  - [x] Add a release microbench comparing `encodeNeoX + encodeStoreF32ToF16` against direct F16 output
+  - [x] Wire into Gemma owning-KV layers behind an env flag only if the microbench wins
+  - [x] Run focused tests and one Gemma smoke only if runtime wiring is earned
+
+### Active Spec
+
+- Hypothesis:
+  - Owning-KV Gemma layers currently run K NeoX RoPE into `scratch.k`, then encode a separate F32-to-F16 store into the layer KV cache. The shader `rope_neox_f32_to_f16` already exists, so a wrapper that supports output byte offsets may remove one dispatch on owning-KV layers without changing Q RoPE, V norm/store, GQA, or projection math.
+- Constraints:
+  - Scope this to K cache writes only.
+  - Preserve partial rotary behavior for both local and global head dimensions.
+  - Do not change default Gemma behavior until parity, microbench, and real smoke pass.
+  - Do not run multiple Gemma benchmarks in parallel.
+- Verification:
+  - Red: `swift test --filter 'RoPETests/neoxRoPEF16OutputWithOffsetMatchesF32RoPEStore'`
+  - Focused: `swift test --filter 'RoPETests/neoxRoPEF16OutputWithOffsetMatchesF32RoPEStore|RoPETests/neoxRoPEF16OutputShapeMicrobenchmark|Gemma4DecodeKernelTests/storeF32ToF16SupportsOutputOffset'`
+  - Microbench: `EDGERUNNER_GEMMA4_ROPE_MICROBENCH=1 swift test -c release --filter 'RoPETests/neoxRoPEF16OutputShapeMicrobenchmark'`
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'RoPETests/neoxRoPEF16OutputWithOffsetMatchesF32RoPEStore'` failed at compile with missing `RoPEKernel.encodeNeoXF16Output`, proving the new test covered the intended API.
+- Implemented:
+  - `RoPEKernel.encodeNeoXF16Output(...)` using the existing `rope_neox_f32_to_f16` pipeline and a caller-provided output byte offset.
+- Focused parity passed:
+  - `swift test --filter 'RoPETests/neoxRoPEF16OutputWithOffsetMatchesF32RoPEStore'`
+- Focused checks passed:
+  - `swift test --filter 'RoPETests/neoxRoPEF16OutputWithOffsetMatchesF32RoPEStore|RoPETests/neoxRoPEF16OutputShapeMicrobenchmark|Gemma4DecodeKernelTests/storeF32ToF16SupportsOutputOffset'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_ROPE_MICROBENCH=1 swift test -c release --filter 'RoPETests/neoxRoPEF16OutputShapeMicrobenchmark'`
+- Result:
+  - local K existing RoPE + store: `4.75 ms/op`
+  - local K direct F16 RoPE: `4.64 ms/op`
+  - global K existing RoPE + store: `4.67 ms/op`
+  - global K direct F16 RoPE: `4.65 ms/op`
+- Runtime wiring:
+  - Added opt-in selector `EDGERUNNER_GEMMA4_K_ROPE_F16_STORE=1` for owning-KV layer K cache writes only.
+- Gemma smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_K_ROPE_F16_STORE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Smoke result:
+  - generated token IDs and coherent text stayed unchanged.
+  - decode: `27.684 tok/s`
+- Decision:
+  - ROLLED BACK the diagnostic wrapper/test/runtime branch. The direct-F16 RoPE wrapper had a tiny microbench win but regressed real Gemma smoke, so it did not earn a median run or promotion.
+
+## Active Plan: Fast GQA No-Wrap Attention Probe
+
+- [x] Test whether a contiguous-window fast GQA kernel reduces Gemma attention cost
+  - [x] Derive hypothesis from the current attention hot path and prior layer-type profile
+  - [x] Add failing-first parity coverage for a no-wrap fast F16 KV GQA entry point
+  - [x] Implement the smallest Metal wrapper/kernel variant for `kvStart + kvCount <= kvCapacity`
+  - [x] Add an env-gated release microbench comparing current fast GQA and no-wrap fast GQA
+  - [x] Wire into `encodeDecodeGQAF16KVWindowedBestAvailable` only if parity and microbench clear the gate
+  - [x] Run focused tests and one Gemma smoke/median only if the microbench shows a material win
+
+### Active Spec
+
+- Hypothesis:
+  - The current `gemma4_decode_gqa_f16kv_windowed_fast` kernel uses `(kvStart + kvIndex) % kvCapacity` for every K and V access. Short-prompt decode and most non-wrapped windows are contiguous, so a no-wrap fast path can remove modulo operations in the inner attention loops without changing math.
+- Constraints:
+  - Do not change Q/K/V projection kernels; triple llama-style QKV already failed the real smoke gate.
+  - Keep the new path limited to `kvStart + kvCount <= kvCapacity`; wrapped sliding windows must continue using the existing fast kernel.
+  - Do not change benchmark prompts, generated-token counts, model path, quantization, or correctness gates.
+  - Do not run multiple Gemma benchmarks in parallel.
+- Verification:
+  - Red: `swift test --filter 'Gemma4DecodeKernelTests/fastNoWrapWindowedF16KVGQAMatchesCPU'`
+  - Focused: `swift test --filter 'Gemma4DecodeKernelTests/fastNoWrapWindowedF16KVGQAMatchesCPU|Gemma4DecodeKernelTests/fastWindowedF16KVGQARealCacheCapacities|Gemma4DecodeKernelTests/gemma4FastGQAShapeMicrobenchmark'`
+  - Microbench: `EDGERUNNER_GEMMA4_GQA_MICROBENCH=1 swift test -c release --filter 'Gemma4DecodeKernelTests/gemma4FastGQAShapeMicrobenchmark'`
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fastNoWrapWindowedF16KVGQAMatchesCPU'` failed at compile with missing `encodeDecodeGQAF16KVWindowedFastNoWrap`, proving the new test covered the intended API.
+- Implemented:
+  - `gemma4_decode_gqa_f16kv_windowed_fast_no_wrap`
+  - `Gemma4DecodeKernels.encodeDecodeGQAF16KVWindowedFastNoWrap(...)`
+- Focused parity passed:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fastNoWrapWindowedF16KVGQAMatchesCPU'`
+- Focused checks passed:
+  - `swift test --filter 'Gemma4DecodeKernelTests/fastNoWrapWindowedF16KVGQAMatchesCPU|Gemma4DecodeKernelTests/fastWindowedF16KVGQARealCacheCapacities|Gemma4DecodeKernelTests/gemma4FastGQAShapeMicrobenchmark'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_GQA_MICROBENCH=1 swift test -c release --filter 'Gemma4DecodeKernelTests/gemma4FastGQAShapeMicrobenchmark'`
+- Result:
+  - sliding 256 full-window current: `3.42 ms/op`
+  - sliding 256 full-window no-wrap: `3.21 ms/op`
+  - global 512 mid-window current: `4.97 ms/op`
+  - global 512 mid-window no-wrap: `4.85 ms/op`
+- Runtime wiring:
+  - Added opt-in selector `EDGERUNNER_GEMMA4_GQA_NO_WRAP=1` for non-wrapped windows only.
+- Gemma smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_GQA_NO_WRAP=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Smoke result:
+  - generated token IDs and coherent text stayed unchanged.
+  - decode: `28.254 tok/s`
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The standalone GQA microbench improved slightly, but the real Gemma smoke did not beat the current dual-stack smoke or median, so it did not earn a median run or promotion.
+
+## Active Plan: Post-Dual Gate/Up Bottleneck Refresh
+
+- [ ] Refresh Gemma split profiling after the kept dual llama-style gate/up flag
+  - [x] Record why the previous post-llama-style profile is stale
+  - [x] Run one sequential split-phase profile under the current best env stack
+  - [x] Pick the next bounded experiment from refreshed buckets
+
+### Active Spec
+
+- Current best stack:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1`
+  - `EDGERUNNER_GEMMA4_Q4_TILED=1`
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1`
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1`
+  - `EDGERUNNER_GEMMA4_Q6_TOP1=1`
+- Hypothesis:
+  - The dual gate/up kernel moved the short median from `25.987 tok/s` to `29.236 tok/s`, so the remaining phase weights must be refreshed before choosing another kernel target.
+- Constraints:
+  - Diagnostic-only run; no benchmark semantics changes.
+  - Do not run multiple Gemma jobs in parallel.
+- Verification:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+
+### Active Review
+
+- Split profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `9.405 tok/s`
+  - token 8 dominant buckets: `gpu_split_ffn_down_projection_gpu_time=69.2ms/336x`, `gpu_split_attention_gpu_time=45.8ms/336x`, `gpu_split_ffn_gate_up_gpu_time=39.1ms/336x`, `gpu_split_lm_head_gpu_time=19.4ms/8x`, `gpu_split_ple_gpu_time=11.4ms/336x`
+  - coarse profiler also showed large prelude costs: `ple_row_gather=1223.8ms/21x` and `ple_token_embedding=376.4ms/21x`
+- Interpretation:
+  - Dual gate/up reduced the gate/up bucket enough that FFN down and attention are now larger layer targets.
+  - Before writing another projection kernel, recheck `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` under the current dual stack because the refreshed profiler shows large PLE gather/embedding cost again.
+
+## Active Plan: Buffer-Native Prelude Recheck Under Dual Gate/Up
+
+- [ ] Recheck `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` under the current best dual-gate stack
+  - [x] Derive hypothesis from refreshed post-dual profile
+  - [x] Run one sequential Gemma smoke with buffer-native prelude enabled
+  - [x] If coherent and faster than the current dual smoke, run short median
+  - [x] Record keep/no-go without changing benchmark semantics
+
+### Active Spec
+
+- Hypothesis:
+  - The buffer-native prelude previously did not beat the then-current top1 stack, but the post-dual profile now shows `ple_row_gather` and `ple_token_embedding` as large costs. Rechecking the flag under the new stack is cheaper than writing a new PLE kernel.
+- Constraints:
+  - No code changes for this check.
+  - Do not change prompt text, generated-token count, model path, quantization, or benchmark semantics.
+  - Do not run multiple Gemma benchmarks in parallel.
+
+### Active Review
+
+- Smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `28.636 tok/s`
+- Short median command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `28.905 tok/s`
+  - best decode: `29.117 tok/s`
+  - min decode: `27.862 tok/s`
+  - median TTFT: `0.574873s`
+- Decision:
+  - NO-GO. Keep `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` opt-in only; it did not beat the current dual-stack median of `29.236 tok/s`.
+
+## Active Plan: Fused GeGLU-Input FFN Down Projection
+
+- [ ] Test whether folding GeGLU input computation into llama-style FFN down improves the current best stack
+  - [x] Record hypothesis and microbench-first gate
+  - [x] Add failing-first parity coverage for a llama-style Q4_K projection that reads gate/up buffers as GeGLU input
+  - [x] Implement the smallest Metal wrapper/kernel for fused GeGLU-input down
+  - [x] Add a release microbench row comparing `GeGLU + down` against fused down
+  - [x] Wire behind env flag only if microbench clears the gate, then run smoke/median
+
+### Active Spec
+
+- Hypothesis:
+  - The post-dual profile shows FFN down as the largest layer bucket. The down projection currently reads an intermediate activated vector produced by a separate GeGLU kernel. A llama-style Q4_K down kernel that computes `gelu_tanh(gate[col]) * up[col]` while loading its input may remove one dispatch plus the activated-buffer write/read.
+- Constraints:
+  - Preserve GeGLU math exactly.
+  - Do not change default runtime behavior until parity and a shape microbench show a win.
+  - Keep this specific to the FFN down shape; do not change QKV, gate/up, or LM-head paths.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGeGLUInputGemvMatchesCPUReference'` failed at compile with missing `encodeQ4KWeightsLlamaStyleGeGLUInput`, proving the new parity test covered the intended API.
+- Temporary implementation:
+  - `q4_k_gemv_llama_style_geglu_input_f32`
+  - `GEMVKernel.encodeQ4KWeightsLlamaStyleGeGLUInput(...)`
+  - microbench rows for `gemma_ffn_geglu_then_down_q4k_llama_style` and `gemma_ffn_down_q4k_llama_style_geglu_input`
+- Focused parity passed before timing:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGeGLUInputGemvMatchesCPUReference'`
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGeGLUInputGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Result:
+  - existing `GeGLU + llama-style down`: `0.266 ms/op`
+  - fused GeGLU-input down: `0.445 ms/op`
+- Decision:
+  - ROLLED BACK. The fused path preserved math but lost badly, likely because per-lane tanh/GELU work and extra gate/up reads outweighed removing the activated-buffer dispatch.
+- Post-rollback checks:
+  - `rg -n "GeGLUInput|geglu_input|llama_style_geglu|q4_k_gemv_llama_style_geglu|gemma_ffn_geglu_then_down" Sources Tests tasks/todo.md` shows only unrelated existing `projectGeGLUInputs` plus this task note.
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'` passed.
+
+## Active Plan: Triple Llama-Style QKV Q4_K Microbench
+
+- [ ] Test whether llama-style Q4_K row math improves the Q/K/V triple projection path
+  - [x] Record hypothesis and microbench-first gate
+  - [x] Add failing-first parity coverage for a triple llama-style Q4_K API
+  - [x] Implement the smallest Metal wrapper/kernel for triple QKV projections
+  - [x] Add release microbench rows beside existing local/global triple QKV rows
+  - [x] Wire behind env flag only if microbench clears the gate, then run smoke/median
+
+### Active Spec
+
+- Hypothesis:
+  - Runtime QKV still uses the older triple-packed Q4_K kernel. The llama-style row math improved several single-matrix projection shapes and the dual gate/up path, so a triple-output QKV variant may reduce the attention bucket without changing attention semantics.
+- Constraints:
+  - Preserve separate Q/K/V output buffers and tensor shapes.
+  - Do not wire into Gemma until parity and both local/global QKV microbench rows beat the current triple-packed path.
+  - Keep this isolated from FFN and generic projection flags.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/llamaStyleTripleQ4KGemvMatchesSeparateCPUReferences'` failed at compile with missing `encodeQ4KWeightsTripleLlamaStyle`, proving the new parity test covered the intended API.
+- Temporary implementation:
+  - `q4_k_gemv_three_llama_style_f32`
+  - `GEMVKernel.encodeQ4KWeightsTripleLlamaStyle(...)`
+  - local/global QKV microbench rows
+  - a global-QKV-only runtime probe behind `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_TRIPLE=1`
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/llamaStyleTripleQ4KGemvMatchesSeparateCPUReferences'`
+  - `swift test --filter 'GEMVTests/llamaStyleTripleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Result:
+  - local QKV triple packed: `0.440 ms/op`; local triple llama-style: `0.454 ms/op`
+  - global QKV triple packed: `0.804 ms/op`; global triple llama-style: `0.328 ms/op`
+- Runtime smoke with global-only triple flag:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_TRIPLE=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `28.126 tok/s`
+- Decision:
+  - ROLLED BACK. The kernel was parity-safe and global QKV microbench looked strong, but runtime smoke was slower than the current dual-stack smoke, so it did not earn median/publishable runs.
+- Post-rollback checks:
+  - `rg -n "TripleLlama|triple.*llama|three_llama|LLAMA_STYLE_TRIPLE|q4_k_gemv_three_llama|qkv_triple_q4k_llama" Sources Tests tasks/todo.md` shows only this task note.
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'` passed.
+
+## Active Plan: Post-Llama-Style Bottleneck Refresh
+
+- [ ] Refresh Gemma split profiling after the kept llama-style generic Q4_K projection flag
+  - [x] Record why stale pre-flag profiling is insufficient
+  - [x] Run one sequential split-phase profile under the current best env stack
+  - [x] Identify the next bounded experiment from refreshed buckets
+
+### Active Spec
+
+- Hypothesis:
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1` improved FFN down and global attention-out projections, so old split-profile bucket weights may no longer point to the right next bottleneck.
+- Constraints:
+  - Diagnostic-only run; no benchmark semantics changes.
+  - Do not run multiple Gemma jobs in parallel.
+  - Use the current best opt-in stack: packed Q4, tiled FFN gate/up, Q6 top-1, llama-style generic Q4.
+- Verification:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+
+### Active Review
+
+- Split profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `9.092 tok/s`
+  - token 8 GPU totals: FFN gate/up `75.8ms/336x`, FFN down projection `70.4ms/336x`, attention `45.9ms/336x`, LM head `19.8ms/8x`, PLE `11.0ms/336x`
+- Interpretation:
+  - Llama-style generic Q4 reduced some projection cost, but the next bottleneck is still FFN projections.
+  - Recheck the `EDGERUNNER_GEMMA4_Q4_TILED` assumption under the new stack before writing another kernel, because the latest microbench showed packed gate/up close to or faster than four-row in this run.
+
+## Active Plan: Q4_TILED Recheck Under Llama-Style Generic Q4
+
+- [ ] Recheck whether four-row FFN gate/up still helps under the current llama-style generic Q4 stack
+  - [x] Derive hypothesis from refreshed profile and microbench
+  - [x] Run one sequential smoke without `EDGERUNNER_GEMMA4_Q4_TILED`
+  - [x] If coherent and faster than the tiled smoke, run short median
+  - [x] Record keep/no-go without changing benchmark semantics
+
+### Active Spec
+
+- Hypothesis:
+  - The old best stack used `EDGERUNNER_GEMMA4_Q4_TILED=1`, but the current microbench with the new llama-style generic Q4 rows showed the packed gate/up path can be competitive. Disabling tiled gate/up may improve the refreshed FFN-heavy profile without code changes.
+- Constraints:
+  - No code changes for this check.
+  - Do not change prompt text, generated-token count, model path, quantization, or benchmark semantics.
+  - Do not run multiple Gemma benchmarks in parallel.
+
+### Active Review
+
+- Smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `24.126 tok/s`
+- Decision:
+  - NO-GO. Keep `EDGERUNNER_GEMMA4_Q4_TILED=1` in the current best stack because the comparable tiled smoke was `25.141 tok/s`.
+  - No short median was run for the no-tiled variant because it failed the smoke-speed gate.
+
+## Active Plan: Dual Llama-Style Gate/Up Q4_K Microbench
+
+- [ ] Test whether a dual-output llama-style Q4_K kernel improves FFN gate/up
+  - [x] Record the hypothesis and microbench-only gate
+  - [x] Add failing-first parity coverage for a dual llama-style Q4_K API
+  - [x] Implement the smallest Metal wrapper/kernel for dual gate/up
+  - [x] Add a release microbench row beside existing FFN gate/up rows
+  - [x] Keep only if it beats the current two-projection gate/up path
+
+### Active Spec
+
+- Hypothesis:
+  - The current post-llama-style profile is still FFN gate/up dominated. A dual llama-style kernel may reuse activation-vector loads across gate and up matrices while avoiding the heavier register shape of the earlier dual four-row and fused GeGLU attempts.
+- Constraints:
+  - Microbench-only until it beats the existing gate/up path.
+  - Do not change GeGLU math or Gemma runtime selection until parity and shape timing clear the gate.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences'` failed at compile with missing `encodeQ4KWeightsLlamaStyleDual`, proving the new parity test covered the intended API.
+- Implemented:
+  - `q4_k_gemv_llama_style_dual_f32`
+  - `GEMVKernel.encodeQ4KWeightsLlamaStyleDual(...)`
+  - `gemma_ffn_gate_up_dual_q4k_llama_style` microbench row
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1` for Gemma FFN gate/up only
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `swift test --filter 'GEMVTests/dualLlamaStyleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Gate result:
+  - FFN gate four-row: `0.282 ms/op`
+  - two separate four-row gate/up projections: about `0.564 ms/op`
+  - dual llama-style gate/up: `0.347 ms/op`
+  - decision: cleared the microbench gate for runtime smoke/median behind env flag.
+- Gemma smoke with current best stack plus dual flag:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated text stayed coherent: `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `28.448 tok/s`
+- Gemma short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `29.236 tok/s`
+  - best decode: `29.598 tok/s`
+  - min decode: `28.963 tok/s`
+  - median TTFT: `0.567470s`
+- Publishable short/long artifact run:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE_DUAL=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected test status: failed target assertion because median decode is still below `150 tok/s`
+  - short median decode: `27.337 tok/s`
+  - short median TTFT: `0.572152s`
+  - long prompt tokens: `1037`
+  - long TTFT: `260.326917s`
+  - long prompt throughput proxy: `3.983 tok/s`
+  - long decode: `1.594 tok/s`
+  - short and long coherence: passed
+  - artifact: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `239.3 tok/s`
+  - token hash: `0afae14a84cf0df8`
+  - result: passed.
+- Decision:
+  - KEPT as an opt-in Gemma FFN gate/up flag. It improves the short median from `25.987 tok/s` to `29.236 tok/s` and preserves short/long coherence, but the publishable target remains failed.
+
+## Active Plan: Llama-Style Q4_K SIMD-Lane GEMV Probe
+
+- [ ] Test whether a llama.cpp-style Q4_K single-RHS projection kernel is faster than EdgeRunner's active packed kernels
+  - [x] Record source-backed hypothesis and benchmark-only scope before editing kernels
+  - [x] Add failing-first parity coverage for a new SIMD-lane Q4_K GEMV API
+  - [x] Implement the smallest Metal wrapper/kernel needed for the probe
+  - [x] Add shape microbench rows for Gemma FFN gate/down, QKV, and attention-output shapes
+  - [x] Keep only if the microbench beats current runtime-relevant paths; otherwise roll back
+
+### Active Spec
+
+- Hypothesis:
+  - Upstream llama.cpp's Metal Q4_K decode path avoids EdgeRunner's per-block threadgroup scale/min cache and barriers. It maps packed `uint16_t` work directly to simd lanes and processes two rows per threadgroup with two simdgroups. A local SIMD-lane variant may improve the broad sliding-layer Q4_K projection bottleneck measured in Gemma E4B.
+- Constraints:
+  - Microbench-only until proven faster. Do not wire into Gemma decode or benchmark semantics until parity and shape microbench show a clear win.
+  - Preserve the raw GGUF Q4_K_M block layout and CPU reference semantics.
+  - Do not repeat prior row-layout-only no-gos unless this variant removes the threadgroup scale/min barriers.
+- Verification:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGemvMatchesCPUReference'` failed at compile with missing `encodeQ4KWeightsLlamaStyle`, proving the new parity test covered the intended API.
+- Implemented:
+  - `q4_k_gemv_llama_style_f32`, adapted from llama.cpp's Q4_K lane mapping for EdgeRunner's simple row-major Q4_K_M buffers.
+  - `GEMVKernel.encodeQ4KWeightsLlamaStyle(...)`.
+  - `EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1` for generic Gemma Q4_K projections only; QKV triple and FFN gate/up keep their existing measured paths.
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `swift test --filter 'GEMVTests/llamaStyleQ4KGemvMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Representative microbench results:
+  - local QKV packed: `0.788 ms/op`; llama-style: `0.668 ms/op`; active triple-packed still faster at `0.396 ms/op`
+  - global QKV packed: `0.751 ms/op`; llama-style: `0.887 ms/op`; active triple-packed still faster at `0.576 ms/op`
+  - local attention out packed: `0.244 ms/op`; llama-style: `0.258 ms/op`
+  - global attention out packed: `0.417 ms/op`; llama-style: `0.288 ms/op`
+  - FFN gate packed: `0.451 ms/op`; four-row: `0.521 ms/op`; llama-style: `0.522 ms/op`
+  - FFN down packed: `0.431 ms/op`; four-row: `0.385 ms/op`; llama-style: `0.274 ms/op`
+- Gemma smoke with current best stack plus llama-style generic Q4:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated text stayed coherent: `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `25.141 tok/s`
+- Gemma short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `25.987 tok/s`
+  - best decode: `26.032 tok/s`
+  - min decode: `25.732 tok/s`
+  - median TTFT: `0.644200s`
+- Publishable short/long artifact run:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_Q4_LLAMA_STYLE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected test status: failed target assertion because median decode is still below `150 tok/s`
+  - short median decode: `24.425 tok/s`
+  - short median TTFT: `0.648009s`
+  - long prompt tokens: `1037`
+  - long TTFT: `264.783670s`
+  - long prompt throughput proxy: `3.916 tok/s`
+  - long decode: `1.579 tok/s`
+  - short and long coherence: passed
+  - artifact: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `240.5 tok/s`
+  - token hash: `0afae14a84cf0df8`
+  - result: passed.
+- Decision:
+  - KEPT as an opt-in Gemma generic projection flag. It improves the short median from the prior best `23.569 tok/s` to `25.987 tok/s` and preserves short/long coherence, but it is still far below the `150 tok/s` publishable target.
+
+# Active Plan: Gemma 4 E4B Publishable Benchmark
+
+- [ ] Make Gemma 4 E4B Q4_K_M benchmark publishable without changing benchmark semantics
+  - [x] Refresh memory, lessons, dirty worktree state, and current baseline evidence
+  - [x] Inspect current short median harness and runtime profiling hooks
+  - [x] Add TDD coverage for coherence rejection and artifact metadata requirements
+  - [x] Add short/long Gemma benchmark artifact generation with TTFT, prompt, decode, token counts, generated text, model hash, git commit, machine/OS, command, and env vars
+  - [x] Run focused helper tests
+  - [x] Run the Gemma short median benchmark sequentially and capture current artifact
+  - [x] Run the Gemma long-prompt benchmark sequentially and capture coherence verdict
+  - [x] Profile bottlenecks with `EDGERUNNER_GEMMA4_PROFILE=1`
+  - [x] Pick one isolated, env-gated Gemma optimization experiment only after profiler evidence
+  - [x] Rerun Qwen publishable if any shared runtime/Metal code changes are kept
+
+### Active Spec
+
+- Target model: `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`
+- Model sha256 captured locally: `90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f`
+- Current git commit: `3e14973` on `main`
+- Baseline command:
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+- Current baseline from prior sequential run:
+  - median decode: `17.683 tok/s`
+  - best decode: `18.347 tok/s`
+  - median TTFT: `1.209648s`
+- Publishable requirements:
+  - median decode must be `>=150 tok/s` on the same model, generated-token count, prompt difficulty, context, quantization, and benchmark semantics
+  - short and long prompts must produce coherent output
+  - report TTFT, prompt-processing tok/s, decode tok/s, generated token counts, model hash, git commit, machine/OS, commands, env vars, generated samples, and coherence verdict
+  - reject empty, whitespace-heavy, repeated-token, null-containing, or semantically broken output
+  - do not run multiple Gemma benchmarks in parallel
+  - keep Gemma changes isolated unless shared changes pass Qwen publishable
+
+### Assumption Check
+
+- The existing `Gemma4DownloadedBenchmark` only has a short-prompt smoke and five-run median harness.
+- It prints metrics but does not write a durable publishable artifact.
+- It does not yet contain a long-prompt lane or separate prompt-processing metric.
+- Prior lessons warn that Q4_K/Q6_K self-tests and single-run wins are insufficient; real generated text and median runs are mandatory.
+
+### Active Review
+
+- Added `runDownloadedGGUFPublishableBenchmark` in `Tests/EdgeRunnerTests/Gemma4DownloadedBenchmark.swift`.
+- Added helper-level TDD coverage for coherence rejection and artifact metadata.
+- Focused helper verification passed:
+  - `swift test --filter 'Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+- Release publishable gate command:
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+- Release publishable gate result on 2026-05-12:
+  - short median decode: `18.617 tok/s`
+  - short median TTFT: `1.134620s`
+  - long prompt tokens: `1044`
+  - long TTFT: `279.300498s`
+  - long prompt throughput proxy: `3.738 tok/s`
+  - long decode: `1.576 tok/s`
+  - model sha256: `90ce98129eb3e8cc57e62433d500c97c624b1e3af1fcc85dd3b55ad7e0313e9f`
+  - artifact: `benchmarks/gemma4_publishable_benchmark.json`
+  - status: FAILED target; median decode is below `150 tok/s`
+  - quality finding: generated samples were `thought\nThinking Process...` fragments, so the coherence gate was tightened to reject reasoning preambles without an answer.
+- Profiler command:
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Profiler result:
+  - decode: `17.793 tok/s`
+  - generated sample remained the `thought\nThinking Process...` fragment
+  - cumulative profile at token 8: `gpu_layer_stack=2263.2ms/33x/63.1%`, `ple_row_gather=707.4ms/23x/19.7%`, `token_total=448.5ms/8x/12.5%`
+- Existing opt-in experiment: `EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU=1`
+  - smoke: same tokens, `17.606 tok/s`
+  - median: `18.099 tok/s`, best `18.216 tok/s`, median TTFT `1.165869s`
+  - status: ROLLED BACK / not promoted; slower than the `18.617 tok/s` current gate
+- Existing opt-in experiment: `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1`
+  - median: `18.001 tok/s`, best `18.274 tok/s`, median TTFT `1.163713s`
+  - status: ROLLED BACK / not promoted; slower than current gate
+- Gemma chat-template quality fix:
+  - root cause: fallback `Gemma4ChatTemplate` injected `<|think|>` for user-only prompts even though the GGUF template only injects it when `enable_thinking` is set
+  - updated `Gemma4ChatTemplate` and tokenizer parity expectations to remove the default thinking block
+  - focused tests passed:
+    - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+  - short release smoke after fix: generated `Fast local inference enables real-time AI capabilities directly on edge devices.`, TTFT `11.552079s`, decode `17.757 tok/s`
+  - short median after fix: `18.439 tok/s`, best `18.518 tok/s`, median TTFT `0.823355s`
+- Publishable artifact was refreshed with 64-token publishable generation:
+  - command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - status: FAILED target only; coherence gates passed
+  - short median decode: `17.492 tok/s`
+  - short median TTFT: `0.833124s`
+  - long prompt tokens: `1037`
+  - long TTFT: `286.209720s`
+  - long prompt throughput proxy: `3.623 tok/s`
+  - long decode: `1.529 tok/s`
+  - long generated text: `Reporting median decode speed alongside coherent output quality is crucial because speed metrics alone don't guarantee usability. A fast model that produces nonsensical or irrelevant text is functionally useless, so both efficiency and quality must be assessed together for a complete picture of local inference performance.`
+  - artifact: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate:
+  - first run failed because `/tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf` was missing
+  - restored the expected hard link from `models/pinned/Qwen3-0.6B-Q8_0.gguf`
+  - `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'` passed
+  - Qwen median decode: `202.5 tok/s`
+  - Qwen token hash: `0afae14a84cf0df8`
+
+## Active Plan: Gemma GPU Layer Stack Attribution
+
+- [ ] Attribute the coherent Gemma decode bottleneck before the next optimization
+  - [x] Rerun the existing Gemma profiler after the chat-template coherence fix
+  - [x] Add env-gated detail profiling around GPU stack encode, command-buffer wait, LM-head encode, and CPU argmax/readback
+  - [x] Build and run focused tests to verify instrumentation does not change benchmark semantics
+  - [x] Run one sequential profiled Gemma smoke benchmark and record the new bucket split
+  - [x] Add env-gated phase-level split profiling for attention, FFN, PLE, and LM head
+  - [x] Add env-gated FFN subphase profiling for activation vs down/post-norm
+  - [ ] Choose the next kept/rolled-back experiment from the measured bucket, not from a blind flag flip
+
+### Active Spec
+
+- New instrumentation must be inert unless `EDGERUNNER_GEMMA4_PROFILE=1` is set.
+- It must not alter prompt text, generated token count, sampling, model weights, quantization, or decode semantics.
+- The next useful split is:
+  - CPU preparation / scratch copy
+  - per-layer command encoding
+  - LM-head command encoding
+  - command-buffer commit/wait GPU execution
+  - CPU greedy argmax/readback
+
+### Active Review
+
+- Fresh coherent profile command:
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated text: `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - TTFT: `11.082860s`
+  - decode: `18.018 tok/s`
+  - top cumulative buckets at token 8: `gpu_layer_stack=7914.7ms/26x/66.4%`, `ple_row_gather=2229.2ms/21x/18.7%`, `ple_token_embedding=1281.1ms/21x/10.7%`, `token_total=442.3ms/8x/3.7%`
+  - interpretation: quality is fixed, but the remaining decode gap is still inside the GPU-resident Gemma layer stack, not chat-template behavior.
+- Added profile buckets in `Gemma4LanguageModel` for:
+  - `gpu_layer_stack_encode_layers`
+  - `gpu_layer_encode_total`
+  - `gpu_layer_stack_encode_lm_head`
+  - `gpu_layer_stack_wait`
+  - `gpu_layer_stack_gpu_time`
+  - `gpu_layer_stack_kernel_time`
+  - `gpu_layer_stack_argmax`
+  - `gpu_layer_stack_read_hidden`
+- Focused verification passed:
+  - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+- Coarse split profile command:
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Coarse split result:
+  - generated text stayed coherent
+  - decode: `15.033 tok/s` under profiling load
+  - token 8 buckets: `gpu_layer_stack_wait=8572.1ms/26x`, `gpu_layer_stack_encode_layers=398.3ms/26x`, `gpu_layer_stack_argmax=3.0ms/8x`
+  - interpretation: CPU layer encoding and argmax/readback are too small to explain the target gap; the bottleneck is GPU execution inside the layer/LM-head command buffer.
+- Added diagnostic-only split-stack mode:
+  - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1`
+  - this intentionally inserts command-buffer waits between layers and the LM head, so it is not a publishable throughput path.
+- Split-stack profile command:
+  - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Split-stack result:
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `15.492 tok/s` in diagnostic mode
+  - token 8 split-layer totals: `gpu_split_layer_gpu_time=300.7ms/336x`, `gpu_split_layer_wait=365.5ms/336x`, `gpu_split_layer_encode=73.1ms/336x`
+  - interpretation: the measured layer GPU work is about `37.6ms` over 42 layers per generated token in this diagnostic mode, before any visible LM-head contribution. The next optimization must attack layer kernels/runtime structure, not CPU argmax or host encode overhead.
+- Repeated split-stack profile after widening output:
+  - command: `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `15.457 tok/s` in diagnostic mode
+  - token 8 split-layer GPU: `303.4ms/336x`, about `37.9ms` of layer GPU work per generated token
+  - token 8 split-LM-head GPU: `63.9ms/8x`, about `8.0ms` per generated token
+  - interpretation: LM head is material but not enough; even eliminating it entirely would not get near `150 tok/s`. The next experiment should target Q4_K layer projection/FFN work or broader layer kernel structure.
+- Phase-level split profiling:
+  - refactored `encodeDecoderLayerWithCache` into attention, FFN, and PLE encode helpers while keeping the default path on one command buffer
+  - added diagnostic flags:
+    - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1`
+    - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1`
+  - focused compile/behavior check passed:
+    - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|GEMVTests/encodeF16WeightsMatchesCPUReference'`
+  - phase command:
+    - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - phase result:
+    - generated token IDs and coherent text stayed unchanged
+    - diagnostic decode: `12.094 tok/s`
+    - token 8 GPU totals: FFN `203.0ms/336x`, attention `72.2ms/336x`, PLE `25.0ms/336x`, LM head `62.6ms/8x`
+    - interpretation: FFN is the largest layer bucket; LM head remains material but secondary.
+  - FFN subphase command:
+    - `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - FFN subphase result:
+    - generated token IDs and coherent text stayed unchanged
+    - diagnostic decode: `10.689 tok/s`
+    - token 8 GPU totals: FFN activation `105.0ms/336x`, FFN down/post-norm `97.1ms/336x`, attention `71.6ms/336x`, PLE `24.5ms/336x`, LM head `62.5ms/8x`
+    - interpretation: the FFN bottleneck is split nearly evenly between gate/up/activation and down/post-norm, so optimizing only down projection is insufficient.
+  - Existing fused-GeGLU flag under the same FFN subphase profiler:
+    - command: `EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs and coherent text stayed unchanged
+    - diagnostic decode: `10.461 tok/s`
+    - token 8 GPU totals: FFN activation `103.5ms/336x`, FFN down/post-norm `96.6ms/336x`, attention `72.6ms/336x`, PLE `24.8ms/336x`, LM head `62.1ms/8x`
+    - status: not promoted; it barely moves the FFN activation bucket in phase timing.
+  - default post-refactor smoke passed:
+    - command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs and coherent text stayed unchanged
+    - decode: `18.372 tok/s`
+  - Qwen publishable regression gate after the additive shared `GEMVKernel` diagnostic API passed:
+    - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - median decode: `245.3 tok/s`
+    - token hash: `0afae14a84cf0df8`
+  - `git diff --check` passed.
+- Source research:
+  - current llama.cpp Metal uses `kernel_mul_mv_ext_q4x4_f32_impl` and host specializations such as `kernel_mul_mv_ext_q4_K_f32_r1_2` through `_r1_5` for Q4_K, and analogous Q6_K specializations.
+  - EdgeRunner's current Q4_K/Q6_K GEMV wrappers still dispatch one 256-thread threadgroup per output row for most K-quant projections.
+- Existing Q4 2-row variant recheck:
+  - command: `EDGERUNNER_GEMMA4_Q4_2ROW=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `17.891 tok/s`
+  - status: not promoted; slower than the current coherent baseline range.
+- Q4 4-row experiment:
+  - added a focused parity test for a new `encodeQ4KWeightsFourRows` API and watched it fail before implementation
+  - implemented the four-row Q4_K Metal kernel and Gemma env flag locally
+  - focused parity passed
+  - real Gemma smoke command: `EDGERUNNER_GEMMA4_Q4_4ROW=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `15.818 tok/s`
+  - status: rolled back; correctness-safe but materially slower.
+- Post-rollback focused verification passed:
+  - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+- Default smoke after profiler and 4-row rollback:
+  - command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `18.127 tok/s`
+- Artifact limitations field:
+  - added TDD coverage for explicit `limitations` metadata in the publishable artifact
+  - first run failed with `extra argument 'limitations' in call`
+  - implemented `GemmaBenchmarkArtifact.limitations` and population for below-target median decode, coherence failures, and too-slow long-prompt processing
+  - focused test passed: `swift test --filter 'Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+  - full focused helper/template verification passed again:
+    - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata'`
+- Refreshed publishable artifact after adding limitations:
+  - command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - status: failed only the expected throughput target
+  - short median decode: `17.275 tok/s`
+  - short median TTFT: `0.836073s`
+  - long prompt tokens: `1037`
+  - long TTFT: `282.368662s`
+  - long prompt throughput proxy: `3.673 tok/s`
+  - long decode: `1.533 tok/s`
+  - short/long coherence: passed
+  - artifact: `benchmarks/gemma4_publishable_benchmark.json`
+  - artifact now includes `limitations` with below-target median decode and slow long-prompt processing.
+- Reproducible command metadata:
+  - added TDD coverage that artifact command metadata uses the reproducible `swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'` command rather than SwiftPM's internal `swiftpm-testing-helper`
+  - first run failed with missing `benchmarkCommand`
+  - implemented explicit command generation in the artifact
+  - focused verification passed:
+    - `swift test --filter 'Gemma4DownloadedBenchmark/benchmarkCommandIsReproducibleSwiftTestCommand'`
+    - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4DownloadedBenchmark/coherenceGateRejectsInvalidGeneratedText|Gemma4DownloadedBenchmark/publishableArtifactIncludesRequiredMetadata|Gemma4DownloadedBenchmark/benchmarkCommandIsReproducibleSwiftTestCommand'`
+- Refreshed publishable artifact after command metadata fix:
+  - command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - status: failed only the expected throughput target
+  - short median decode: `17.180 tok/s`
+  - short median TTFT: `0.840911s`
+  - long prompt tokens: `1037`
+  - long TTFT: `276.039961s`
+  - long decode: `1.528 tok/s`
+  - short/long coherence: passed
+  - artifact command now contains the reproducible command and no `swiftpm-testing-helper`
+  - `git diff --check` passed.
+- Existing flag combination recheck on the coherent path:
+  - smoke command: `EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - smoke result: coherent output unchanged, `18.169 tok/s`
+  - combined smoke command: `EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - combined smoke result: coherent output unchanged, `18.280 tok/s`
+  - combined median command: `EDGERUNNER_GEMMA4_Q4_FUSED_GEGLU=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - combined median result: median `18.443 tok/s`, best `18.588 tok/s`, min `18.302 tok/s`, median TTFT `0.827345s`
+  - status: not promoted as a publishable path; coherent and mildly better than the latest publishable short median, but still far below `150 tok/s` and built from already opt-in flags.
+- Added an env-gated K-quant shape microbenchmark:
+  - test: `GEMVTests/gemmaQ4KShapeMicrobenchmark`
+  - inert unless `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1`
+  - compile/inert check passed: `swift test --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - enabled command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - results:
+    - local QKV shape `3072x2560`: `1.173 ms/op`, `3.8 GB/s`
+    - global QKV shape `6144x2560`: `1.912 ms/op`, `4.6 GB/s`
+    - FFN gate/up shape `10240x2560`: `3.011 ms/op`, `4.9 GB/s`
+    - FFN down shape `2560x10240`: `2.583 ms/op`, `5.7 GB/s`
+  - interpretation: the Q4_K kernels are single-digit GB/s in the relevant shapes, so the remaining target gap is consistent with kernel quality/math-volume limits rather than host argmax or benchmark accounting.
+
+## Active Plan: Gemma Dense GEMV Viability Check
+
+- [x] Decide whether dequantized hot F16 weights are a plausible next runtime experiment
+  - [x] Add caller-owned-buffer F16 GEMV encoding so dense timing is not dominated by per-iteration array copies
+  - [x] Extend the env-gated Gemma shape microbench to compare Q4_K and F16 at the same layer shapes
+  - [x] Keep the microbench inert unless `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1`
+  - [x] Run the focused inert check and enabled release microbench sequentially
+  - [x] Record whether the measured speedup is large enough to justify a dequantized-hot-weight runtime path
+
+### Active Spec
+
+- This is a diagnostic microbenchmark only, not a publishable decode benchmark.
+- Success criteria for a follow-on runtime experiment:
+  - dense F16 wall time must be dramatically faster than current Q4_K at the same Gemma shapes
+  - any runtime path would have to be opt-in, Gemma-only, coherent-output gated, and memory-pressure aware
+
+### Active Review
+
+- Added `GEMVKernel.encodeF16Weights(...)` for caller-owned command-buffer encoding.
+- Added parity coverage for the new encode API:
+  - `GEMVTests/encodeF16WeightsMatchesCPUReference`
+- Added MPS F16 matvec parity coverage:
+  - `GEMVTests/mpsF16MatrixVectorMatchesCPUReference`
+- Updated `GEMVTests/gemmaQ4KShapeMicrobenchmark` to reuse buffers for both Q4_K and dense F16 measurements.
+- Inert check passed:
+  - `swift test --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Focused API/inert verification passed:
+  - `swift test --filter 'GEMVTests/encodeF16WeightsMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Focused MPS/API/inert verification passed:
+  - `swift test --filter 'GEMVTests/mpsF16MatrixVectorMatchesCPUReference|GEMVTests/encodeF16WeightsMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled release microbench passed:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Results:
+  - local QKV `3072x2560`: Q4_K `0.464 ms/op`, F16 `0.347 ms/op`, MPS F16 `0.309 ms/op`
+  - global QKV `6144x2560`: Q4_K `0.749 ms/op`, F16 `0.521 ms/op`, MPS F16 `0.400 ms/op`
+  - FFN gate/up `10240x2560`: Q4_K `1.165 ms/op`, F16 `0.875 ms/op`, MPS F16 `0.884 ms/op`
+  - FFN down `2560x10240`: Q4_K `1.259 ms/op`, F16 `0.966 ms/op`, MPS F16 `0.948 ms/op`
+- Decision:
+  - Do not pursue a broad dequantized-hot-weight runtime path as the next step. Dense F16/MPS F16 is only materially faster on QKV and still far short of the wall-time reduction needed to close the gap from roughly `17-18 tok/s` to `150 tok/s`; it would also increase resident weight memory substantially.
+  - The next productive optimization should target Q4_K kernel structure itself or reduce the amount/frequency of layer work; dense conversion can remain a narrow fallback idea only if a specific tiny subcomponent proves disproportionately expensive.
+
+## Active Plan: Packed-Byte Q4_K GEMV Experiment
+
+- [x] Test a packed-byte Q4_K GEMV kernel that computes both nibbles from each packed byte in one thread
+  - [x] Add a separate `q4_k_gemv_packed_f32` shader and wrapper
+  - [x] Add CPU-reference parity coverage for the packed kernel
+  - [x] Extend the env-gated Gemma shape microbench to include packed Q4_K and real compound QKV/FFN kernels
+  - [x] Wire packed Q4_K into Gemma behind `EDGERUNNER_GEMMA4_Q4_PACKED=1`
+  - [x] Run focused tests, microbench, Gemma smoke, Gemma median, full publishable artifact, and Qwen publishable regression gate
+
+### Active Spec
+
+- Hypothesis:
+  - Current Q4_K GEMV loads each packed weight byte twice because low/high nibbles are handled by different `local_id` lanes. A packed-byte variant should reduce duplicate byte loads and thread count while preserving exact dequant math.
+- Constraints:
+  - Keep the path opt-in until real Gemma median and long-prompt coherence are proven.
+  - Do not change benchmark semantics or generated-token counts.
+  - Roll back if coherent output changes or median regresses.
+
+### Active Review
+
+- Focused parity/inert checks passed:
+  - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Enabled Q4_K shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - local QKV single: default `0.864 ms/op`, packed `0.743 ms/op`
+  - global QKV single: default `0.959 ms/op`, packed `0.504 ms/op`
+  - FFN gate single: default `1.142 ms/op`, packed `0.470 ms/op`
+  - FFN down single: default `1.329 ms/op`, packed `0.368 ms/op`
+  - real compound kernels for context:
+    - local QKV triple: `0.864 ms/op`
+    - global QKV triple: `0.771 ms/op`
+    - FFN gate/up dual: `1.354 ms/op`
+    - FFN gate/up fused GeGLU: `0.935 ms/op`
+- Gemma packed smoke:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `19.872 tok/s`
+- Gemma packed short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `20.227 tok/s`
+  - best decode: `20.306 tok/s`
+  - min decode: `20.140 tok/s`
+  - median TTFT: `0.745577s`
+- Gemma packed publishable artifact:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected status: FAILED target only
+  - short median decode: `19.005 tok/s`
+  - short median TTFT: `0.750072s`
+  - long prompt tokens: `1037`
+  - long TTFT: `270.373454s`
+  - long decode: `1.555 tok/s`
+  - short/long coherence: passed
+  - artifact refreshed: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate passed after the shared Metal change:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `239.2 tok/s`
+  - token hash: `0afae14a84cf0df8`
+- Decision:
+  - Keep the packed Q4_K path as an opt-in Gemma experiment because it improves real short median from the current `~18 tok/s` range to `20.227 tok/s` without breaking coherence.
+  - Do not mark publishable complete; this is a real improvement but still far below `150 tok/s`, and long prompt remains dominated by prompt processing.
+
+## Active Plan: Packed Compound Q4_K Kernel Experiment
+
+- [x] Preserve the packed-byte Q4_K win while reducing extra dispatches in the opt-in Gemma path
+  - [x] Add parity tests for packed dual, packed fused-GeGLU, and packed triple Q4_K wrappers
+  - [x] Implement separate packed compound Metal entry points and Swift wrappers
+  - [x] Compare packed compound kernels in the env-gated Gemma shape microbench
+  - [x] Wire only the measured winner into `EDGERUNNER_GEMMA4_Q4_PACKED=1`
+  - [x] Run Gemma smoke, short median, refreshed publishable artifact, and Qwen publishable regression gate
+
+### Active Spec
+
+- Hypothesis:
+  - The prior packed path improved single-projection Q4_K math but lost some runtime benefit by disabling QKV triple and FFN dual/fused compound kernels. Packed compound kernels should preserve the packed-byte load reduction while reducing dispatch count.
+- Constraints:
+  - Keep every new packed compound path opt-in under `EDGERUNNER_GEMMA4_Q4_PACKED=1`.
+  - Do not change benchmark semantics, prompt text, generated-token counts, quantization, or model path.
+  - Keep only variants that improve real Gemma median while preserving coherent short/long output.
+
+### Active Review
+
+- Added kept parity coverage:
+  - `GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences`
+  - temporary packed dual and packed fused-GeGLU parity checks passed during the experiment, then those slower kernels were removed from the production diff.
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - local QKV triple: default `0.862 ms/op`, packed `0.366 ms/op`
+  - global QKV triple: default `0.763 ms/op`, packed `0.544 ms/op`
+  - FFN gate/up dual: default `0.684 ms/op`, packed `1.116 ms/op`
+  - FFN gate/up fused GeGLU: default `0.833 ms/op`, packed `1.398 ms/op`
+  - decision: wire packed triple QKV only; keep FFN activation on the prior two-single-packed projection path because packed dual and packed fused-GeGLU are slower.
+- Gemma packed-QKV smoke:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - decode: `20.319 tok/s`
+- Gemma packed-QKV short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `20.800 tok/s`
+  - best decode: `20.824 tok/s`
+  - min decode: `20.586 tok/s`
+  - median TTFT: `0.722039s`
+- Refreshed publishable artifact:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected status: FAILED target only
+  - short median decode: `19.505 tok/s`
+  - short median TTFT: `0.726013s`
+  - long prompt tokens: `1037`
+  - long TTFT: `268.673593s`
+  - long prompt throughput proxy: `3.860 tok/s`
+  - long decode: `1.559 tok/s`
+  - short/long coherence: passed
+  - artifact refreshed: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate passed:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `239.4 tok/s`
+  - token hash: `0afae14a84cf0df8`
+- Rechecked a mixed FFN activation variant after the microbench:
+  - change tested: keep packed QKV/down but route packed-mode FFN gate/up through the existing non-packed dual kernel
+  - smoke stayed coherent but dropped to `19.665 tok/s`
+  - median dropped to `20.019 tok/s`
+  - status: ROLLED BACK; the prior two-single-packed FFN activation remains better in the real Gemma median despite the isolated dual microbench result.
+- Final verification after removing the failed packed dual/fused-GeGLU kernels from the production diff:
+  - focused tests passed:
+    - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+  - packed Gemma smoke passed with coherent unchanged token IDs and `20.354 tok/s`
+  - Qwen publishable passed with median decode `239.8 tok/s` and token hash `0afae14a84cf0df8`
+- Decision:
+  - Keep the packed triple QKV wrapper as part of the opt-in packed Gemma path; it improves real short median from `20.227` to `20.800 tok/s`.
+  - Do not keep packed dual or packed fused-GeGLU in the production diff despite parity success; the shape microbench showed both are slower than the existing FFN compound alternatives.
+  - Do not mark publishable complete; the artifact still fails the `>=150 tok/s` median decode target by a wide margin.
+
+## Active Plan: F16-Weight / F32-Activation GEMV Viability Check
+
+- [x] Decide whether a narrow dequantized F16 hot path is worth a Gemma runtime experiment
+  - [x] Verify current source assumptions against llama.cpp/MLX-style hot paths rather than trusting the stale half-input microbench
+  - [x] Add a focused F16-weight x F32-input/output GEMV parity test
+  - [x] Add an env-gated Gemma-shape microbench row for F16-weight x F32-input/output
+  - [x] Compare against current Q4_K packed/default FFN down and QKV measurements
+  - [x] Only if the microbench shows a large enough win, test an opt-in Gemma runtime path; otherwise record rollback/no-go
+
+### Active Spec
+
+- Hypothesis:
+  - The previous dense-F16 diagnostic used F16 inputs and outputs, but Gemma's live scratch buffers use Float32 activations. A runtime-realistic F16-weight x F32-input/output kernel may or may not preserve the large FFN-down microbench win.
+- Constraints:
+  - This is diagnostic until proven. Do not allocate/dequantize multi-GB hot weights in the runtime unless the realistic kernel clears a meaningful threshold.
+  - Keep the microbench inert unless `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1`.
+  - Do not change benchmark semantics, prompt text, quantization, model path, or generated-token count.
+
+### Active Review
+
+- Source/assumption check:
+  - current llama.cpp Metal references still specialize quantized mat-vec paths by operand type and row grouping; the relevant precedent is not "dense F16 is always faster", it is "use the measured kernel for the exact input/output contract."
+  - EdgeRunner's earlier dense-F16 microbench used half input/output, while Gemma's live scratch buffers are Float32.
+- Added diagnostic kernel/API:
+  - Metal kernel: `gemv_f16_f32`
+  - Swift wrapper: `GEMVKernel.encodeF16WeightsF32Input(...)`
+  - parity test: `GEMVTests/encodeF16WeightsF32InputMatchesCPUReference`
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/encodeF16WeightsF32InputMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled release microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - local QKV: packed triple Q4_K `0.390 ms/op`, F16/F32 `0.547 ms/op`
+  - global QKV: packed triple Q4_K `0.522 ms/op`, F16/F32 `0.530 ms/op`
+  - FFN gate: packed Q4_K `0.344 ms/op`, F16/F32 `0.886 ms/op`
+  - FFN down: packed Q4_K `0.558 ms/op`, F16/F32 `0.724 ms/op`
+- Decision:
+  - Do not pursue dequantized F16 hot weights as a Gemma runtime experiment. Under the runtime-realistic Float32 activation contract, F16/F32 is not faster than the current packed Q4_K kernels at the FFN shapes that matter.
+  - Removed the diagnostic-only `gemv_f16_f32` shader/API/test/microbench rows from the production diff after it provided no runtime win and the canonical process-isolated Qwen gate started failing with child status `5`. The measured no-go data above is retained as experiment evidence, but the shared Metal surface is back to the last green Qwen state.
+- Post-rollback verification:
+  - focused Metal/template/tokenizer checks passed:
+    - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/encodeF16WeightsMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+  - canonical Qwen publishable gate passed:
+    - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - median decode: `238.1 tok/s`
+    - token hash: `0afae14a84cf0df8`
+  - packed Gemma smoke stayed coherent:
+    - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+    - decode: `20.185 tok/s`
+
+## Active Plan: Q4_K No-Shared-Scale Kernel Experiment
+
+- [x] Test whether removing per-block threadgroup scale/min barriers helps Gemma Q4_K decode
+  - [x] Add a separate no-shared-scale Q4_K shader and wrapper locally
+  - [x] Prove kernel parity against the CPU Q4_K reference
+  - [x] Compare the no-shared-scale variant in the env-gated Gemma shape microbench
+  - [x] Wire the variant only for Gemma FFN down behind an env flag for one real smoke test
+  - [x] Roll back the variant when real decode regressed
+
+### Active Review
+
+- Focused parity passed while the experiment was present:
+  - `swift test --filter 'GEMVTests/noSharedQ4KGemvMatchesCPUReference|GEMVTests/encodeF16WeightsMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Enabled shape microbench showed mixed results:
+  - local QKV: default `0.469 ms/op`, no-shared `0.512 ms/op`
+  - global QKV: default `0.707 ms/op`, no-shared `0.792 ms/op`
+  - FFN gate/up: default `0.530 ms/op`, no-shared `0.566 ms/op`
+  - FFN down: default `0.816 ms/op`, no-shared `0.658 ms/op`
+- Real Gemma smoke with down-only flag:
+  - command: `EDGERUNNER_GEMMA4_Q4_NOSHARED_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated text stayed coherent
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - decode regressed to `16.631 tok/s`
+  - status: ROLLED BACK from the production diff
+- Post-rollback focused verification passed:
+  - `swift test --filter 'GEMVTests/encodeF16WeightsMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+
+## Active Plan: Buffer-Native PLE Copy Fusion
+
+- [ ] Re-evaluate the buffer-native PLE path under the current packed Q4_K runtime
+  - [x] Re-run packed smoke/profile with `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1`
+  - [x] Encode the hidden-buffer copy into the layer-stack command buffer instead of issuing a separate synchronous blit
+  - [x] Run focused compile/tests, packed buffer-native smoke, and short median
+  - [x] Roll back because median decode did not beat the current packed-Q4 path
+
+### Active Spec
+
+- Hypothesis:
+  - The buffer-native PLE path is now attractive for TTFT and prompt-processing after packed Q4_K, but it still pays an avoidable synchronous `encodeCopyBuffer` blit before the decoder layer stack. Folding that copy into the layer-stack command buffer should reduce per-token CPU/GPU synchronization without changing math.
+- Constraints:
+  - Keep the change Gemma-only.
+  - Do not change prompt text, generated-token count, quantization, model path, or benchmark semantics.
+  - Preserve the existing Swift-array fallback path.
+  - Roll back if generated token IDs/text change or median decode regresses.
+
+### Active Review
+
+- Rechecked the existing opt-in path:
+  - command: `EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - TTFT improved to `4.428665s`
+  - decode was `20.286 tok/s`
+  - profile showed PLE gather/projection/input build near zero after the buffer-native path, leaving the GPU layer stack dominant.
+- Copy-fusion implementation was tested and rolled back:
+  - focused tests passed:
+    - `swift test --filter 'Gemma4Scratch|PLEGatherKernel|PLEInputsKernel|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+  - smoke after copy fusion stayed coherent:
+    - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+    - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+    - decode: `20.312 tok/s`
+  - short median after copy fusion:
+    - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+    - median decode: `20.685 tok/s`
+    - best decode: `20.819 tok/s`
+    - median TTFT: `0.726435s`
+  - decision: rolled back the copy-fusion code because it did not beat the current packed-Q4 median of `20.800 tok/s`; command-buffer cleanup is not the next 7x lever.
+
+## Active Plan: Tiled Q4_K FFN Kernel Experiment
+
+- [ ] Test a Gemma-only row-grouped/tiled Q4_K GEMV kernel for FFN projection shapes
+  - [x] Add failing-first parity coverage for a new tiled Q4_K wrapper
+  - [x] Implement the separate Metal entry point and Swift wrapper without changing existing Q4_K paths
+  - [x] Add env-gated microbench rows under `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1`
+  - [x] Wire selected FFN projections behind `EDGERUNNER_GEMMA4_Q4_TILED=1` only if the microbench improves
+  - [x] Run focused tests, Gemma smoke/median, and Qwen publishable because shared Metal code is kept
+
+### Active Spec
+
+- Hypothesis:
+  - The current Q4_K kernels are still row-parallel and the remaining real bottleneck is FFN projection work. A new row-grouped/tiled kernel that reuses input-vector loads across adjacent rows may improve FFN gate/up/down shapes more than command-buffer or prelude cleanup.
+- Constraints:
+  - Keep this as a separate shader/wrapper until proven.
+  - Do not replace the packed triple QKV winner.
+  - Do not change benchmark semantics, model, quantization, prompt, or generated token counts.
+  - Roll back if parity fails, microbench regresses, coherent output changes, or median decode regresses.
+
+### Active Review
+
+- Read-only exploration found:
+  - the greedy path already encodes decoder layers plus Q6_K LM head into one command buffer
+  - CPU argmax/readback is small
+  - FFN/Q4_K projection work is the remaining high-leverage target
+  - simple row-count tweaks and command-buffer cleanup have already failed or produced only local wins
+- Added `q4_k_gemv_packed_4row_f32` plus `GEMVKernel.encodeQ4KWeightsPackedFourRows(...)`.
+- Added parity coverage:
+  - `GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows`
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `swift test --filter 'GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ4KGemvMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - FFN gate single: packed `0.470 ms/op`, packed four-row `0.341 ms/op`
+  - FFN down single: packed `0.673 ms/op`, packed four-row `0.686 ms/op`
+  - decision: route only packed FFN gate/up projections through four-row under `EDGERUNNER_GEMMA4_Q4_TILED=1`; keep FFN down on the existing packed single-row path.
+- Gemma packed+tiled smoke:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `20.476 tok/s`
+- Gemma packed+tiled short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `20.805 tok/s`
+  - best decode: `21.028 tok/s`
+  - min decode: `20.639 tok/s`
+  - median TTFT: `0.716071s`
+- Qwen publishable regression gate passed after the shared Metal wrapper addition:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `237.6 tok/s`
+  - token hash: `0afae14a84cf0df8`
+- Follow-up fused/down probes:
+  - added and parity-tested a packed four-row fused Gate+Up+GeGLU diagnostic kernel, but the enabled shape microbench showed it was slower than the existing fused GeGLU row (`0.966 ms/op` vs `0.869 ms/op`), so it was removed from the production diff.
+  - briefly routed FFN down through the packed four-row kernel after a noisy microbench showed a possible down win; real Gemma smoke regressed to `19.794 tok/s`, so the down route was rolled back.
+  - post-cleanup focused tests passed:
+    - `swift test --filter 'GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+  - post-cleanup Qwen publishable gate passed:
+    - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+    - median decode: `239.6 tok/s`
+    - token hash: `0afae14a84cf0df8`
+- Decision:
+  - Keep the four-row Q4_K kernel as an opt-in experiment only. The microbench win is real for FFN gate/up, but the real short median gain is noise-level (`20.800` -> `20.805 tok/s`) and still nowhere near `150 tok/s`.
+  - Do not promote it into the default packed path without a larger real median win.
+
+## Active Plan: Packed-vs-Tiled Runtime Attribution
+
+- [ ] Explain why the packed four-row FFN microbench win does not materially move real Gemma median decode
+  - [x] Run one sequential split-FFN profile for the current packed baseline
+  - [x] Run one sequential split-FFN profile for packed+tiled FFN gate/up
+  - [x] Compare FFN activation, FFN down, attention, PLE, and LM-head buckets
+  - [x] Pick the next experiment from measured end-to-end buckets, not isolated microbench rows
+
+### Active Spec
+
+- Hypothesis:
+  - The four-row FFN gate/up kernel improves an isolated projection but either shifts cost into downstream phases, adds scheduling pressure, or is too small a fraction of the full decode stack to matter.
+- Constraints:
+  - Do not run multiple Gemma benchmarks in parallel.
+  - Keep `EDGERUNNER_GEMMA4_Q4_TILED=1` opt-in unless the measured median improvement becomes material.
+  - Do not change prompt text, generated-token count, model path, quantization, or benchmark semantics.
+
+### Active Review
+
+- Packed baseline split-FFN profile:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `11.159 tok/s`
+  - token 8 GPU totals: FFN activation `95.2ms/336x`, FFN down `86.1ms/336x`, attention `56.6ms/336x`, PLE `17.3ms/336x`, LM head `63.0ms/8x`
+- Packed+tiled split-FFN profile:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `11.285 tok/s`
+  - token 8 GPU totals: FFN activation `79.4ms/336x`, FFN down `86.0ms/336x`, attention `56.4ms/336x`, PLE `17.1ms/336x`, LM head `62.6ms/8x`
+- Interpretation:
+  - the four-row gate/up route saves roughly `15.8ms` over 8 generated tokens, or about `2ms/token`, while leaving the rest of the stack unchanged
+  - this matches the real median result: the change is correctness-safe but cannot move a roughly `48ms/token` path anywhere near the `6.7ms/token` budget required for `150 tok/s`
+  - next work should avoid another isolated FFN gate/up row-shape variant and instead target a bucket that remains large in the full stack, especially Q6_K LM head, FFN down, or a verified way to reduce full target-model evaluations
+- Decision:
+  - picked the Q6_K LM-head packed-lane experiment next because the split profile showed LM head was a large independent bucket and the full-vocab Q6_K path had not yet received the packed-byte treatment used for Q4_K
+
+## Active Plan: Packed Q6_K LM-Head Experiment
+
+- [ ] Test whether a packed-lane Q6_K GEMV kernel can reduce Gemma LM-head cost
+  - [x] Add failing-first parity coverage for a new packed Q6_K wrapper
+  - [x] Implement a separate `q6_k_gemv_packed_f32` shader and Swift wrapper
+  - [x] Add an env-gated Q6_K LM-head shape microbench row
+  - [x] Wire the packed Q6_K kernel behind an opt-in Gemma env flag only if parity and microbench pass
+  - [x] Run Gemma smoke/median and Qwen publishable if the shared Metal surface is kept
+
+### Active Spec
+
+- Hypothesis:
+  - The existing Q6_K GEMV LM head uses 256 lanes per row and computes one dequantized value per lane. A packed-lane variant can compute the four values that share Q6 high-bit and scale metadata in one thread, reducing duplicated byte loads and per-row thread scheduling for the large tied embedding LM head.
+- Constraints:
+  - Keep the new Q6_K path separate and opt-in until a real Gemma median win is proven.
+  - Do not change greedy argmax, vocab size, token count, model path, quantization, prompt text, or benchmark semantics.
+  - Roll back if parity fails, generated token IDs/text change, median regresses, or Qwen publishable fails.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/packedQ6KGemvMatchesCPUReference'` failed at compile with missing `encodeQ6KWeightsPacked`, proving the new test covered the missing API.
+- Added `q6_k_gemv_packed_f32` plus `GEMVKernel.encodeQ6KWeightsPacked(...)`.
+- Focused parity/inert verification passed:
+  - `swift test --filter 'GEMVTests/packedQ6KGemvMatchesCPUReference'`
+  - `swift test --filter 'GEMVTests/packedQ6KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - LM head Q6_K: default `8.189 ms/op`, packed `3.499 ms/op`
+  - decision: the packed Q6_K LM-head kernel is worth a real Gemma smoke because it attacks a measured `~7.8ms/token` bucket and the isolated shape win is large.
+- Gemma packed Q4 + packed Q6 smoke:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q6_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `21.933 tok/s`
+- Gemma packed Q4 + packed Q6 short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q6_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `22.431 tok/s`
+  - best decode: `22.459 tok/s`
+  - min decode: `22.397 tok/s`
+  - median TTFT: `0.744011s`
+- Gemma packed Q4 + tiled FFN + packed Q6 short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `23.175 tok/s`
+  - best decode: `23.340 tok/s`
+  - min decode: `22.589 tok/s`
+  - median TTFT: `0.718650s`
+- Refreshed publishable artifact with packed Q4 + tiled FFN + packed Q6:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_PACKED=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected status: FAILED target only
+  - short median decode: `21.837 tok/s`
+  - short median TTFT: `0.719674s`
+  - long prompt tokens: `1037`
+  - long TTFT: `268.611259s`
+  - long prompt throughput proxy: `3.861 tok/s`
+  - long decode: `1.573 tok/s`
+  - short/long coherence: passed
+  - artifact refreshed: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate passed after the shared Metal Q6_K addition:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `239.5 tok/s`
+  - token hash: `0afae14a84cf0df8`
+- Decision:
+  - Keep the packed Q6_K LM-head path as an opt-in Gemma experiment. It is a real median win over packed Q4 alone, but it still leaves Gemma far below the `>=150 tok/s` target.
+
+## Active Plan: Interleaved Q4_K FFN-Down Layout Experiment
+
+- [ ] Test a block-major 4-row interleaved Q4_K layout for Gemma FFN-down
+  - [x] Add failing-first parity coverage for interleaved Q4_K FFN-down layout
+  - [x] Implement a separate interleaved Metal entry point and wrapper
+  - [x] Add env-gated microbench rows comparing packed row-major vs interleaved layout at FFN-down shape
+  - [x] Roll back the interleaved diagnostic because the microbench regressed against packed row-major
+  - [x] Run focused tests after rollback
+
+### Active Spec
+
+- Hypothesis:
+  - The current row-major packed/four-row kernels still jump by full rows for each FFN-down block. Prepacking Q4_K down weights into `[rowTile][blockIndex][rowInTile]` block-major 4-row order should make the four row blocks for the same activation block contiguous, improving memory locality without changing quantization or math.
+- Constraints:
+  - Keep the transformed layout opt-in and Gemma-only at runtime.
+  - Limit the first implementation to row counts divisible by 4; Gemma FFN-down has `2560` rows, so this covers the target path.
+  - Do not change prompt text, generated-token count, model path, quantization, or benchmark semantics.
+  - Roll back if parity fails, coherent output changes, median regresses, or Qwen publishable fails.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/interleavedFourRowQ4KGemvMatchesCPUReference'` failed at compile with missing `encodeQ4KWeightsInterleavedFourRows`, proving the new test covered the missing API.
+- Implemented a diagnostic-only interleaved Q4_K four-row shader/wrapper and parity test.
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/interleavedFourRowQ4KGemvMatchesCPUReference'`
+- Inert microbench check passed:
+  - `swift test --filter 'GEMVTests/interleavedFourRowQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - FFN down default Q4_K: `0.815 ms/op`
+  - FFN down packed Q4_K: `0.309 ms/op`
+  - FFN down packed four-row: `0.621 ms/op`
+  - FFN down interleaved four-row: `0.528 ms/op`
+- Decision:
+  - no runtime wiring; the interleaved layout regressed against the current packed row-major FFN-down kernel
+  - removed the diagnostic shader/API/test/microbench rows from the production diff rather than keeping an unused shared Metal path
+- Post-rollback verification:
+  - no remaining Q4_K interleaved shader/API/test references outside this task note
+  - focused checks passed:
+    - `swift test --filter 'GEMVTests/packedQ6KGemvMatchesCPUReference|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedTripleQ4KGemvMatchesSeparateCPUReferences|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/gemmaQ4KShapeMicrobenchmark|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+
+## Active Plan: Q6_K LM-Head GPU Top-1 Experiment
+
+- [ ] Test an opt-in packed Q6_K LM-head path that returns greedy top-1 without full CPU argmax
+  - [x] Add failing-first parity coverage for Q6_K packed top-1 against CPU Q6_K GEMV argmax
+  - [x] Implement a separate two-stage Metal top-1 reduction and Swift wrapper
+  - [x] Add scratch buffers for partial top-1 results without changing full-logits sampling
+  - [x] Wire only the Gemma greedy path behind `EDGERUNNER_GEMMA4_Q6_TOP1=1`
+  - [x] Run focused tests, Gemma smoke/median, and Qwen publishable if the shared Metal surface is kept
+
+### Active Spec
+
+- Hypothesis:
+  - The packed Q6_K LM head now computes logits faster, but greedy decode still writes the full vocab logits buffer and scans it on CPU. A top-1 Metal path can keep greedy selection GPU-side and return only the selected token, reducing logits memory traffic and CPU work.
+- Constraints:
+  - Keep full logits path unchanged for non-greedy sampling and artifact/debug paths.
+  - Do not apply final logit softcap before argmax; the softcap is monotonic and does not change greedy top-1.
+  - Keep the path opt-in until token IDs, coherent text, and median speed are proven.
+  - Do not change model path, quantization, prompt text, generated-token count, or benchmark semantics.
+  - Roll back if parity fails, generated token IDs/text change, median regresses, or Qwen publishable fails.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/packedQ6KTop1MatchesCPUReference'` failed at compile with missing `encodeQ6KWeightsPackedTop1`, proving the new test covered the missing API.
+- Implemented:
+  - `q6_k_gemv_packed_4row_top1_f32`
+  - `q6_k_top1_reduce`
+  - `GEMVKernel.encodeQ6KWeightsPackedTop1(...)`
+  - `Gemma4Scratch.top1PartialValues`, `top1PartialIndices`, and `top1Token`
+  - Gemma greedy-only routing behind `EDGERUNNER_GEMMA4_Q6_TOP1=1`
+- Focused verification passed:
+  - `swift test --filter 'GEMVTests/packedQ6KTop1MatchesCPUReference'`
+  - `swift test --filter 'GEMVTests/packedQ6KTop1MatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `swift test --filter 'Gemma4Scratch|GEMVTests/packedQ6KTop1MatchesCPUReference|GEMVTests/packedQ6KGemvMatchesCPUReference|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - LM head Q6_K default: `8.079 ms/op`
+  - LM head Q6_K packed full logits: `3.428 ms/op`
+  - LM head Q6_K packed top-1: `3.183 ms/op`
+- Gemma packed Q4 + tiled FFN + Q6 top-1 smoke:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `22.918 tok/s`
+- Gemma packed Q4 + tiled FFN + Q6 top-1 short median:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+  - median decode: `23.569 tok/s`
+  - best decode: `23.739 tok/s`
+  - min decode: `23.506 tok/s`
+  - median TTFT: `0.713343s`
+- Refreshed publishable artifact with top-1:
+  - command: `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf EDGERUNNER_GEMMA4_BENCHMARK_ARTIFACT=benchmarks/gemma4_publishable_benchmark.json swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFPublishableBenchmark'`
+  - expected status: FAILED target only
+  - short median decode: `22.239 tok/s`
+  - short median TTFT: `0.714886s`
+  - long prompt tokens: `1037`
+  - long TTFT: `268.504797s`
+  - long prompt throughput proxy: `3.862 tok/s`
+  - long decode: `1.573 tok/s`
+  - short/long coherence: passed
+  - artifact refreshed: `benchmarks/gemma4_publishable_benchmark.json`
+- Qwen publishable regression gate passed after the shared Metal/GEMV change:
+  - command: `swift test -c release --filter 'PublishableBenchmark/fullBenchmark'`
+  - median decode: `239.3 tok/s`
+  - token hash: `0afae14a84cf0df8`
+- Decision:
+  - keep the Q6_K top-1 path as an opt-in Gemma greedy experiment. It is a small but real median improvement over the prior `23.175 tok/s` best, while preserving coherent output.
+
+## Active Plan: Post-Top1 Bottleneck Attribution
+
+- [ ] Profile the best opt-in Gemma path after Q6_K top-1
+  - [x] Run one sequential split-FFN profile with packed Q4, tiled FFN gate/up, and Q6 top-1
+  - [x] Compare remaining FFN activation, FFN down, attention, PLE, and LM-head buckets
+  - [x] Add a diagnostic split for FFN down projection vs post-FFN residual RMSNorm
+  - [x] Run one sequential post-top1 FFN-down split profile
+  - [ ] Choose the next experiment from the new measured bucket mix
+
+### Active Spec
+
+- Hypothesis:
+  - Q6 top-1 should reduce the LM-head bucket, leaving FFN activation/down and attention as the dominant remaining layer work.
+- Constraints:
+  - Diagnostic split profiling intentionally adds command-buffer waits and is not a publishable throughput path.
+  - Do not run another Gemma benchmark in parallel.
+
+### Active Review
+
+- Post-top1 split-FFN profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `12.051 tok/s`
+  - token 8 GPU totals: FFN down/post-norm `85.9ms/336x`, FFN activation `79.6ms/336x`, attention `55.9ms/336x`, LM head `19.4ms/8x`, PLE `17.5ms/336x`
+- Interpretation:
+  - Q6 top-1 moved the LM head from a dominant bucket to a secondary bucket.
+  - FFN down/post-norm and FFN activation are now the largest measured buckets, with attention next.
+  - The next attribution gap is inside `gpu_split_ffn_down`: separate the Q4_K down projection from the post-FFN residual RMSNorm before attempting a fusion or another down-kernel variant.
+- Added diagnostic-only env flag:
+  - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1`
+  - This splits `gpu_split_ffn_down` into `gpu_split_ffn_down_projection` and `gpu_split_ffn_post_norm` only when the existing split-stack, split-phase, and split-FFN profiling path is active.
+- Post-top1 FFN-down split profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `10.843 tok/s`
+  - token 8 GPU totals: FFN down projection `82.3ms/336x`, FFN activation `81.3ms/336x`, attention `55.7ms/336x`, LM head `19.4ms/8x`, PLE `17.4ms/336x`
+  - post-FFN residual RMSNorm appeared as `gpu_split_ffn_post_norm_kernel_time=6.2ms/336x`; its wait total was `60.8ms/336x` because this diagnostic mode isolates every layer phase into separate command buffers.
+- Interpretation:
+  - The old `gpu_split_ffn_down` bucket is dominated by Q4_K down projection, not post-FFN residual RMSNorm math.
+  - A down/post-norm fusion is unlikely to be the next large lever unless it also changes the Q4_K projection structure.
+
+## Active Plan: SIMD-Row Q4_K Projection Experiment
+
+- [x] Test a one-SIMD-group-per-row Q4_K packed projection kernel before runtime wiring
+  - [x] Add failing-first parity coverage for a `q4_k_gemv_packed_simdrow_f32` wrapper
+  - [x] Implement the separate Metal entry point and Swift wrapper
+  - [x] Add env-gated Gemma shape microbench rows for the SIMD-row variant
+  - [x] Compare it against packed and four-row packed Q4_K in the env-gated Gemma shape microbench
+  - [x] Wire it into Gemma only if the FFN down microbench beats the current packed row-major path by a material margin
+  - [x] Otherwise remove or leave it only as a documented diagnostic based on measured results
+
+### Active Spec
+
+- Hypothesis:
+  - The current packed Q4_K kernel uses a 128-thread row group with per-block threadgroup barriers and a cross-simdgroup reduction. A one-SIMD-group row kernel should remove those barriers and reduce scheduling/reduction overhead by making each lane process four packed bytes per Q4_K block.
+- Source-backed assumption check:
+  - Current llama.cpp Metal exposes `kernel_mul_mv_ext_q4_K_f32_r1_2` through `_r1_5` specializations backed by a SIMD-scoped `kernel_mul_mv_ext_q4x4_f32_impl` path, so the next local test should measure SIMD-group row structure rather than another block-major layout.
+- Constraints:
+  - Keep this separate from existing packed/tiled kernels until parity and shape benchmarks pass.
+  - Do not change Gemma runtime behavior, model path, quantization, prompts, generated-token counts, or benchmark semantics unless the diagnostic clears the microbench gate.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/packedSIMDRowQ4KGemvMatchesCPUReference'` failed at compile with missing `encodeQ4KWeightsPackedSIMDRow`, proving the new parity test covers the intended API.
+- Implemented:
+  - `q4_k_gemv_packed_simdrow_f32`
+  - `GEMVKernel.encodeQ4KWeightsPackedSIMDRow(...)`
+  - env-gated microbench rows for FFN gate and FFN down
+- Focused verification passed while the diagnostic was present:
+  - `swift test --filter 'GEMVTests/packedSIMDRowQ4KGemvMatchesCPUReference|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - FFN gate: packed `0.403 ms/op`, SIMD-row `0.605 ms/op`, packed four-row `0.373 ms/op`
+  - FFN down: packed `0.523 ms/op`, SIMD-row `0.707 ms/op`, packed four-row `0.298 ms/op`
+- Decision:
+  - Do not wire the SIMD-row Q4_K variant into Gemma; it is slower than the current packed path for both target FFN shapes.
+  - Removed the diagnostic shader/API/test/microbench rows from the production diff after recording the no-go result.
+- Post-rollback verification:
+  - `rg -n "SIMDRow|simdrow|packed_simdrow" Sources Tests tasks/todo.md` now finds only this task note.
+  - focused checks passed:
+    - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/gemmaQ4KShapeMicrobenchmark|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4Scratch|GEMVTests/packedQ6KTop1MatchesCPUReference'`
+  - `git diff --check` passed.
+
+## Active Plan: Post-Top1 Four-Row FFN-Down Retest
+
+- [x] Re-test four-row Q4_K FFN down only under the current best top-1 path
+  - [x] Add a separate `EDGERUNNER_GEMMA4_Q4_TILED_DOWN=1` runtime flag
+  - [x] Keep the flag restricted to Gemma FFN-down shape and packed Q4_K mode
+  - [x] Run focused wrapper/template/tokenizer tests
+  - [x] Run one sequential Gemma smoke with packed Q4, tiled gate/up, Q6 top-1, and tiled down
+  - [x] If smoke is coherent and faster, run the short median; otherwise roll back/no-go
+
+### Active Spec
+
+- Hypothesis:
+  - After Q6 top-1, FFN down projection is again one of the two largest measured GPU buckets. The latest shape microbench shows FFN down packed four-row at `0.298 ms/op` vs packed row-major at `0.523 ms/op`, so the down-only four-row route deserves one fresh end-to-end check under the current best path.
+- Why this is not a blind repeat:
+  - Earlier FFN-down four-row routing was rolled back before the Q6 top-1 path and before the new FFN-down/post-norm attribution. This retest is env-gated, down-only, and evaluated against the current packed+tiled+top1 path.
+- Constraints:
+  - Do not change default behavior.
+  - Do not alter prompt text, generated-token count, model path, quantization, benchmark semantics, or coherence gates.
+  - Roll back or leave unwired if generated token IDs/text change or smoke/median regresses.
+
+### Active Review
+
+- Added runtime flag:
+  - `EDGERUNNER_GEMMA4_Q4_TILED_DOWN=1`
+  - only applies when `EDGERUNNER_GEMMA4_Q4_PACKED=1` and the projection shape is Gemma FFN down (`rows == hiddenSize`, `cols == intermediateSize`)
+- Focused checks passed:
+  - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4Scratch|GEMVTests/packedQ6KTop1MatchesCPUReference'`
+- Gemma smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q4_TILED_DOWN=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode regressed to `19.985 tok/s`
+- Decision:
+  - ROLLED BACK the `EDGERUNNER_GEMMA4_Q4_TILED_DOWN` runtime flag and did not run a median. Despite the isolated microbench result, end-to-end smoke is materially slower than the current top-1 smoke path.
+
+## Active Plan: Post-Top1 FFN Activation Attribution
+
+- [ ] Split the post-top1 FFN activation bucket before another activation-kernel experiment
+  - [x] Add diagnostic-only split phases for FFN norm, gate/up projection, and GeGLU
+  - [x] Keep default and existing split-FFN behavior unchanged unless `EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1`
+  - [x] Run focused tests
+  - [x] Run one sequential Gemma split profile with packed Q4, tiled gate/up, Q6 top-1, and activation split
+  - [x] Choose or reject the next activation experiment from measured sub-buckets
+
+### Active Spec
+
+- Hypothesis:
+  - After Q6 top-1, FFN activation and FFN down projection are the two largest GPU buckets. The activation bucket currently combines FFN RMSNorm, two Q4_K projections, and GeGLU, so we need to know whether the next target is projection math or the activation kernel.
+- Constraints:
+  - Diagnostic split profiling intentionally inserts extra command-buffer waits and is not a publishable throughput path.
+  - Do not change default decode behavior, prompts, generated-token counts, model path, quantization, or benchmark semantics.
+
+### Active Review
+
+- Added diagnostic-only flag:
+  - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1`
+  - only active in the existing split-stack/split-phase/split-FFN profiling path
+  - splits `gpu_split_ffn_activation` into `gpu_split_ffn_norm`, `gpu_split_ffn_gate_up`, and `gpu_split_ffn_geglu`
+- Focused checks passed:
+  - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4Scratch|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ6KTop1MatchesCPUReference'`
+- Activation-split profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `9.574 tok/s`
+  - token 8 GPU totals: FFN down projection `81.8ms/336x`, FFN gate/up projection `77.3ms/336x`, attention `56.6ms/336x`, LM head `19.7ms/8x`, PLE `16.9ms/336x`
+  - small subphases by kernel time: FFN GeGLU `6.5ms/336x`, FFN norm `6.1ms/336x`, post-FFN norm `6.3ms/336x`
+- Interpretation:
+  - GeGLU and RMSNorm are not the next large levers.
+  - The activation bucket is dominated by the two Q4_K gate/up projections, so the next bounded experiment should combine those projections without changing GeGLU math.
+
+## Active Plan: Four-Row Dual Gate/Up Q4_K Experiment
+
+- [x] Test a packed four-row dual Q4_K gate/up projection kernel
+  - [x] Add failing-first parity coverage for a dual-output four-row packed Q4_K wrapper
+  - [x] Implement a separate Metal entry point and Swift wrapper
+  - [x] Add env-gated microbench row for Gemma FFN gate/up dual four-row
+  - [x] Wire into `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1` only if microbench beats two separate four-row projections
+  - [x] Run focused tests and one Gemma smoke/median only if the microbench clears the gate
+
+### Active Spec
+
+- Hypothesis:
+  - The current best FFN gate/up path uses two separate four-row packed Q4_K projection dispatches, followed by a separate GeGLU. A dual-output four-row kernel can reuse input loads and reduce dispatch overhead without taking on the extra register pressure of the previously failed fused Gate+Up+GeGLU variant.
+- Constraints:
+  - Keep this separate until proven.
+  - Do not change GeGLU math, default behavior, prompt text, generated-token count, model path, quantization, or benchmark semantics.
+  - Roll back if parity fails or the microbench does not beat the current two-dispatch four-row path.
+
+### Active Review
+
+- Red step:
+  - `swift test --filter 'GEMVTests/packedFourRowDualQ4KGemvMatchesSeparateCPUReferences'` failed at compile with missing `encodeQ4KWeightsPackedFourRowsDual`, proving the new parity test covers the intended API.
+- Implemented:
+  - `q4_k_gemv_packed_4row_dual_f32`
+  - `GEMVKernel.encodeQ4KWeightsPackedFourRowsDual(...)`
+  - `gemma_ffn_gate_up_dual_q4k_packed_4row` microbench row
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/packedFourRowDualQ4KGemvMatchesSeparateCPUReferences'`
+- Inert focused microbench check passed:
+  - `swift test --filter 'GEMVTests/packedFourRowDualQ4KGemvMatchesSeparateCPUReferences|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Enabled shape microbench passed:
+  - command: `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - two separate four-row gate/up projections: `0.318 ms/op * 2 ~= 0.636 ms/op`
+  - four-row dual gate/up: `0.753 ms/op`
+- Decision:
+  - ROLLED BACK the diagnostic shader/API/test/microbench rows. The dual four-row kernel is correctness-safe but slower than the current two-dispatch four-row path, so it did not earn runtime wiring or a Gemma smoke.
+- Post-rollback verification:
+  - `rg -n "FourRowsDual|4row_dual|dual_q4k_packed_4row|packedFourRowDual" Sources Tests tasks/todo.md` now finds only this task note.
+  - focused checks passed:
+    - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4Scratch|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ6KTop1MatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `git diff --check` passed.
+
+## Active Plan: Buffer-Native Prelude Plus Top1 Recheck
+
+- [x] Recheck the existing buffer-native PLE prelude flag under the current best greedy stack
+  - [x] Run one sequential Gemma smoke with packed Q4, tiled FFN gate/up, Q6 top-1, and buffer-native prelude
+  - [x] If smoke is coherent and faster than the current top1 smoke, run the short median
+  - [x] Otherwise record no-go and keep the flag opt-in only
+
+### Active Spec
+
+- Hypothesis:
+  - The latest activation-split profile without buffer-native prelude showed a large `ple_row_gather` bucket again. The buffer-native prelude flag previously removed most PLE gather cost but did not beat the then-current packed-Q4 median. It has not been rechecked against the newer packed+tiled+Q6-top1 path.
+- Constraints:
+  - No code changes for this check.
+  - Do not change prompt text, generated-token count, model path, quantization, or benchmark semantics.
+  - Do not run multiple Gemma benchmarks in parallel.
+  - Keep `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` opt-in unless it improves median and preserves coherent output.
+
+### Active Review
+
+- Gemma smoke command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Smoke result:
+  - generated token IDs stayed `[37568, 2263, 34711, 17630, 1759, 236772, 2289, 12498, 15858, 5467, 580, 7377, 7359, 236761, 106, 106]`
+  - generated text stayed `Fast local inference enables real-time AI capabilities directly on edge devices.`
+  - decode: `23.172 tok/s`
+- Short median command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+- Median result:
+  - median decode: `23.388 tok/s`
+  - best decode: `23.418 tok/s`
+  - min decode: `23.045 tok/s`
+  - median TTFT: `0.719080s`
+- Decision:
+  - Keep `EDGERUNNER_GEMMA4_BUFFER_NATIVE_PRELUDE=1` opt-in only. It preserved output but did not beat the current best top1 median of `23.569 tok/s`.
+
+## Active Plan: Layer-Type Bottleneck Attribution
+
+- [ ] Attribute post-top1 phase costs by Gemma sliding/global layer type
+  - [x] Add diagnostic-only aggregate labels for split-phase profiling grouped by layer type
+  - [x] Run focused tests
+  - [x] Run one sequential Gemma split profile with packed Q4, tiled FFN gate/up, and Q6 top-1
+  - [x] Pick the next structural experiment from the layer-type mix
+
+### Active Spec
+
+- Hypothesis:
+  - The remaining attention/FFN cost may be concentrated in global layers, sliding layers, or shared-KV tail layers. Before changing attention kernels or layer scheduling, the split profiler should show where the measured time is concentrated.
+- Constraints:
+  - Diagnostic labels must not add command buffers beyond the existing split-phase profiler.
+  - Do not change default decode behavior, prompts, generated-token counts, model path, quantization, or benchmark semantics.
+
+### Active Review
+
+- Added diagnostic-only flag:
+  - `EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1`
+  - when enabled, split-profile aggregate prefixes include layer type and KV ownership, for example `gpu_split_attention_sliding_ownkv` and `gpu_split_attention_global_sharedkv`
+- Focused checks passed:
+  - `swift test --filter 'Gemma4ChatTemplate|GemmaTokenizerParityTest/gemma4PromptTokensMatchLlamaCppReference|Gemma4Scratch|GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/packedQ6KTop1MatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Layer-type profile command:
+  - `EDGERUNNER_GEMMA4_Q4_PACKED=1 EDGERUNNER_GEMMA4_Q4_TILED=1 EDGERUNNER_GEMMA4_Q6_TOP1=1 EDGERUNNER_GEMMA4_PROFILE=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_STACK=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_PHASES=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_ACTIVATION=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_FFN_DOWN=1 EDGERUNNER_GEMMA4_PROFILE_SPLIT_LAYER_TYPES=1 EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFThroughEdgeRunner'`
+- Result:
+  - generated token IDs and coherent text stayed unchanged
+  - diagnostic decode: `8.730 tok/s`
+  - token 8 dominant buckets by layer class:
+    - sliding own-KV FFN down projection: `40.8ms/160x`
+    - sliding own-KV gate/up projection: `35.9ms/160x`
+    - sliding shared-KV FFN down projection: `31.7ms/120x`
+    - sliding shared-KV gate/up projection: `27.6ms/120x`
+    - sliding own-KV attention: `28.3ms/160x`
+    - sliding shared-KV attention: `16.2ms/120x`
+    - global own/shared attention waits were much smaller at `13.7ms/32x` and `9.8ms/24x`
+- Interpretation:
+  - The remaining bottleneck is not concentrated in global attention or shared-KV tail layers. It is broad Q4_K projection work across the many sliding layers.
+  - More global-attention-specific work is unlikely to close the target gap; the next useful research should look for a broader architectural path rather than another row-layout tweak.
+
+## Active Plan: Gemma 4 Draft/MTP Tensor Check
+
+- [ ] Check whether the local Gemma 4 E4B artifact exposes built-in draft/MTP tensors
+  - [x] Search the local GGUF tensor-name strings for obvious `mtp` / `draft` tensor prefixes
+  - [x] Decide whether same-artifact speculative/MTP decode is immediately actionable
+
+### Active Spec
+
+- Hypothesis:
+  - If the local GGUF contains built-in MTP or draft-head tensors, a same-artifact speculative path might be a broader route than another per-row Q4_K kernel tweak.
+- Constraints:
+  - This is a read-only artifact inspection. Do not change benchmark semantics, generated-token counts, prompts, or correctness gates.
+
+### Active Review
+
+- Command:
+  - `strings -n 8 /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf | rg '^(blk\.[0-9]+\.(mtp|draft)|mtp\.|draft\.)' | head -40`
+- Result:
+  - no output
+- Interpretation:
+  - The local publishable Gemma 4 GGUF does not expose obvious built-in `mtp` or `draft` tensor-name prefixes.
+  - Same-artifact MTP/speculative decode is not immediately actionable without a separate draft model or a loader/parser discovery that proves hidden tensor support.
+
+## Active Plan: External Gemma Decode Architecture Research
+
+- [ ] Validate the next optimization direction against current llama.cpp-style implementations
+  - [x] Inspect current upstream llama.cpp Gemma 4 graph and Metal K-quant projection paths
+  - [x] Inspect the Atomic TurboQuant fork's Gemma 4 MTP shape
+  - [x] Record source-backed candidate directions and false positives
+  - [x] Build and run current upstream llama.cpp Metal `llama-bench` on the same local GGUF
+
+### Active Spec
+
+- Hypothesis:
+  - After packed Q4, four-row FFN gate/up, packed Q6 LM head, Q6 top-1, and failed FFN-down / dual-gate-up variants, the next useful direction should be broader than another row-layout tweak.
+- Constraints:
+  - Use source evidence from current upstream/fork code. Do not change benchmark semantics or claim assisted/speculative tok/s as same-artifact tok/s.
+
+### Active Review
+
+- Source snapshots inspected:
+  - upstream `ggml-org/llama.cpp` at `89730c8d264c743a51035fcfdc5f63ca0599492e`
+  - Atomic TurboQuant fork at `2e81dc5f634501c744b69a65a8eeb84ba42e82ee`
+- Findings:
+  - Upstream Gemma 4 still builds per-layer inputs with a normal graph `ggml_mul_mat` for `per_layer_model_proj`; this matches EdgeRunner's PLE-focused work rather than revealing a hidden shortcut.
+  - Upstream Metal has K-quant `mul_mv_ext` templates for `Q4_K`/`Q6_K` when there are `4...8` RHS rows and `mul_mm` templates for `Q4_K`/`Q6_K`. EdgeRunner's current Gemma decode hot path remains custom single-token projection kernels plus local fused variants.
+  - The Atomic fork's Gemma 4 MTP path is not embedded in the target GGUF. It expects a separate `gemma4_assistant` model loaded through `--mtp-head` / `--model-draft`, with assistant tensors like `mtp.pre_projection`, `mtp.post_projection`, and optional centroid/token-order tensors.
+  - Fork docs claim MTP short-prompt throughput gains around `30-50%`, which is useful but not enough by itself to bridge `23.569 tok/s` to `150 tok/s`.
+- False positives ruled out:
+  - same-artifact MTP from the local E4B GGUF: no obvious tensor prefixes were found
+  - global-attention-specific optimization: layer-type profile shows broad sliding-layer Q4 projection cost dominates
+  - another adjacent-row FFN layout probe: FFN-down and dual gate/up variants already regressed under the current top1 stack
+- Next source-backed candidates:
+  - Add a diagnostic/experimental upstream-style multi-RHS K-quant projection path only if there is a real multi-token or speculative verification workload to feed it; single-token decode will not exercise `mul_mv_ext`.
+  - Port or prototype a more llama.cpp-like `Q4_K` Metal projection kernel using 4x4 dequant fragments and simdgroup matrix ops, then compare against the current packed/four-row kernels with the existing microbench before end-to-end smoke.
+  - Treat assisted decode as a separate publishable configuration only if an explicit assistant artifact is available and the benchmark metadata reports both target and assistant model paths.
+- Upstream same-hardware reference:
+  - Build commands:
+    - `git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/edgerunner-llama-src`
+    - `cmake -S . -B build-metal -DGGML_METAL=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON`
+    - `cmake --build build-metal --target llama-bench -j 8`
+  - Decode command:
+    - `/tmp/edgerunner-llama-src/build-metal/bin/llama-bench -m /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf -ngl 99 -p 32 -n 128 -r 3 -o md`
+  - Result:
+    - `pp32`: `487.19 +/- 1.88 t/s`
+    - `tg128`: `60.75 +/- 0.13 t/s`
+  - Flash-attention check:
+    - `/tmp/edgerunner-llama-src/build-metal/bin/llama-bench -m /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf -ngl 99 -fa 1 -p 32 -n 128 -r 3 -o md`
+    - `pp32`: `496.51 +/- 1.89 t/s`
+    - `tg128`: `62.20 +/- 0.07 t/s`
+  - Interpretation:
+    - Current EdgeRunner best (`23.569 tok/s`) is about `2.6x` behind current upstream llama.cpp Metal on the same artifact and hardware.
+    - The `150 tok/s` same-artifact target is not supported by the current upstream same-hardware reference. It likely requires a separate assisted/speculative configuration, a different artifact/quantization, newer hardware tensor path, or a projection backend substantially faster than upstream Metal.
+
+## Active Plan: Q4_K Scale-Min Sidecar Microbench
+
+- [ ] Test whether precomputed Q4_K scale/min metadata is a real projection lever
+  - [x] Record the hypothesis and benchmark-only scope before editing kernels
+  - [x] Add focused parity coverage for a sidecar-backed packed Q4_K GEMV API
+  - [x] Implement the smallest Metal wrapper/kernel needed for the sidecar path
+  - [x] Run focused parity and Q4_K shape microbench
+  - [x] Keep only if the microbench materially beats current packed/four-row paths; otherwise roll back
+
+### Active Spec
+
+- Hypothesis:
+  - Current packed Q4_K kernels rebuild eight scale/min values from block metadata inside every row/block iteration. A sidecar metadata buffer with pre-expanded scale/min pairs could reduce integer unpacking and threadgroup setup enough to matter for the projection-bound Gemma FFN path.
+- Constraints:
+  - Microbench-only until proven faster. Do not wire into Gemma decode or benchmark semantics until parity and shape microbench show a clear win.
+  - Preserve the raw GGUF weight buffer as source of quantized nibbles; sidecar may only cache derived metadata.
+  - Do not repeat row-layout-only variants already tested: two-row, four-row, FFN-down four-row, interleaved down, SIMD-row, and dual gate/up.
+- Verification:
+  - `swift test --filter 'GEMVTests/packedQ4KSidecarGemvMatchesCPUReference|GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+
+### Active Review
+
+- Added a temporary sidecar-backed packed Q4_K GEMV API and parity test:
+  - `packedQ4KSidecarGemvMatchesCPUReference`
+  - the sidecar stored `scale[0...7], min[0...7]` as `Float` for each raw Q4_K block
+- Focused parity passed:
+  - `swift test --filter 'GEMVTests/packedQ4KSidecarGemvMatchesCPUReference'`
+- Release microbench command:
+  - `EDGERUNNER_GEMMA4_KQUANT_MICROBENCH=1 swift test -c release --filter 'GEMVTests/gemmaQ4KShapeMicrobenchmark'`
+- Sidecar results:
+  - local QKV packed: `0.750 ms/op`
+  - local QKV packed sidecar: `0.746 ms/op`
+  - FFN gate packed: `0.803 ms/op`
+  - FFN gate packed sidecar: `0.338 ms/op`
+  - FFN gate packed four-row: `0.282 ms/op`
+  - FFN down packed: `0.451 ms/op`
+  - FFN down packed sidecar: `0.473 ms/op`
+  - FFN down packed four-row: `0.784 ms/op`
+- Decision:
+  - ROLLED BACK. The sidecar did not beat the current runtime-relevant paths: gate/up is already faster through four-row, down regressed versus packed, and local QKV remains dominated by the existing triple-packed path.
+  - No Gemma runtime wiring or median benchmark was run because the microbench did not clear the keep threshold.
+- Post-rollback checks:
+  - `rg -n "Sidecar|sidecar|packed_sidecar|ScaleMin" Sources Tests tasks/todo.md` shows only this task log and unrelated Espresso sidecar code.
+  - `swift test --filter 'GEMVTests/packedQ4KGemvMatchesCPUReference|GEMVTests/packedFourRowQ4KGemvMatchesCPUReferenceWithTailRows|GEMVTests/gemmaQ4KShapeMicrobenchmark'` passed.
+
+# Active Plan: Gemma 4 E4B Local Tok/s Run
+
+- [ ] Measure the local Gemma 4 E4B Q4_K_M GGUF on EdgeRunner
+  - [x] Confirm the local GGUF path and disk headroom
+  - [x] Identify the existing Gemma benchmark harness
+  - [x] Run the release median benchmark sequentially
+  - [x] Report median/best/min decode tok/s and median TTFT
+
+### Active Spec
+
+- Model: `/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf`
+- Command: `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+- Success criteria:
+  - benchmark completes without correctness/test failure
+  - output includes `GEMMA4_MEDIAN_BENCHMARK median_decode_tok_s`
+  - no parallel Gemma runs during the measurement
+
+### Active Review
+
+- Release median benchmark completed successfully on 2026-05-12.
+- Result:
+  - median decode: `17.683 tok/s`
+  - best decode: `18.347 tok/s`
+  - min decode: `17.263 tok/s`
+  - median TTFT: `1.209648s`
+  - warmup TTFT: `11.450071s`
+- Command used:
+  - `EDGERUNNER_GEMMA4_BENCHMARK_MODEL=/Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf swift test -c release --filter 'Gemma4DownloadedBenchmark/runDownloadedGGUFMedianBenchmark'`
+- llama.cpp comparison attempt:
+  - installed Homebrew `llama.cpp` is build `5560`; current Homebrew stable is `9070`
+  - command attempted: `llama-bench -m /Users/chriskarani/edgerunner-models/gemma-4-E4B-it-Q4_K_M.gguf -ngl 99 -p 32 -n 16 -r 1 -o md`
+  - result: blocked before benchmark; loader parsed the GGUF but failed with `unknown model architecture: 'gemma4'`
+  - no llama.cpp tok/s number was produced from the installed build
 
 # Current Gemma 250 tok/s Optimization Plan
 

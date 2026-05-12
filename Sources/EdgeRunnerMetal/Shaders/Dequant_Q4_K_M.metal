@@ -23,6 +23,7 @@ struct ERQ4KGEMV3Params {
 constant uint Q4_K_M_BLOCK_BYTES = 144;
 constant uint Q4_K_M_WEIGHTS_PER_BLOCK = 256;
 constant uint Q4_K_M_GEMV_THREADS_PER_ROW = 256;
+constant uint Q4_K_M_PACKED_GEMV_THREADS_PER_ROW = 128;
 
 kernel void dequant_q4_k_m(
     device const uchar* input [[buffer(0)]],
@@ -133,6 +134,569 @@ kernel void q4_k_gemv_f32(
         value = simd_sum(value);
         if (simd_lane == 0) {
             y[row] = value;
+        }
+    }
+}
+
+kernel void q4_k_gemv_f32_batched(
+    device const uchar* weights [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERQ4KGEMVParams& params [[buffer(3)]],
+    uint3 group_id [[threadgroup_position_in_grid]],
+    uint3 local_pos [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = group_id.x;
+    uint batch = group_id.y;
+    uint local_id = local_pos.x;
+    if (row >= params.rows) {
+        return;
+    }
+
+    float partial = 0.0f;
+    threadgroup float sharedScales[8];
+    threadgroup float sharedMins[8];
+    device const uchar* rowBase = weights + row * params.blocksPerRow * Q4_K_M_BLOCK_BYTES;
+    device const float* xBase = x + batch * params.cols;
+
+    for (uint blockIndex = 0; blockIndex < params.blocksPerRow; ++blockIndex) {
+        device const uchar* block = rowBase + blockIndex * Q4_K_M_BLOCK_BYTES;
+
+        if (local_id < 4) {
+            device const half* masterScales = reinterpret_cast<device const half*>(block);
+            float d = float(masterScales[0]);
+            float dmin = float(masterScales[1]);
+            uchar scaleByte = block[4 + local_id];
+            uchar minByte = block[8 + local_id];
+            uchar highBits = block[12 + local_id];
+
+            sharedScales[local_id] = d * float(scaleByte & 0x3F);
+            sharedScales[local_id + 4] =
+                d * float((highBits & 0x0F) | (((scaleByte >> 6) & 0x03) << 4));
+            sharedMins[local_id] = dmin * float(minByte & 0x3F);
+            sharedMins[local_id + 4] =
+                dmin * float(((highBits >> 4) & 0x0F) | (((minByte >> 6) & 0x03) << 4));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint inBlock = local_id;
+        if (inBlock < Q4_K_M_WEIGHTS_PER_BLOCK) {
+            uint subBlock = inBlock / 32;
+            uint index = inBlock % 32;
+            uint byteIndex = 16 + (subBlock / 2) * 32 + index;
+            uchar packed = block[byteIndex];
+            uchar nibble = (subBlock & 1) == 0 ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
+            float weight = sharedScales[subBlock] * float(nibble) - sharedMins[subBlock];
+            uint col = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + inBlock;
+            partial += weight * xBase[col];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    partial = simd_sum(partial);
+
+    threadgroup float sharedSums[32];
+    if (simd_lane == 0) {
+        sharedSums[simd_group] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        uint numSimdgroups = (Q4_K_M_GEMV_THREADS_PER_ROW + 31) / 32;
+        float value = simd_lane < numSimdgroups ? sharedSums[simd_lane] : 0.0f;
+        value = simd_sum(value);
+        if (simd_lane == 0) {
+            y[batch * params.rows + row] = value;
+        }
+    }
+}
+
+kernel void q4_k_gemv_packed_f32(
+    device const uchar* weights [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERQ4KGEMVParams& params [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    if (row >= params.rows) {
+        return;
+    }
+
+    float partial = 0.0f;
+    threadgroup float sharedScales[8];
+    threadgroup float sharedMins[8];
+    device const uchar* rowBase = weights + row * params.blocksPerRow * Q4_K_M_BLOCK_BYTES;
+
+    for (uint blockIndex = 0; blockIndex < params.blocksPerRow; ++blockIndex) {
+        device const uchar* block = rowBase + blockIndex * Q4_K_M_BLOCK_BYTES;
+
+        if (local_id < 4) {
+            device const half* masterScales = reinterpret_cast<device const half*>(block);
+            float d = float(masterScales[0]);
+            float dmin = float(masterScales[1]);
+            uchar scaleByte = block[4 + local_id];
+            uchar minByte = block[8 + local_id];
+            uchar highBits = block[12 + local_id];
+
+            sharedScales[local_id] = d * float(scaleByte & 0x3F);
+            sharedScales[local_id + 4] =
+                d * float((highBits & 0x0F) | (((scaleByte >> 6) & 0x03) << 4));
+            sharedMins[local_id] = dmin * float(minByte & 0x3F);
+            sharedMins[local_id + 4] =
+                dmin * float(((highBits >> 4) & 0x0F) | (((minByte >> 6) & 0x03) << 4));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint packedIndex = local_id;
+        if (packedIndex < 128) {
+            uint pair = packedIndex / 32;
+            uint index = packedIndex % 32;
+            uint lowSubBlock = pair * 2;
+            uint highSubBlock = lowSubBlock + 1;
+            uint byteIndex = 16 + pair * 32 + index;
+            uchar packed = block[byteIndex];
+            uint lowCol = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + lowSubBlock * 32 + index;
+            uint highCol = lowCol + 32;
+            partial += (sharedScales[lowSubBlock] * float(packed & 0x0F) - sharedMins[lowSubBlock]) * x[lowCol];
+            partial += (sharedScales[highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[highSubBlock]) * x[highCol];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    partial = simd_sum(partial);
+
+    threadgroup float sharedSums[32];
+    if (simd_lane == 0) {
+        sharedSums[simd_group] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        uint numSimdgroups = (Q4_K_M_PACKED_GEMV_THREADS_PER_ROW + 31) / 32;
+        float value = simd_lane < numSimdgroups ? sharedSums[simd_lane] : 0.0f;
+        value = simd_sum(value);
+        if (simd_lane == 0) {
+            y[row] = value;
+        }
+    }
+}
+
+kernel void q4_k_gemv_packed_4row_f32(
+    device const uchar* weights [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERQ4KGEMVParams& params [[buffer(3)]],
+    uint tile [[threadgroup_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint rowsPerTile = 4;
+    uint rowBaseIndex = tile * rowsPerTile;
+    if (rowBaseIndex >= params.rows) {
+        return;
+    }
+
+    float partial0 = 0.0f;
+    float partial1 = 0.0f;
+    float partial2 = 0.0f;
+    float partial3 = 0.0f;
+    threadgroup float sharedScales[32];
+    threadgroup float sharedMins[32];
+
+    for (uint blockIndex = 0; blockIndex < params.blocksPerRow; ++blockIndex) {
+        if (local_id < 16) {
+            uint rowInTile = local_id / 4;
+            uint scaleIndex = local_id % 4;
+            uint row = rowBaseIndex + rowInTile;
+            if (row < params.rows) {
+                device const uchar* block =
+                    weights + (row * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+                device const half* masterScales = reinterpret_cast<device const half*>(block);
+                float d = float(masterScales[0]);
+                float dmin = float(masterScales[1]);
+                uchar scaleByte = block[4 + scaleIndex];
+                uchar minByte = block[8 + scaleIndex];
+                uchar highBits = block[12 + scaleIndex];
+                uint scaleBase = rowInTile * 8;
+
+                sharedScales[scaleBase + scaleIndex] = d * float(scaleByte & 0x3F);
+                sharedScales[scaleBase + scaleIndex + 4] =
+                    d * float((highBits & 0x0F) | (((scaleByte >> 6) & 0x03) << 4));
+                sharedMins[scaleBase + scaleIndex] = dmin * float(minByte & 0x3F);
+                sharedMins[scaleBase + scaleIndex + 4] =
+                    dmin * float(((highBits >> 4) & 0x0F) | (((minByte >> 6) & 0x03) << 4));
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint packedIndex = local_id;
+        if (packedIndex < 128) {
+            uint pair = packedIndex / 32;
+            uint index = packedIndex % 32;
+            uint lowSubBlock = pair * 2;
+            uint highSubBlock = lowSubBlock + 1;
+            uint byteIndex = 16 + pair * 32 + index;
+            uint lowCol = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + lowSubBlock * 32 + index;
+            uint highCol = lowCol + 32;
+            float xLow = x[lowCol];
+            float xHigh = x[highCol];
+
+            if (rowBaseIndex < params.rows) {
+                device const uchar* block =
+                    weights + (rowBaseIndex * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+                uchar packed = block[byteIndex];
+                partial0 += (sharedScales[lowSubBlock] * float(packed & 0x0F) - sharedMins[lowSubBlock]) * xLow;
+                partial0 += (sharedScales[highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[highSubBlock]) * xHigh;
+            }
+            if (rowBaseIndex + 1 < params.rows) {
+                device const uchar* block =
+                    weights + ((rowBaseIndex + 1) * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+                uchar packed = block[byteIndex];
+                uint scaleBase = 8;
+                partial1 += (sharedScales[scaleBase + lowSubBlock] * float(packed & 0x0F) - sharedMins[scaleBase + lowSubBlock]) * xLow;
+                partial1 += (sharedScales[scaleBase + highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[scaleBase + highSubBlock]) * xHigh;
+            }
+            if (rowBaseIndex + 2 < params.rows) {
+                device const uchar* block =
+                    weights + ((rowBaseIndex + 2) * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+                uchar packed = block[byteIndex];
+                uint scaleBase = 16;
+                partial2 += (sharedScales[scaleBase + lowSubBlock] * float(packed & 0x0F) - sharedMins[scaleBase + lowSubBlock]) * xLow;
+                partial2 += (sharedScales[scaleBase + highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[scaleBase + highSubBlock]) * xHigh;
+            }
+            if (rowBaseIndex + 3 < params.rows) {
+                device const uchar* block =
+                    weights + ((rowBaseIndex + 3) * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+                uchar packed = block[byteIndex];
+                uint scaleBase = 24;
+                partial3 += (sharedScales[scaleBase + lowSubBlock] * float(packed & 0x0F) - sharedMins[scaleBase + lowSubBlock]) * xLow;
+                partial3 += (sharedScales[scaleBase + highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[scaleBase + highSubBlock]) * xHigh;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    partial0 = simd_sum(partial0);
+    partial1 = simd_sum(partial1);
+    partial2 = simd_sum(partial2);
+    partial3 = simd_sum(partial3);
+
+    threadgroup float sharedSums[128];
+    if (simd_lane == 0) {
+        sharedSums[simd_group] = partial0;
+        sharedSums[32 + simd_group] = partial1;
+        sharedSums[64 + simd_group] = partial2;
+        sharedSums[96 + simd_group] = partial3;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        uint numSimdgroups = (Q4_K_M_PACKED_GEMV_THREADS_PER_ROW + 31) / 32;
+        float value0 = simd_lane < numSimdgroups ? sharedSums[simd_lane] : 0.0f;
+        float value1 = simd_lane < numSimdgroups ? sharedSums[32 + simd_lane] : 0.0f;
+        float value2 = simd_lane < numSimdgroups ? sharedSums[64 + simd_lane] : 0.0f;
+        float value3 = simd_lane < numSimdgroups ? sharedSums[96 + simd_lane] : 0.0f;
+        value0 = simd_sum(value0);
+        value1 = simd_sum(value1);
+        value2 = simd_sum(value2);
+        value3 = simd_sum(value3);
+        if (simd_lane == 0) {
+            y[rowBaseIndex] = value0;
+            if (rowBaseIndex + 1 < params.rows) {
+                y[rowBaseIndex + 1] = value1;
+            }
+            if (rowBaseIndex + 2 < params.rows) {
+                y[rowBaseIndex + 2] = value2;
+            }
+            if (rowBaseIndex + 3 < params.rows) {
+                y[rowBaseIndex + 3] = value3;
+            }
+        }
+    }
+}
+
+static inline ushort er_q4k_read_u16(device const uchar* ptr) {
+    return ushort(ptr[0]) | (ushort(ptr[1]) << 8);
+}
+
+static inline float er_q4k_llama_style_row_sum(
+    device const uchar* block,
+    thread const float* yl,
+    thread const float* yh,
+    float4 sumy,
+    short iq,
+    short ir
+) {
+    constexpr ushort kmask1 = 0x3f3f;
+    constexpr ushort kmask2 = 0x0f0f;
+    constexpr ushort kmask3 = 0xc0c0;
+
+    device const uchar* scales = block + 4;
+    ushort sc0 = er_q4k_read_u16(scales + 2 * uint(iq));
+    ushort sc2 = er_q4k_read_u16(scales + 2 * (uint(iq) + 2));
+    ushort sc4 = er_q4k_read_u16(scales + 2 * (uint(iq) + 4));
+
+    ushort sc16_0 = sc0 & kmask1;
+    ushort sc16_1 = sc2 & kmask1;
+    ushort sc16_2 = ((sc4 >> 0) & kmask2) | ((sc0 & kmask3) >> 2);
+    ushort sc16_3 = ((sc4 >> 4) & kmask2) | ((sc2 & kmask3) >> 2);
+
+    float sc8_0 = float(sc16_0 & 0x00ff);
+    float sc8_1 = float((sc16_0 >> 8) & 0x00ff);
+    float sc8_2 = float(sc16_1 & 0x00ff);
+    float sc8_3 = float((sc16_1 >> 8) & 0x00ff);
+    float sc8_4 = float(sc16_2 & 0x00ff);
+    float sc8_5 = float((sc16_2 >> 8) & 0x00ff);
+    float sc8_6 = float(sc16_3 & 0x00ff);
+    float sc8_7 = float((sc16_3 >> 8) & 0x00ff);
+
+    device const uchar* q1 = block + 16 + 2 * uint(16 * iq + 4 * ir);
+    device const uchar* q2 = q1 + 64;
+    device const half* dh = reinterpret_cast<device const half*>(block);
+
+    float4 acc1 = float4(0.0f);
+    float4 acc2 = float4(0.0f);
+    for (short i = 0; i < 4; ++i) {
+        ushort q1i = er_q4k_read_u16(q1 + 2 * uint(i));
+        ushort q2i = er_q4k_read_u16(q2 + 2 * uint(i));
+
+        acc1[0] += yl[2 * i] * float(q1i & 0x000f);
+        acc1[1] += yl[2 * i + 1] * float(q1i & 0x0f00);
+        acc1[2] += yl[2 * i + 8] * float(q1i & 0x00f0);
+        acc1[3] += yl[2 * i + 9] * float(q1i & 0xf000);
+        acc2[0] += yh[2 * i] * float(q2i & 0x000f);
+        acc2[1] += yh[2 * i + 1] * float(q2i & 0x0f00);
+        acc2[2] += yh[2 * i + 8] * float(q2i & 0x00f0);
+        acc2[3] += yh[2 * i + 9] * float(q2i & 0xf000);
+    }
+
+    return
+        float(dh[0]) * (
+            (acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8_0 +
+            (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8_1 * (1.0f / 16.0f) +
+            (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8_4 +
+            (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8_5 * (1.0f / 16.0f)
+        ) -
+        float(dh[1]) * (
+            sumy[0] * sc8_2 +
+            sumy[1] * sc8_3 +
+            sumy[2] * sc8_6 +
+            sumy[3] * sc8_7
+        );
+}
+
+kernel void q4_k_gemv_llama_style_f32(
+    device const uchar* weights [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant ERQ4KGEMVParams& params [[buffer(3)]],
+    uint tile [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    constexpr ushort kmask1 = 0x3f3f;
+    constexpr ushort kmask2 = 0x0f0f;
+    constexpr ushort kmask3 = 0xc0c0;
+    constexpr uint rowsPerSimdgroup = 2;
+    constexpr uint simdgroupsPerThreadgroup = 2;
+    constexpr uint rowsPerTile = rowsPerSimdgroup * simdgroupsPerThreadgroup;
+
+    uint firstRow = (tile * simdgroupsPerThreadgroup + simd_group) * rowsPerSimdgroup;
+    if (firstRow >= params.rows) {
+        return;
+    }
+
+    short ix = short(simd_lane / 8);  // 0...3
+    short it = short(simd_lane % 8);  // 0...7
+    short iq = it / 4;                // 0 or 1
+    short ir = it % 4;                // 0...3
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    for (uint blockIndex = uint(ix); blockIndex < params.blocksPerRow; blockIndex += 4) {
+        uint xBase = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + uint(64 * iq + 8 * ir);
+
+        float yl[16];
+        float yh[16];
+        float4 sumy = float4(0.0f);
+        for (short i = 0; i < 8; ++i) {
+            yl[i] = x[xBase + uint(i)];
+            yl[i + 8] = x[xBase + 32 + uint(i)];
+            yh[i] = x[xBase + 128 + uint(i)];
+            yh[i + 8] = x[xBase + 160 + uint(i)];
+            sumy[0] += yl[i];
+            sumy[1] += yl[i + 8];
+            sumy[2] += yh[i];
+            sumy[3] += yh[i + 8];
+        }
+
+        for (uint rowOffset = 0; rowOffset < rowsPerSimdgroup; ++rowOffset) {
+            uint row = firstRow + rowOffset;
+            if (row >= params.rows) {
+                continue;
+            }
+
+            device const uchar* block =
+                weights + (row * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+            device const uchar* scales = block + 4;
+            ushort sc0 = er_q4k_read_u16(scales + 2 * uint(iq));
+            ushort sc2 = er_q4k_read_u16(scales + 2 * (uint(iq) + 2));
+            ushort sc4 = er_q4k_read_u16(scales + 2 * (uint(iq) + 4));
+
+            ushort sc16_0 = sc0 & kmask1;
+            ushort sc16_1 = sc2 & kmask1;
+            ushort sc16_2 = ((sc4 >> 0) & kmask2) | ((sc0 & kmask3) >> 2);
+            ushort sc16_3 = ((sc4 >> 4) & kmask2) | ((sc2 & kmask3) >> 2);
+
+            float sc8_0 = float(sc16_0 & 0x00ff);
+            float sc8_1 = float((sc16_0 >> 8) & 0x00ff);
+            float sc8_2 = float(sc16_1 & 0x00ff);
+            float sc8_3 = float((sc16_1 >> 8) & 0x00ff);
+            float sc8_4 = float(sc16_2 & 0x00ff);
+            float sc8_5 = float((sc16_2 >> 8) & 0x00ff);
+            float sc8_6 = float(sc16_3 & 0x00ff);
+            float sc8_7 = float((sc16_3 >> 8) & 0x00ff);
+
+            device const uchar* q1 = block + 16 + 2 * uint(16 * iq + 4 * ir);
+            device const uchar* q2 = q1 + 64;
+            device const half* dh = reinterpret_cast<device const half*>(block);
+
+            float4 acc1 = float4(0.0f);
+            float4 acc2 = float4(0.0f);
+            for (short i = 0; i < 4; ++i) {
+                ushort q1i = er_q4k_read_u16(q1 + 2 * uint(i));
+                ushort q2i = er_q4k_read_u16(q2 + 2 * uint(i));
+
+                acc1[0] += yl[2 * i] * float(q1i & 0x000f);
+                acc1[1] += yl[2 * i + 1] * float(q1i & 0x0f00);
+                acc1[2] += yl[2 * i + 8] * float(q1i & 0x00f0);
+                acc1[3] += yl[2 * i + 9] * float(q1i & 0xf000);
+                acc2[0] += yh[2 * i] * float(q2i & 0x000f);
+                acc2[1] += yh[2 * i + 1] * float(q2i & 0x0f00);
+                acc2[2] += yh[2 * i + 8] * float(q2i & 0x00f0);
+                acc2[3] += yh[2 * i + 9] * float(q2i & 0xf000);
+            }
+
+            float rowSum =
+                float(dh[0]) * (
+                    (acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8_0 +
+                    (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8_1 * (1.0f / 16.0f) +
+                    (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8_4 +
+                    (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8_5 * (1.0f / 16.0f)
+                ) -
+                float(dh[1]) * (
+                    sumy[0] * sc8_2 +
+                    sumy[1] * sc8_3 +
+                    sumy[2] * sc8_6 +
+                    sumy[3] * sc8_7
+                );
+
+            if (rowOffset == 0) {
+                sum0 += rowSum;
+            } else {
+                sum1 += rowSum;
+            }
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+
+    if (simd_lane == 0) {
+        y[firstRow] = sum0;
+        if (firstRow + 1 < params.rows) {
+            y[firstRow + 1] = sum1;
+        }
+    }
+}
+
+kernel void q4_k_gemv_llama_style_dual_f32(
+    device const uchar* weightsA [[buffer(0)]],
+    device const uchar* weightsB [[buffer(1)]],
+    device const float* x [[buffer(2)]],
+    device float* yA [[buffer(3)]],
+    device float* yB [[buffer(4)]],
+    constant ERQ4KGEMVParams& params [[buffer(5)]],
+    uint tile [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    constexpr uint rowsPerSimdgroup = 2;
+    constexpr uint simdgroupsPerThreadgroup = 2;
+
+    uint firstRow = (tile * simdgroupsPerThreadgroup + simd_group) * rowsPerSimdgroup;
+    if (firstRow >= params.rows) {
+        return;
+    }
+
+    short ix = short(simd_lane / 8);
+    short it = short(simd_lane % 8);
+    short iq = it / 4;
+    short ir = it % 4;
+
+    float sumA0 = 0.0f;
+    float sumA1 = 0.0f;
+    float sumB0 = 0.0f;
+    float sumB1 = 0.0f;
+
+    for (uint blockIndex = uint(ix); blockIndex < params.blocksPerRow; blockIndex += 4) {
+        uint xBase = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + uint(64 * iq + 8 * ir);
+
+        float yl[16];
+        float yh[16];
+        float4 sumy = float4(0.0f);
+        for (short i = 0; i < 8; ++i) {
+            yl[i] = x[xBase + uint(i)];
+            yl[i + 8] = x[xBase + 32 + uint(i)];
+            yh[i] = x[xBase + 128 + uint(i)];
+            yh[i + 8] = x[xBase + 160 + uint(i)];
+            sumy[0] += yl[i];
+            sumy[1] += yl[i + 8];
+            sumy[2] += yh[i];
+            sumy[3] += yh[i + 8];
+        }
+
+        for (uint rowOffset = 0; rowOffset < rowsPerSimdgroup; ++rowOffset) {
+            uint row = firstRow + rowOffset;
+            if (row >= params.rows) {
+                continue;
+            }
+
+            device const uchar* blockA =
+                weightsA + (row * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+            device const uchar* blockB =
+                weightsB + (row * params.blocksPerRow + blockIndex) * Q4_K_M_BLOCK_BYTES;
+            float rowSumA = er_q4k_llama_style_row_sum(blockA, yl, yh, sumy, iq, ir);
+            float rowSumB = er_q4k_llama_style_row_sum(blockB, yl, yh, sumy, iq, ir);
+
+            if (rowOffset == 0) {
+                sumA0 += rowSumA;
+                sumB0 += rowSumB;
+            } else {
+                sumA1 += rowSumA;
+                sumB1 += rowSumB;
+            }
+        }
+    }
+
+    sumA0 = simd_sum(sumA0);
+    sumA1 = simd_sum(sumA1);
+    sumB0 = simd_sum(sumB0);
+    sumB1 = simd_sum(sumB1);
+
+    if (simd_lane == 0) {
+        yA[firstRow] = sumA0;
+        yB[firstRow] = sumB0;
+        if (firstRow + 1 < params.rows) {
+            yA[firstRow + 1] = sumA1;
+            yB[firstRow + 1] = sumB1;
         }
     }
 }
@@ -538,6 +1102,97 @@ kernel void q4_k_gemv_three_f32(
 
     if (simd_group == 0) {
         uint numSimdgroups = (Q4_K_M_GEMV_THREADS_PER_ROW + 31) / 32;
+        float value = simd_lane < numSimdgroups ? sharedSums[simd_lane] : 0.0f;
+        value = simd_sum(value);
+        if (simd_lane == 0) {
+            selectedOutput[selectedRow] = value;
+        }
+    }
+}
+
+kernel void q4_k_gemv_three_packed_f32(
+    device const uchar* weightsA [[buffer(0)]],
+    device const uchar* weightsB [[buffer(1)]],
+    device const uchar* weightsC [[buffer(2)]],
+    device const float* x [[buffer(3)]],
+    device float* yA [[buffer(4)]],
+    device float* yB [[buffer(5)]],
+    device float* yC [[buffer(6)]],
+    constant ERQ4KGEMV3Params& params [[buffer(7)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint totalRows = params.rowsA + params.rowsB + params.rowsC;
+    if (row >= totalRows) {
+        return;
+    }
+
+    device const uchar* selectedWeights = weightsA;
+    device float* selectedOutput = yA;
+    uint selectedRow = row;
+    if (row >= params.rowsA + params.rowsB) {
+        selectedWeights = weightsC;
+        selectedOutput = yC;
+        selectedRow = row - params.rowsA - params.rowsB;
+    } else if (row >= params.rowsA) {
+        selectedWeights = weightsB;
+        selectedOutput = yB;
+        selectedRow = row - params.rowsA;
+    }
+
+    float partial = 0.0f;
+    threadgroup float sharedScales[8];
+    threadgroup float sharedMins[8];
+    device const uchar* rowBase = selectedWeights + selectedRow * params.blocksPerRow * Q4_K_M_BLOCK_BYTES;
+
+    for (uint blockIndex = 0; blockIndex < params.blocksPerRow; ++blockIndex) {
+        device const uchar* block = rowBase + blockIndex * Q4_K_M_BLOCK_BYTES;
+
+        if (local_id < 4) {
+            device const half* masterScales = reinterpret_cast<device const half*>(block);
+            float d = float(masterScales[0]);
+            float dmin = float(masterScales[1]);
+            uchar scaleByte = block[4 + local_id];
+            uchar minByte = block[8 + local_id];
+            uchar highBits = block[12 + local_id];
+
+            sharedScales[local_id] = d * float(scaleByte & 0x3F);
+            sharedScales[local_id + 4] =
+                d * float((highBits & 0x0F) | (((scaleByte >> 6) & 0x03) << 4));
+            sharedMins[local_id] = dmin * float(minByte & 0x3F);
+            sharedMins[local_id + 4] =
+                dmin * float(((highBits >> 4) & 0x0F) | (((minByte >> 6) & 0x03) << 4));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint packedIndex = local_id;
+        if (packedIndex < 128) {
+            uint pair = packedIndex / 32;
+            uint index = packedIndex % 32;
+            uint lowSubBlock = pair * 2;
+            uint highSubBlock = lowSubBlock + 1;
+            uint byteIndex = 16 + pair * 32 + index;
+            uchar packed = block[byteIndex];
+            uint lowCol = blockIndex * Q4_K_M_WEIGHTS_PER_BLOCK + lowSubBlock * 32 + index;
+            uint highCol = lowCol + 32;
+            partial += (sharedScales[lowSubBlock] * float(packed & 0x0F) - sharedMins[lowSubBlock]) * x[lowCol];
+            partial += (sharedScales[highSubBlock] * float((packed >> 4) & 0x0F) - sharedMins[highSubBlock]) * x[highCol];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    partial = simd_sum(partial);
+
+    threadgroup float sharedSums[32];
+    if (simd_lane == 0) {
+        sharedSums[simd_group] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        uint numSimdgroups = (Q4_K_M_PACKED_GEMV_THREADS_PER_ROW + 31) / 32;
         float value = simd_lane < numSimdgroups ? sharedSums[simd_lane] : 0.0f;
         value = simd_sum(value);
         if (simd_lane == 0) {

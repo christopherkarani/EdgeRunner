@@ -1,6 +1,7 @@
 import Metal
 import Testing
 @testable import EdgeRunner
+@testable import EdgeRunnerMetal
 
 @Suite("Gemma4Scratch")
 struct Gemma4ScratchTests {
@@ -16,6 +17,8 @@ struct Gemma4ScratchTests {
 
         #expect(scratch.hiddenA.length == config.hiddenSize * f32)
         #expect(scratch.hiddenB.length == config.hiddenSize * f32)
+        #expect(scratch.chunkHiddenA.length == Gemma4Scratch.prefillChunkCapacity * config.hiddenSize * f32)
+        #expect(scratch.chunkHiddenB.length == Gemma4Scratch.prefillChunkCapacity * config.hiddenSize * f32)
         #expect(scratch.normed.length == config.hiddenSize * f32)
         #expect(scratch.attention.length == config.numAttentionHeads * config.globalHeadDim * f32)
         #expect(scratch.q.length == config.numAttentionHeads * config.globalHeadDim * f32)
@@ -31,6 +34,9 @@ struct Gemma4ScratchTests {
         #expect(scratch.pleActivated.length == config.perLayerDim * f32)
         #expect(scratch.pleProjection.length == config.hiddenSize * f32)
         #expect(scratch.logits.length == config.vocabSize * f32)
+        #expect(scratch.top1PartialValues.length == GEMVKernel.q6KTop1PartialCount(rows: config.vocabSize) * f32)
+        #expect(scratch.top1PartialIndices.length == GEMVKernel.q6KTop1PartialCount(rows: config.vocabSize) * MemoryLayout<UInt32>.stride)
+        #expect(scratch.top1Token.length == MemoryLayout<UInt32>.stride)
     }
 
     @Test("Swaps hidden buffers without reallocating")
@@ -66,6 +72,26 @@ struct Gemma4ScratchTests {
         #expect(actual.count == values.count)
         for index in actual.indices {
             #expect(actual[index] == values[index])
+        }
+    }
+
+    @Test("Copies one hidden vector from a batched hidden array")
+    func copiesHiddenSliceFromBatch() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("Metal device unavailable")
+            return
+        }
+        let config = try Gemma4ModelConfig(metadata: Gemma4ModelConfigTests.makeReferenceMetadata())
+        let scratch = try Gemma4Scratch(device: device, config: config)
+        let first = (0..<config.hiddenSize).map { Float($0 % 17) }
+        let second = (0..<config.hiddenSize).map { Float(($0 % 23) + 100) }
+
+        try scratch.copyHiddenBatch([first, second].flatMap { $0 }, tokenOffset: 1)
+        let actual = try scratch.readHidden()
+
+        #expect(actual.count == second.count)
+        for index in second.indices {
+            #expect(actual[index] == second[index])
         }
     }
 
